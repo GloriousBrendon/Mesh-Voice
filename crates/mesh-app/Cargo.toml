@@ -1,0 +1,17 @@
+[package]
+name = "mesh-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6.0.0"
+iced = { version = "0.14.0", features = ["tokio", "image", "canvas"] }
+mesh-core = { version = "0.1.0", path = "../mesh-core" }
+once_cell = "1.21.4"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
+toml = "1.1.2"
+tracing = { version = "0.1.44", default-features = false }
+tracing-subscriber = { version = "0.3.23", default-features = false }

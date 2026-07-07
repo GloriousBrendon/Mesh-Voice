@@ -1,0 +1,17 @@
+# Mesh theme — copy to your config dir and edit to match your rice:
+#   Linux:   ~/.config/mesh/theme.toml
+#   Windows: %APPDATA%\mesh\theme.toml
+#
+# All values are hex colors. If the file is missing or invalid,
+# Mesh falls back to Catppuccin Mocha.
+
+background  = "#1e1e2e"
+surface     = "#181825"
+surface_alt = "#313244"
+text        = "#cdd6f4"
+text_muted  = "#a6adc8"
+accent      = "#89b4fa"
+accent_text = "#11111b"
+danger      = "#f38ba8"
+success     = "#a6e3a1"
+border      = "#45475a"

@@ -1,0 +1,21 @@
+[package]
+name = "mesh-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+bytes = "1"
+cpal = "0.18"
+dirs = "6.0.0"
+futures-util = "0.3.32"
+matrix-sdk = { version = "0.18.0", features = ["e2e-encryption", "sqlite", "markdown"] }
+opus = "0.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "fs", "sync"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+url = "2.5.8"
+webrtc = "0.17"
