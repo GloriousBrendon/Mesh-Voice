@@ -223,6 +223,8 @@ enum Message {
     RecoveryKeyInput(String),
     RestoreBackup,
     BackupRestoreFinished(Result<(), String>),
+    /// Result of the automatic backup enable on login.
+    EnsureBackupFinished(Result<Option<String>, String>),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -263,11 +265,17 @@ fn enter_session(state: &mut App, client: Arc<MeshClient>) -> Task<Message> {
     state.screen = Screen::LoggedIn(Session::new(client.clone()));
     let rooms_client = client.clone();
     let profile_client = client.clone();
+    let backup_client = client.clone();
     Task::batch([
         Task::perform(async move { rooms_client.rooms().await }, Message::RoomsLoaded),
         Task::perform(
             async move { profile_client.my_profile().await },
             Message::ProfileLoaded,
+        ),
+        // Make sure key backup is on so keys persist going forward.
+        Task::perform(
+            async move { backup_client.ensure_secure_backup().await },
+            Message::EnsureBackupFinished,
         ),
         watch_updates(client),
     ])
@@ -707,6 +715,30 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::Tick => {
             // Advance the background animation (~15 fps).
             state.rain_time += 0.066;
+            Task::none()
+        }
+        Message::EnsureBackupFinished(result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                match result {
+                    Ok(Some(key)) => {
+                        // Backup was just enabled; surface the key to save.
+                        session.backup.status = Some(BackupStatus::Enabled);
+                        session.backup.new_key = Some(key);
+                        session.backup.message = Some(
+                            "Secure Backup was enabled automatically. Open Settings to view and save your recovery key."
+                                .to_string(),
+                        );
+                        session.status = Some(
+                            "Secure Backup enabled — open Settings to save your recovery key."
+                                .to_string(),
+                        );
+                    }
+                    Ok(None) => {
+                        session.backup.status = Some(BackupStatus::Enabled);
+                    }
+                    Err(err) => tracing::warn!("auto backup enable failed: {err}"),
+                }
+            }
             Task::none()
         }
         Message::CallActionFinished(result) => {

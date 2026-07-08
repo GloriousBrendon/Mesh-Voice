@@ -501,6 +501,20 @@ impl MeshClient {
         }
     }
 
+    /// Ensures Secure Backup is on so room keys are always backed up (and the
+    /// "no backup key" warnings stop). Waits briefly for the recovery state to
+    /// settle after login. Returns the recovery key if it had to enable it
+    /// (so the UI can offer to save it), or `None` if it was already enabled.
+    pub async fn ensure_secure_backup(&self) -> Result<Option<String>, String> {
+        use matrix_sdk::encryption::recovery::RecoveryState;
+        // Let initial sync populate the recovery/cross-signing state first.
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        match self.client.encryption().recovery().state() {
+            RecoveryState::Enabled => Ok(None),
+            _ => Ok(Some(self.enable_secure_backup().await?)),
+        }
+    }
+
     /// Restores room keys from the existing backup using the recovery key.
     pub async fn restore_secure_backup(&self, recovery_key: &str) -> Result<(), String> {
         self.client
