@@ -5,7 +5,8 @@ mod theme;
 
 use chrono::{DateTime, Local, TimeZone};
 use iced::widget::{
-    Space, button, column, container, responsive, row, scrollable, stack, text, text_input,
+    Space, button, column, container, pick_list, responsive, row, scrollable, stack, text,
+    text_input,
 };
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme};
 use mesh_core::{
@@ -103,7 +104,15 @@ struct Session {
     self_muted: bool,
     self_deafened: bool,
     backup: BackupUi,
+    /// Audio device pickers (each list has [`DEFAULT_DEVICE`] first).
+    input_devices: Vec<String>,
+    output_devices: Vec<String>,
+    selected_input: String,
+    selected_output: String,
 }
+
+/// Sentinel shown in the device pickers for "use the system default".
+const DEFAULT_DEVICE: &str = "(System default)";
 
 /// Secure Backup UI state, shown in settings.
 #[derive(Default)]
@@ -134,6 +143,10 @@ impl Session {
             self_muted: false,
             self_deafened: false,
             backup: BackupUi::default(),
+            input_devices: Vec::new(),
+            output_devices: Vec::new(),
+            selected_input: DEFAULT_DEVICE.to_string(),
+            selected_output: DEFAULT_DEVICE.to_string(),
         }
     }
 }
@@ -225,6 +238,8 @@ enum Message {
     BackupRestoreFinished(Result<(), String>),
     /// Result of the automatic backup enable on login.
     EnsureBackupFinished(Result<Option<String>, String>),
+    InputDeviceSelected(String),
+    OutputDeviceSelected(String),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -741,6 +756,20 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::InputDeviceSelected(value) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.selected_input = value;
+                apply_audio_devices(session);
+            }
+            Task::none()
+        }
+        Message::OutputDeviceSelected(value) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.selected_output = value;
+                apply_audio_devices(session);
+            }
+            Task::none()
+        }
         Message::CallActionFinished(result) => {
             if let Screen::LoggedIn(session) = &mut state.screen
                 && let Err(err) = result
@@ -755,6 +784,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 session.show_settings = !session.show_settings;
                 if session.show_settings {
                     session.backup.status = Some(session.client.backup_status());
+                    // Refresh the audio device lists (default sentinel first).
+                    session.input_devices = std::iter::once(DEFAULT_DEVICE.to_string())
+                        .chain(session.client.audio_input_devices())
+                        .collect();
+                    session.output_devices = std::iter::once(DEFAULT_DEVICE.to_string())
+                        .chain(session.client.audio_output_devices())
+                        .collect();
                 }
             }
             Task::none()
@@ -1518,6 +1554,50 @@ fn verification_banner<'a>(
         .into()
 }
 
+/// Pushes the current mic/speaker choice down into the call engine.
+fn apply_audio_devices(session: &Session) {
+    let input =
+        (session.selected_input != DEFAULT_DEVICE).then(|| session.selected_input.clone());
+    let output =
+        (session.selected_output != DEFAULT_DEVICE).then(|| session.selected_output.clone());
+    session.client.set_audio_devices(input, output);
+}
+
+/// Microphone / speaker pickers for the settings screen.
+fn audio_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<'a, Message> {
+    let mic = row![
+        text("Microphone").size(13).width(Length::Fixed(90.0)).color(palette.text()),
+        pick_list(
+            session.input_devices.clone(),
+            Some(session.selected_input.clone()),
+            Message::InputDeviceSelected,
+        )
+        .padding(6),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    let speaker = row![
+        text("Speaker").size(13).width(Length::Fixed(90.0)).color(palette.text()),
+        pick_list(
+            session.output_devices.clone(),
+            Some(session.selected_output.clone()),
+            Message::OutputDeviceSelected,
+        )
+        .padding(6),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    column![
+        text("Audio").size(14).color(palette.text_muted()),
+        mic,
+        speaker,
+    ]
+    .spacing(8)
+    .into()
+}
+
 fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let palette = &state.palette;
     let mut choices = column![].spacing(6);
@@ -1583,6 +1663,8 @@ fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Messag
         ))
         .size(12)
         .color(palette.text_muted()),
+        Space::new().height(8),
+        audio_view(session, palette),
         Space::new().height(8),
         backup_view(&session.backup, palette),
     ]
@@ -1676,6 +1758,11 @@ fn backup_view<'a>(backup: &'a BackupUi, palette: &'a theme::Palette) -> Element
 }
 
 fn main() -> iced::Result {
+    // WebRTC (DTLS) and matrix-sdk both pull rustls, and with two crypto
+    // providers in the tree rustls can't auto-pick one — install `ring`
+    // explicitly, or the DTLS handshake panics mid-call. Must run first.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt::init();
 
     iced::application(boot, update, view)

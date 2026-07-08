@@ -59,6 +59,9 @@ pub struct CallEngine {
     client: Client,
     active: Mutex<Option<ActiveCall>>,
     updates: StdMutex<Option<mpsc::UnboundedSender<MeshUpdate>>>,
+    /// Chosen mic / speaker (by name); `None` = system default.
+    input_device: StdMutex<Option<String>>,
+    output_device: StdMutex<Option<String>>,
 }
 
 struct ActiveCall {
@@ -87,7 +90,15 @@ impl CallEngine {
             client,
             active: Mutex::new(None),
             updates: StdMutex::new(None),
+            input_device: StdMutex::new(None),
+            output_device: StdMutex::new(None),
         })
+    }
+
+    /// Selects the mic / speaker used for future calls (`None` = default).
+    pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
+        *self.input_device.lock().unwrap() = input;
+        *self.output_device.lock().unwrap() = output;
     }
 
     pub fn set_update_sender(&self, tx: mpsc::UnboundedSender<MeshUpdate>) {
@@ -270,7 +281,8 @@ impl CallEngine {
         }));
 
         // Playback: remote track -> Opus decode -> shared buffer -> speaker.
-        let (playback, buffer) = audio::start_playback()?;
+        let output_device = self.output_device.lock().unwrap().clone();
+        let (playback, buffer) = audio::start_playback(output_device)?;
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let buffer = buffer.clone();
             let deafened = deafened.clone();
@@ -280,7 +292,8 @@ impl CallEngine {
         }));
 
         // Capture: mic -> Opus encode -> local track.
-        let (capture, mut frames) = audio::start_capture()?;
+        let input_device = self.input_device.lock().unwrap().clone();
+        let (capture, mut frames) = audio::start_capture(input_device)?;
         let track = track.clone();
         let capture_task = tokio::spawn(async move {
             let mut encoder = match opus::Encoder::new(

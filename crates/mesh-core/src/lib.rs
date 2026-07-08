@@ -473,6 +473,21 @@ impl MeshClient {
         self.call.set_muted(muted).await
     }
 
+    /// Available microphone device names.
+    pub fn audio_input_devices(&self) -> Vec<String> {
+        audio::input_device_names()
+    }
+
+    /// Available speaker device names.
+    pub fn audio_output_devices(&self) -> Vec<String> {
+        audio::output_device_names()
+    }
+
+    /// Selects the mic / speaker for future calls (`None` = system default).
+    pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
+        self.call.set_audio_devices(input, output);
+    }
+
     /// Deafens or undeafens: silences the remote audio (and mutes the mic too,
     /// as clients like Discord do).
     pub async fn set_call_deafened(&self, deafened: bool) {

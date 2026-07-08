@@ -3914,6 +3914,7 @@ dependencies = [
  "iced",
  "mesh-core",
  "once_cell",
+ "rustls",
  "serde",
  "tokio",
  "toml",

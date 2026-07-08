@@ -52,10 +52,59 @@ impl Drop for PlaybackHandle {
     }
 }
 
-/// Starts capturing the default input device, delivering 20 ms mono `i16`
-/// frames on the returned channel. Resamples/​downmixes the device's native
-/// config to 48 kHz mono so callers always get [`FRAME_SAMPLES`]-sized frames.
-pub fn start_capture() -> Result<(CaptureHandle, mpsc::UnboundedReceiver<Vec<i16>>), String> {
+/// Names of available input (microphone) devices.
+pub fn input_device_names() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|it| {
+            it.filter_map(|d| d.description().ok().map(|desc| desc.name().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Names of available output (speaker) devices.
+pub fn output_device_names() -> Vec<String> {
+    cpal::default_host()
+        .output_devices()
+        .map(|it| {
+            it.filter_map(|d| d.description().ok().map(|desc| desc.name().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Picks an input device by name, falling back to the system default.
+fn pick_input(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
+    if let Some(name) = name
+        && let Ok(mut devices) = host.input_devices()
+        && let Some(device) =
+            devices.find(|d| d.description().map(|desc| desc.name() == name).unwrap_or(false))
+    {
+        return Some(device);
+    }
+    host.default_input_device()
+}
+
+/// Picks an output device by name, falling back to the system default.
+fn pick_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
+    if let Some(name) = name
+        && let Ok(mut devices) = host.output_devices()
+        && let Some(device) =
+            devices.find(|d| d.description().map(|desc| desc.name() == name).unwrap_or(false))
+    {
+        return Some(device);
+    }
+    host.default_output_device()
+}
+
+/// Starts capturing the chosen input device (or the system default when
+/// `device_name` is `None`), delivering 20 ms mono `i16` frames on the
+/// returned channel. Resamples/​downmixes the device's native config to
+/// 48 kHz mono so callers always get [`FRAME_SAMPLES`]-sized frames.
+pub fn start_capture(
+    device_name: Option<String>,
+) -> Result<(CaptureHandle, mpsc::UnboundedReceiver<Vec<i16>>), String> {
     let (tx, rx) = mpsc::unbounded_channel::<Vec<i16>>();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
@@ -64,7 +113,7 @@ pub fn start_capture() -> Result<(CaptureHandle, mpsc::UnboundedReceiver<Vec<i16
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let thread = std::thread::spawn(move || {
         let host = cpal::default_host();
-        let Some(device) = host.default_input_device() else {
+        let Some(device) = pick_input(&host, device_name.as_deref()) else {
             let _ = ready_tx.send(Err("no input (microphone) device".into()));
             return;
         };
@@ -162,9 +211,12 @@ pub fn start_capture() -> Result<(CaptureHandle, mpsc::UnboundedReceiver<Vec<i16
     }
 }
 
-/// Starts playback on the default output device. Push decoded 48 kHz mono `i16`
-/// samples into the returned shared buffer; the output callback drains it.
-pub fn start_playback() -> Result<(PlaybackHandle, Arc<Mutex<VecDeque<i16>>>), String> {
+/// Starts playback on the chosen output device (or the system default when
+/// `device_name` is `None`). Push decoded 48 kHz mono `i16` samples into the
+/// returned shared buffer; the output callback drains it.
+pub fn start_playback(
+    device_name: Option<String>,
+) -> Result<(PlaybackHandle, Arc<Mutex<VecDeque<i16>>>), String> {
     let buffer: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
     let buffer_thread = buffer.clone();
     let stop = Arc::new(AtomicBool::new(false));
@@ -173,7 +225,7 @@ pub fn start_playback() -> Result<(PlaybackHandle, Arc<Mutex<VecDeque<i16>>>), S
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     let thread = std::thread::spawn(move || {
         let host = cpal::default_host();
-        let Some(device) = host.default_output_device() else {
+        let Some(device) = pick_output(&host, device_name.as_deref()) else {
             let _ = ready_tx.send(Err("no output (speaker) device".into()));
             return;
         };
