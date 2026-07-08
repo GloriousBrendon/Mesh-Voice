@@ -100,6 +100,21 @@ pub struct MyProfile {
     pub display_name: String,
 }
 
+/// State of Secure Backup (server-side room-key backup + recovery) for the
+/// account, so the UI can show the right controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupStatus {
+    /// Backup and recovery are set up and this session has the secrets.
+    Enabled,
+    /// No backup / secret storage configured.
+    Disabled,
+    /// A backup exists but this session is missing the recovery secrets —
+    /// the user should restore with their recovery key.
+    Incomplete,
+    /// Not determined yet (still syncing).
+    Unknown,
+}
+
 /// Push updates delivered on the channel returned by
 /// [`MeshClient::subscribe_updates`], driven by the background sync loop.
 #[derive(Debug, Clone)]
@@ -462,6 +477,38 @@ impl MeshClient {
     /// as clients like Discord do).
     pub async fn set_call_deafened(&self, deafened: bool) {
         self.call.set_deafened(deafened).await
+    }
+
+    /// Current Secure Backup state.
+    pub fn backup_status(&self) -> BackupStatus {
+        use matrix_sdk::encryption::recovery::RecoveryState;
+        match self.client.encryption().recovery().state() {
+            RecoveryState::Enabled => BackupStatus::Enabled,
+            RecoveryState::Disabled => BackupStatus::Disabled,
+            RecoveryState::Incomplete => BackupStatus::Incomplete,
+            RecoveryState::Unknown => BackupStatus::Unknown,
+        }
+    }
+
+    /// Sets up Secure Backup and continuous room-key upload, returning the
+    /// recovery key to show the user once. If a stale backup already exists
+    /// that we can't connect to, it is reset and a fresh key is minted.
+    pub async fn enable_secure_backup(&self) -> Result<String, String> {
+        let recovery = self.client.encryption().recovery();
+        match recovery.enable().await {
+            Ok(key) => Ok(key),
+            Err(_) => recovery.reset_key().await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Restores room keys from the existing backup using the recovery key.
+    pub async fn restore_secure_backup(&self, recovery_key: &str) -> Result<(), String> {
+        self.client
+            .encryption()
+            .recovery()
+            .recover_and_fix_backup(recovery_key.trim())
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

@@ -60,6 +60,10 @@ Working today:
 - E2EE device verification: incoming verification requests show a banner with
   accept/decline and the emoji SAS confirm flow. Verify Mesh from another
   client (e.g. Element) to unlock encrypted rooms.
+- Secure Backup (server-side key backup + recovery). The Settings screen shows
+  backup status, sets it up (and shows a recovery key to save once), and can
+  restore your message keys from an existing backup with that recovery key —
+  so keys survive across sessions instead of being lost.
 - In-app theme switcher with persisted choice.
 - Discord-style layout: three panes (rooms │ chat │ member list), a persistent
   bottom-left user panel (your avatar/name + mic-mute and deafen toggles),

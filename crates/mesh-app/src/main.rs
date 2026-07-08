@@ -9,8 +9,8 @@ use iced::widget::{
 };
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme};
 use mesh_core::{
-    MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId, RoomSummary, SasEmoji,
-    TimelineMessage,
+    BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
+    RoomSummary, SasEmoji, TimelineMessage,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,6 +102,19 @@ struct Session {
     my_profile: Option<MyProfile>,
     self_muted: bool,
     self_deafened: bool,
+    backup: BackupUi,
+}
+
+/// Secure Backup UI state, shown in settings.
+#[derive(Default)]
+struct BackupUi {
+    status: Option<BackupStatus>,
+    /// A freshly generated recovery key to show the user once.
+    new_key: Option<String>,
+    /// The recovery key the user is typing to restore.
+    key_input: String,
+    busy: bool,
+    message: Option<String>,
 }
 
 impl Session {
@@ -120,6 +133,7 @@ impl Session {
             my_profile: None,
             self_muted: false,
             self_deafened: false,
+            backup: BackupUi::default(),
         }
     }
 }
@@ -204,6 +218,11 @@ enum Message {
     CallActionFinished(Result<(), String>),
     /// Animation frame for the background.
     Tick,
+    SetupBackup,
+    BackupSetupFinished(Result<String, String>),
+    RecoveryKeyInput(String),
+    RestoreBackup,
+    BackupRestoreFinished(Result<(), String>),
 }
 
 fn boot() -> (App, Task<Message>) {
@@ -702,8 +721,84 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::ToggleSettings => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.show_settings = !session.show_settings;
+                if session.show_settings {
+                    session.backup.status = Some(session.client.backup_status());
+                }
             }
             Task::none()
+        }
+        Message::SetupBackup => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.backup.busy = true;
+            session.backup.message = Some("Setting up Secure Backup…".to_string());
+            let client = session.client.clone();
+            Task::perform(
+                async move { client.enable_secure_backup().await },
+                Message::BackupSetupFinished,
+            )
+        }
+        Message::BackupSetupFinished(result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.backup.busy = false;
+                match result {
+                    Ok(key) => {
+                        session.backup.new_key = Some(key);
+                        session.backup.message = Some(
+                            "Secure Backup enabled. Save the recovery key below — it will not be shown again."
+                                .to_string(),
+                        );
+                        session.backup.status = Some(session.client.backup_status());
+                    }
+                    Err(err) => session.backup.message = Some(format!("Setup failed: {err}")),
+                }
+            }
+            Task::none()
+        }
+        Message::RecoveryKeyInput(value) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.backup.key_input = value;
+            }
+            Task::none()
+        }
+        Message::RestoreBackup => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            let key = session.backup.key_input.trim().to_string();
+            if key.is_empty() {
+                return Task::none();
+            }
+            session.backup.busy = true;
+            session.backup.message = Some("Restoring from backup…".to_string());
+            let client = session.client.clone();
+            Task::perform(
+                async move { client.restore_secure_backup(&key).await },
+                Message::BackupRestoreFinished,
+            )
+        }
+        Message::BackupRestoreFinished(result) => {
+            let mut reload = Task::none();
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.backup.busy = false;
+                match result {
+                    Ok(()) => {
+                        session.backup.key_input.clear();
+                        session.backup.message = Some(
+                            "Restored from backup. Previously unreadable messages should decrypt shortly."
+                                .to_string(),
+                        );
+                        session.backup.status = Some(session.client.backup_status());
+                        // Reload the open room so newly-decryptable messages appear.
+                        if let Some(room_id) = session.selected_room.clone() {
+                            reload = load_timeline(session.client.clone(), room_id);
+                        }
+                    }
+                    Err(err) => session.backup.message = Some(format!("Restore failed: {err}")),
+                }
+            }
+            reload
         }
         Message::ThemeChosen(choice) => {
             state.palette = theme::palette_for_choice(&choice, &theme_path());
@@ -806,7 +901,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         let sidebar = sidebar_view(session, palette);
 
         let main_panel: Element<'_, Message> = if session.show_settings {
-            settings_view(state)
+            settings_view(session, state)
         } else {
             room_view(session, palette)
         };
@@ -1391,7 +1486,7 @@ fn verification_banner<'a>(
         .into()
 }
 
-fn settings_view(state: &App) -> Element<'_, Message> {
+fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let palette = &state.palette;
     let mut choices = column![].spacing(6);
 
@@ -1438,7 +1533,7 @@ fn settings_view(state: &App) -> Element<'_, Message> {
         );
     }
 
-    column![
+    let content = column![
         row![
             text("Settings").size(20).color(palette.text()),
             Space::new().width(Length::Fill),
@@ -1456,10 +1551,96 @@ fn settings_view(state: &App) -> Element<'_, Message> {
         ))
         .size(12)
         .color(palette.text_muted()),
+        Space::new().height(8),
+        backup_view(&session.backup, palette),
     ]
     .spacing(12)
     .padding(12)
-    .into()
+    .max_width(520);
+
+    scrollable(content).height(Length::Fill).into()
+}
+
+/// Secure Backup controls: status, set-up (shows the recovery key once), and
+/// restore-with-recovery-key to recover previously-undecryptable messages.
+fn backup_view<'a>(backup: &'a BackupUi, palette: &'a theme::Palette) -> Element<'a, Message> {
+    let status_text = match backup.status {
+        Some(BackupStatus::Enabled) => "Enabled — your message keys are backed up.",
+        Some(BackupStatus::Disabled) => {
+            "Not set up. Enabling it stops message keys from being lost across sessions."
+        }
+        Some(BackupStatus::Incomplete) => {
+            "A backup exists, but this device is missing the keys. Restore with your recovery key below."
+        }
+        Some(BackupStatus::Unknown) | None => "Checking backup status…",
+    };
+
+    let setup_label = if matches!(backup.status, Some(BackupStatus::Enabled)) {
+        "Reset Secure Backup"
+    } else {
+        "Set up Secure Backup"
+    };
+    let setup_btn: Element<'_, Message> = if backup.busy {
+        button(text("Working…").size(13)).padding(8).into()
+    } else {
+        button(text(setup_label).size(13))
+            .on_press(Message::SetupBackup)
+            .padding(8)
+            .into()
+    };
+
+    let mut col = column![
+        text("Secure Backup").size(14).color(palette.text_muted()),
+        text(status_text).size(13).color(palette.text()),
+        setup_btn,
+    ]
+    .spacing(8);
+
+    if let Some(key) = &backup.new_key {
+        let surface_alt = palette.surface_alt();
+        col = col.push(
+            text("Recovery key — write this down, it will not be shown again:")
+                .size(12)
+                .color(palette.danger()),
+        );
+        col = col.push(
+            container(text(key.clone()).size(15).color(palette.text()))
+                .padding(10)
+                .width(Length::Fill)
+                .style(move |_theme| container::Style {
+                    background: Some(surface_alt.into()),
+                    border: iced::border::rounded(6),
+                    ..container::Style::default()
+                }),
+        );
+    }
+
+    col = col.push(
+        text("Have a recovery key? Restore your message keys:")
+            .size(12)
+            .color(palette.text_muted()),
+    );
+    let mut restore_row = row![
+        text_input("Recovery key", &backup.key_input)
+            .on_input(Message::RecoveryKeyInput)
+            .on_submit(Message::RestoreBackup)
+            .padding(8),
+    ]
+    .spacing(8);
+    if !backup.busy {
+        restore_row = restore_row.push(
+            button(text("Restore").size(13))
+                .on_press(Message::RestoreBackup)
+                .padding(8),
+        );
+    }
+    col = col.push(restore_row);
+
+    if let Some(message) = &backup.message {
+        col = col.push(text(message.clone()).size(12).color(palette.accent()));
+    }
+
+    col.into()
 }
 
 fn main() -> iced::Result {
