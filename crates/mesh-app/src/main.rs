@@ -532,11 +532,24 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::RoomsLoaded(rooms) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
+                // An invite we just accepted: load it now that it's readable.
+                let joined_now = session.selected_room.as_ref().filter(|id| {
+                    is_invite(session, id) && rooms.iter().any(|r| &r.id == *id && !r.is_invite)
+                });
+                let reload = joined_now.map(|id| {
+                    Task::batch([
+                        load_timeline(session.client.clone(), id.clone()),
+                        load_members(session.client.clone(), id.clone()),
+                    ])
+                });
                 session.groups = group_by_space(&rooms);
                 if !session.groups.iter().any(|g| g.id() == session.active_space.as_ref()) {
                     session.active_space = None;
                 }
                 session.rooms = rooms;
+                if let Some(reload) = reload {
+                    return reload;
+                }
             }
             Task::none()
         }
@@ -550,6 +563,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             session.members.clear();
             session.status = None;
             session.show_settings = false;
+            // An invite can't be read until it's accepted (the server says 403).
+            if is_invite(session, &room_id) {
+                return Task::none();
+            }
             Task::batch([
                 load_timeline(session.client.clone(), room_id.clone()),
                 load_members(session.client.clone(), room_id),
@@ -629,6 +646,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     )];
                     if let Some(selected) = &session.selected_room
                         && ids.contains(selected)
+                        && !is_invite(session, selected)
                     {
                         tasks.push(load_timeline(session.client.clone(), selected.clone()));
                         tasks.push(load_members(session.client.clone(), selected.clone()));
@@ -1356,10 +1374,19 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
-            if let Some(dialog) = &mut session.add_friend {
-                dialog.note = result.err().map(|err| (format!("That didn't work: {err}"), true));
+            match &mut session.add_friend {
+                Some(dialog) => {
+                    dialog.note = result.err().map(|err| (format!("That didn't work: {err}"), true));
+                }
+                None => {
+                    session.status = result.err().map(|err| format!("That didn't work: {err}"));
+                }
             }
-            load_pending(session.client.clone())
+            let client = session.client.clone();
+            Task::batch([
+                load_pending(session.client.clone()),
+                Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
+            ])
         }
         Message::DiscordWarningSeen => {
             state.discord_warning_seen = true;
@@ -1648,6 +1675,46 @@ fn my_server(session: &Session) -> String {
         .unwrap_or_default()
 }
 
+fn is_invite(session: &Session, room_id: &OwnedRoomId) -> bool {
+    session.rooms.iter().any(|r| &r.id == room_id && r.is_invite)
+}
+
+/// "You're invited": accept or decline, in place of a room's content.
+fn invite_card<'a>(room: &RoomSummary, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let (fill, edge) = (p.panel_dim(), p.accent());
+    let what = if room.is_space { "space" } else if room.is_direct { "DM" } else { "room" };
+    container(
+        column![
+            ui::sans(format!("You're invited to {}", room.name), 15.0, Weight::Semibold, p.text_bright()),
+            text(format!("Accept to join this {what} and read it, or decline to drop the invite."))
+                .size(13)
+                .color(p.text_muted()),
+            row![
+                ui::primary_button(
+                    ui::sans("Accept", 13.0, Weight::Semibold, p.accent_text()),
+                    Some(Message::PendingAccept(room.id.clone())),
+                    p,
+                    l,
+                ),
+                button(text("Decline").size(13))
+                    .on_press(Message::PendingIgnore(room.id.clone()))
+                    .padding([6, 12])
+                    .style(flat_button_style(p)),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8),
+    )
+    .padding([12, 14])
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        border: iced::border::rounded(8).color(edge).width(1),
+        background: Some(fill.into()),
+        ..container::Style::default()
+    })
+    .into()
+}
+
 fn active_group(session: &Session) -> Option<&SpaceGroup> {
     session
         .groups
@@ -1920,7 +1987,7 @@ fn rail_tile<'a>(
     .into()
 }
 
-fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
     let group = active_group(session);
     let mut title = row![
         ui::sans(group.map_or("Home", |g| g.name()), 15.0, Weight::Semibold, p.text_bright())
@@ -1972,6 +2039,9 @@ fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
         }
     }
 
+    if let Some(space) = group.and_then(|g| g.space.as_ref()).filter(|s| s.is_invite) {
+        list = column![invite_card(space, p, l)].padding([10, 8]).push(list);
+    }
     column![
         header,
         ui::hline(p),
@@ -2001,7 +2071,9 @@ fn channel_row<'a>(
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
-    if unread {
+    if room.is_invite {
+        label = label.push(ui::mono("invite", 10.0, p.accent()));
+    } else if unread {
         label = label.push(ui::chip(room.unread_notifications.to_string(), p));
     }
     ui::row_button(label, Message::RoomSelected(room.id.clone()), selected, p, l)
@@ -2122,6 +2194,12 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
             )
             .into();
     };
+
+    if room.is_invite {
+        return col
+            .push(container(invite_card(room, p, l)).padding(16).height(Length::Fill))
+            .into();
+    }
 
     let me = session.my_profile.as_ref().map(|me| &me.user_id);
     col = col.push(

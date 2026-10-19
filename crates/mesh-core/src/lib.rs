@@ -74,6 +74,8 @@ pub struct RoomSummary {
     pub mentions: u64,
     /// An `m.space`; its rooms are in `children`.
     pub is_space: bool,
+    /// We're invited but haven't joined: accept or decline before reading.
+    pub is_invite: bool,
     /// For spaces: the rooms listed by its `m.space.child` events.
     pub children: Vec<OwnedRoomId>,
     /// Discord if a bridge says this room is a Discord portal.
@@ -268,6 +270,7 @@ impl MeshClient {
                 last_activity_ms: room.latest_event_timestamp().map(|ts| ts.0.into()),
                 mentions: room.num_unread_mentions(),
                 is_space,
+                is_invite: room.state() == matrix_sdk::RoomState::Invited,
                 children,
                 network: bridge::room_network(&room).await,
             });

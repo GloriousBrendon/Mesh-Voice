@@ -85,6 +85,7 @@ mod tests {
             last_activity_ms: None,
             mentions: 1,
             is_space: !children.is_empty(),
+            is_invite: false,
             children: children
                 .iter()
                 .map(|c| OwnedRoomId::try_from(format!("!{c}:x.org")).unwrap())
