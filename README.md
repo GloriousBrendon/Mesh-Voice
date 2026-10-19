@@ -51,6 +51,19 @@ running Discord web, for voice alongside a text-only Discord bridge. Or set
 `discord_voice_command = "…"` to have the button run a command instead (say, a
 script that shows or hides a voice window); it wins over the URL.
 
+### Discord voice inside Mesh
+
+Mesh can drive a hidden official Discord web client for voice
+(`crates/mesh-discord`): it connects to the client's DevTools socket
+(`discord_engine_socket` in `config.toml`, default
+`$XDG_RUNTIME_DIR/discord-engine.sock`), installs a small script in the page
+and reads Discord's own voice state. You get Discord voice channels (with who's
+talking) in the channel pane, a call button in bridged Discord DMs, a voice bar
+in the chat pane, and the user panel's mic / deafen / leave buttons acting on
+the Discord call. Set `discord_engine_command` to start that client when Mesh
+starts and it isn't running. The client itself (a browser behind a VPN) is set
+up outside Mesh; see design/DISCORD-NATIVE.md.
+
 ## Build & run
 
 ```sh

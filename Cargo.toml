@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mesh-core", "crates/mesh-app"]
+members = ["crates/mesh-core", "crates/mesh-discord", "crates/mesh-app"]
 
 [workspace.package]
 version = "0.1.0"

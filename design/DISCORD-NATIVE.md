@@ -82,3 +82,15 @@ silently in a call.
 
 Keep `mesh-core` Matrix-only (design rule): Discord-engine code goes in its
 own crate.
+
+## Progress
+
+- 2026-10-19: step A1 done. `mesh-discord` crate connects over the unix
+  socket, installs `agent.js` (finds the live webpack runtime, Discord's stores
+  and its `selectVoiceChannel` / `toggleSelfMute` / `call` actions), and streams
+  voice snapshots via a DevTools binding. Mesh shows voice channels, a DM call
+  button, a call bar and Discord mute/deafen/leave. Verified: connection,
+  snapshots and mute toggling against the live client. Not yet verified: an
+  actual call (needs a friend on the other end). Voice members show initials:
+  fetching their Discord avatars directly would bypass the VPN; route them
+  through the page's own fetch next.

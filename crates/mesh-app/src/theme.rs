@@ -343,6 +343,11 @@ pub struct Config {
     /// Command the 🎧 button runs instead (e.g. a script that shows a voice
     /// window); wins over `discord_voice_url`.
     pub discord_voice_command: Option<String>,
+    /// DevTools socket of the hidden Discord client that Mesh drives for
+    /// Discord voice (default: `$XDG_RUNTIME_DIR/discord-engine.sock`).
+    pub discord_engine_socket: Option<String>,
+    /// Command that starts that client when its socket isn't there yet.
+    pub discord_engine_command: Option<String>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
     pub density: Option<Density>,

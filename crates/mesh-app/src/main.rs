@@ -80,6 +80,12 @@ struct App {
     discord_warning_seen: bool,
     /// When the theme files were last (re)read, "HH:MM", for the Rice page.
     theme_reloaded: String,
+    /// Socket of the hidden Discord client (Discord voice), if configured.
+    discord_socket: Option<PathBuf>,
+    /// Handle to drive it, while connected.
+    discord: Option<mesh_discord::Engine>,
+    /// Its latest voice state.
+    discord_state: Option<mesh_discord::Snapshot>,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
     theme_files: Vec<PathBuf>,
     theme_stamps: Vec<Option<std::time::SystemTime>>,
@@ -332,6 +338,10 @@ enum Message {
     },
     ReactionDone(Result<(), String>),
     OpenSettings(SettingsPage),
+    Discord(mesh_discord::Event),
+    /// Join a Discord voice channel, or call a Discord DM.
+    DiscordJoin(String),
+    DiscordLeave,
     DensityChosen(theme::Density),
     ToggleExtra(Extra),
     /// Copy the generated theme.toml to the clipboard.
@@ -369,6 +379,14 @@ fn boot() -> (App, Task<Message>) {
     let iced_theme = palette.to_iced_theme();
     let theme_files = theme::watched_files(&theme_choice, &theme_path());
 
+    // Start the hidden Discord client (once) if it isn't running yet.
+    if let (Some(socket), Some(cmd)) = (discord_socket(&config), &config.discord_engine_command)
+        && !socket.exists()
+        && let Err(err) = run_command(cmd)
+    {
+        tracing::warn!("could not start the Discord engine ({cmd}): {err}");
+    }
+
     let (screen, task) = if MeshClient::has_saved_session(&data_dir()) {
         let task = Task::perform(
             async move {
@@ -395,6 +413,9 @@ fn boot() -> (App, Task<Message>) {
             extras: config.extras,
             discord_warning_seen: config.discord_warning_seen,
             theme_reloaded: Local::now().format("%H:%M").to_string(),
+            discord_socket: discord_socket(&config),
+            discord: None,
+            discord_state: None,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
             screen,
@@ -954,6 +975,47 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 async move { client.hangup().await },
                 Message::CallActionFinished,
             )
+        }
+        // In Discord voice, mute/deafen act on that call.
+        Message::ToggleMute if in_discord_voice(state) => {
+            if let Some(engine) = &state.discord {
+                engine.toggle_mute();
+            }
+            Task::none()
+        }
+        Message::ToggleDeafen if in_discord_voice(state) => {
+            if let Some(engine) = &state.discord {
+                engine.toggle_deaf();
+            }
+            Task::none()
+        }
+        Message::Discord(event) => {
+            match event {
+                mesh_discord::Event::Connected(engine) => state.discord = Some(engine),
+                mesh_discord::Event::Snapshot(snapshot) => state.discord_state = Some(snapshot),
+                mesh_discord::Event::Disconnected => {
+                    state.discord = None;
+                    state.discord_state = None;
+                }
+            }
+            Task::none()
+        }
+        Message::DiscordJoin(channel_id) => {
+            match &state.discord {
+                Some(engine) => engine.join(&channel_id),
+                None => {
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        session.status = Some("Discord voice isn't running (open it with the headphones button).".to_string());
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::DiscordLeave => {
+            if let Some(engine) = &state.discord {
+                engine.leave();
+            }
+            Task::none()
         }
         Message::ToggleMute => {
             let Screen::LoggedIn(session) = &mut state.screen else {
@@ -1515,6 +1577,10 @@ fn theme(state: &App) -> IcedTheme {
 
 fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
+        match &state.discord_socket {
+            Some(socket) => Subscription::run_with(socket.clone(), discord_events),
+            None => Subscription::none(),
+        },
         // Drive the animated background at ~15 fps (only while it's on).
         if state.extras.digital_rain {
             iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick)
@@ -1531,6 +1597,35 @@ fn subscription(state: &App) -> Subscription<Message> {
             _ => None,
         }),
     ])
+}
+
+/// Where Mesh finds the hidden Discord client: the config, else the
+/// launcher's default socket on Linux.
+fn discord_socket(config: &theme::Config) -> Option<PathBuf> {
+    config
+        .discord_engine_socket
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("discord-engine.sock")))
+}
+
+fn in_discord_voice(state: &App) -> bool {
+    state.discord_state.as_ref().is_some_and(|s| s.voice.connected())
+}
+
+/// Streams the hidden Discord client's events (reconnecting by itself).
+fn discord_events(socket: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let socket = socket.clone();
+    iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        use iced::futures::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(mesh_discord::run(socket, tx));
+        while let Some(event) = rx.recv().await {
+            if output.send(Message::Discord(event)).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
@@ -1640,7 +1735,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             let rail = rail_view(session, p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
-                tile(session, Pane::Channels, channel_pane(session, p, l), 248.0, p, l, x),
+                tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), p, l), 248.0, p, l, x),
                 tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l, x),
             ]
             .spacing(l.gaps_out)
@@ -1651,7 +1746,8 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             }
             panes.into()
         };
-        let shell = column![top_bar(session, p, l, x.translucent_panes), panes]
+        let engine = state.discord_socket.as_ref().map(|_| state.discord.is_some());
+        let shell = column![top_bar(session, engine, p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
         if let Some(dialog) = &session.add_friend {
@@ -1828,6 +1924,7 @@ fn room_label(room: &RoomSummary) -> String {
 
 fn top_bar<'a>(
     session: &'a Session,
+    discord_engine: Option<bool>,
     p: &theme::Palette,
     l: &theme::Layout,
     translucent: bool,
@@ -1862,10 +1959,14 @@ fn top_bar<'a>(
             p.proto_mx(),
             profile.user_id.server_name().to_string(),
             p,
+            true,
         ));
     }
     if session.rooms.iter().any(|r| r.network == Network::Discord) {
-        chips = chips.push(connection_chip("dc", p.proto_dc(), "bridge".to_string(), p));
+        chips = chips.push(connection_chip("dc", p.proto_dc(), "bridge".to_string(), p, true));
+    }
+    if let Some(up) = discord_engine {
+        chips = chips.push(connection_chip("dc", p.proto_dc(), "voice".to_string(), p, up));
     }
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
@@ -1923,10 +2024,11 @@ fn connection_chip<'a>(
     color: iced::Color,
     name: String,
     p: &theme::Palette,
+    up: bool,
 ) -> Element<'a, Message> {
     ui::outline_chip(
         row![
-            ui::swatch(p.success(), 7.0, 7.0, 3.5),
+            ui::swatch(if up { p.success() } else { p.text_muted() }, 7.0, 7.0, 3.5),
             ui::mono_bold(proto, 12.0, color),
             ui::mono(name, 12.0, p.text()),
         ]
@@ -2065,7 +2167,12 @@ fn rail_tile<'a>(
     .into()
 }
 
-fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn channel_pane<'a>(
+    session: &'a Session,
+    discord: Option<&'a mesh_discord::Snapshot>,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
     let group = active_group(session);
     let mut title = row![
         ui::sans(group.map_or("Home", |g| g.name()), 15.0, Weight::Semibold, p.text_bright())
@@ -2117,6 +2224,26 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         }
     }
 
+    // Discord voice channels, from the hidden client: this space's server,
+    // or (on Home) servers that aren't bridged as a space.
+    if let Some(discord) = discord {
+        let current = discord.voice.channel_id.as_deref();
+        let guild_of = |g: &SpaceGroup| g.rooms.iter().find_map(|r| r.bridged.as_ref()?.guild_id.clone());
+        match group.filter(|g| g.space.is_some()) {
+            Some(g) => {
+                if let Some(guild) = guild_of(g).and_then(|id| discord.guilds.iter().find(|x| x.id == id)) {
+                    list = list.push(voice_channels(None, guild, current, p, l));
+                }
+            }
+            None => {
+                let bridged: Vec<String> = session.groups.iter().filter_map(guild_of).collect();
+                for guild in discord.guilds.iter().filter(|x| !bridged.contains(&x.id)) {
+                    list = list.push(voice_channels(Some(&guild.name), guild, current, p, l));
+                }
+            }
+        }
+    }
+
     if let Some(space) = group.and_then(|g| g.space.as_ref()).filter(|s| s.is_invite) {
         list = column![invite_card(space, p, l)].padding([10, 8]).push(list);
     }
@@ -2125,9 +2252,61 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         ui::hline(p),
         scrollable(list).height(Length::Fill),
         ui::hline(p),
-        user_panel(session, p, l),
+        user_panel(session, discord.map(|d| &d.voice), p, l),
     ]
     .into()
+}
+
+/// A server's voice channels: click to join; who's in each, lit while talking.
+fn voice_channels<'a>(
+    label: Option<&str>,
+    guild: &'a mesh_discord::Guild,
+    current: Option<&str>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let mut col = column![ui::section(&format!("voice{}", label.map(|n| format!(" · {n}")).unwrap_or_default()), p)].spacing(2);
+    if guild.voice_channels.is_empty() {
+        return col.into();
+    }
+    for channel in &guild.voice_channels {
+        let here = current == Some(channel.id.as_str());
+        let color = if here { p.success() } else { p.text() };
+        let mut line = row![
+            ui::icon(ui::Icon::Voice, 15.0, color),
+            ui::sans(&channel.name, 14.0, if here { Weight::Semibold } else { Weight::Normal }, color).width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if here {
+            line = line.push(ui::mono("connected", 10.0, p.success()));
+        }
+        col = col.push(ui::row_button(line, Message::DiscordJoin(channel.id.clone()), here, p, l));
+        for member in &channel.members {
+            col = col.push(container(voice_member(member, 22.0, p)).padding(iced::Padding { left: 30.0, ..iced::Padding::ZERO }));
+        }
+    }
+    col.into()
+}
+
+/// Someone in a Discord call: avatar (ringed while talking), name, mute/deaf.
+fn voice_member<'a>(member: &'a mesh_discord::Member, size: f32, p: &theme::Palette) -> Element<'a, Message> {
+    let ring = if member.speaking { p.success() } else { iced::Color::TRANSPARENT };
+    let face = container(ui::avatar(&member.name, None, size, p.proto_dc(), p, None))
+        .padding(2)
+        .style(move |_| container::Style {
+            border: iced::border::rounded(size).color(ring).width(2),
+            ..container::Style::default()
+        });
+    let mut line = row![face, text(&member.name).size(13).color(p.text()).width(Length::Fill)]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+    if member.deaf {
+        line = line.push(ui::icon(ui::Icon::HeadphoneOff, 13.0, p.danger()));
+    } else if member.mute {
+        line = line.push(ui::icon(ui::Icon::MicOff, 13.0, p.danger()));
+    }
+    line.into()
 }
 
 /// A channel row. Active: `surface_alt` fill and an accent bar; unread:
@@ -2165,35 +2344,49 @@ fn channel_row<'a>(
 
 /// The user panel pinned under the channel list: you, mic, deafen, settings
 /// (and hang up while in a call).
-fn user_panel<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn user_panel<'a>(
+    session: &'a Session,
+    discord: Option<&mesh_discord::Voice>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
     let (name, mxid) = session
         .my_profile
         .as_ref()
         .map(|me| (me.display_name.clone(), me.user_id.to_string()))
         .unwrap_or_else(|| ("…".to_string(), String::new()));
-    let sub = match &session.call {
-        Some(call) => ui::mono(call.state.label(), 10.0, p.accent()),
-        None => ui::mono(mxid, 10.0, p.text_muted()),
+    // In Discord voice, the buttons drive that call; otherwise Matrix calls.
+    let discord = discord.filter(|v| v.connected());
+    let (muted, deafened) = match discord {
+        Some(v) => (v.self_mute, v.self_deaf),
+        None => (session.self_muted, session.self_deafened),
+    };
+    let sub = match (discord, &session.call) {
+        (Some(v), _) => ui::mono(format!("dc voice · {}", v.channel_name.as_deref().unwrap_or("call")), 10.0, p.success()),
+        (None, Some(call)) => ui::mono(call.state.label(), 10.0, p.accent()),
+        (None, None) => ui::mono(mxid, 10.0, p.text_muted()),
     };
 
     let mut controls = row![
         ui::icon_button(
-            if session.self_muted { ui::Icon::MicOff } else { ui::Icon::Mic },
+            if muted { ui::Icon::MicOff } else { ui::Icon::Mic },
             Some(Message::ToggleMute),
-            session.self_muted,
+            muted,
             p,
             l,
         ),
         ui::icon_button(
-            if session.self_deafened { ui::Icon::HeadphoneOff } else { ui::Icon::Headphones },
+            if deafened { ui::Icon::HeadphoneOff } else { ui::Icon::Headphones },
             Some(Message::ToggleDeafen),
-            session.self_deafened,
+            deafened,
             p,
             l,
         ),
     ]
     .spacing(2);
-    if session.call.is_some() {
+    if discord.is_some() {
+        controls = controls.push(ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l));
+    } else if session.call.is_some() {
         controls = controls.push(ui::icon_button(ui::Icon::PhoneOff, Some(Message::HangUp), true, p, l));
     }
     controls = controls.push(ui::icon_button(
@@ -2255,8 +2448,23 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
-        if session.call.is_none() {
-            header = header.push(ui::icon_button(ui::Icon::Phone, Some(Message::PlaceCall), false, p, l));
+        // Discord DMs call through the hidden Discord client; Matrix rooms
+        // use Mesh's own calls. Server channels have their voice channels instead.
+        let discord_voice = state.discord_state.as_ref().map(|d| &d.voice);
+        match room.bridged.as_ref() {
+            Some(ids) if ids.guild_id.is_none() => {
+                let in_this_call = discord_voice.and_then(|v| v.channel_id.as_deref()) == Some(ids.channel_id.as_str());
+                header = header.push(if in_this_call {
+                    ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l)
+                } else {
+                    ui::icon_button(ui::Icon::Phone, Some(Message::DiscordJoin(ids.channel_id.clone())), false, p, l)
+                });
+            }
+            Some(_) => {}
+            None if session.call.is_none() => {
+                header = header.push(ui::icon_button(ui::Icon::Phone, Some(Message::PlaceCall), false, p, l));
+            }
+            None => {}
         }
         let members_color = if session.show_members { p.text_bright() } else { p.text_muted() };
         header = header.push(
@@ -2270,6 +2478,9 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
 
     if let Some(call) = &session.call {
         col = col.push(container(call_bar(call, p)).padding([8, 16]));
+    }
+    if let Some(snapshot) = state.discord_state.as_ref().filter(|s| s.voice.connected()) {
+        col = col.push(container(discord_call_bar(&snapshot.voice, p, l)).padding([8, 16]));
     }
     if let Some(prompt) = &session.verification {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
@@ -2390,6 +2601,52 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Elem
         .height(Length::Fill)
         .width(Length::Fill)
         .into()
+}
+
+/// The Discord call you're in: where, who (lit while talking), mute, leave.
+fn discord_call_bar<'a>(voice: &'a mesh_discord::Voice, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let mut people = row![].spacing(10).align_y(iced::Alignment::Center);
+    for member in &voice.members {
+        people = people.push(voice_member(member, 26.0, p));
+    }
+    let status = if voice.connection.contains("CONNECTED") && !voice.connection.contains("DIS") {
+        p.success()
+    } else {
+        p.warning()
+    };
+    let (fill, edge) = (p.surface_alt(), p.border());
+    container(
+        column![
+            row![
+                ui::icon(ui::Icon::Voice, 17.0, status),
+                ui::mono_bold("dc", 12.0, p.proto_dc()),
+                ui::sans(voice.channel_name.as_deref().unwrap_or("call"), 14.0, Weight::Semibold, p.text_bright())
+                    .width(Length::Fill),
+                ui::icon_button(
+                    if voice.self_mute { ui::Icon::MicOff } else { ui::Icon::Mic },
+                    Some(Message::ToggleMute),
+                    voice.self_mute,
+                    p,
+                    l,
+                ),
+                ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+            scrollable(people).direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new().width(2).scroller_width(2),
+            )),
+        ]
+        .spacing(8),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Message> {
