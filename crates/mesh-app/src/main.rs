@@ -2,13 +2,15 @@
 
 mod rain;
 mod theme;
+mod ui;
 
 use chrono::{DateTime, Local, TimeZone};
+use iced::font::Weight;
 use iced::widget::{
-    Space, button, column, container, pick_list, responsive, row, scrollable, stack, text,
-    text_input,
+    Space, button, column, container, mouse_area, pick_list, responsive, row, scrollable, stack,
+    text, text_input,
 };
-use iced::{Element, Length, Subscription, Task, Theme as IcedTheme};
+use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
     RoomSummary, SasEmoji, TimelineMessage,
@@ -115,6 +117,18 @@ struct Session {
     selected_output: String,
     /// From config.toml; shows the 🎧 Discord voice button when set.
     discord_voice_url: Option<String>,
+    /// The pane with the accent border.
+    focused: Pane,
+    show_members: bool,
+}
+
+/// The tiled shell's panes, for focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Rail,
+    Channels,
+    Chat,
+    Members,
 }
 
 /// Sentinel shown in the device pickers for "use the system default".
@@ -154,6 +168,8 @@ impl Session {
             selected_input: DEFAULT_DEVICE.to_string(),
             selected_output: DEFAULT_DEVICE.to_string(),
             discord_voice_url: theme::load_discord_voice_url(&config_path()),
+            focused: Pane::Chat,
+            show_members: true,
         }
     }
 }
@@ -241,6 +257,10 @@ enum Message {
     Tick,
     /// Poll the theme files for changes.
     ThemeCheck,
+    FocusPane(Pane),
+    ToggleMembers,
+    /// Esc: close settings (and any open dialog).
+    Escape,
     SetupBackup,
     BackupSetupFinished(Result<String, String>),
     RecoveryKeyInput(String),
@@ -408,6 +428,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             session.selected_room = Some(room_id.clone());
+            session.focused = Pane::Chat;
             session.timeline.clear();
             session.members.clear();
             session.status = None;
@@ -902,6 +923,24 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             reload_theme(state);
             Task::none()
         }
+        Message::FocusPane(pane) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.focused = pane;
+            }
+            Task::none()
+        }
+        Message::ToggleMembers => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.show_members = !session.show_members;
+            }
+            Task::none()
+        }
+        Message::Escape => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.show_settings = false;
+            }
+            Task::none()
+        }
         Message::ThemeCheck => {
             if theme::stamps(&state.theme_files) != state.theme_stamps {
                 reload_theme(state);
@@ -946,14 +985,26 @@ fn subscription(_state: &App) -> Subscription<Message> {
         iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick),
         // Hot-reload the rice: an mtime poll is cheap and works everywhere.
         iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
+        // Global shortcuts work even while an input has focus.
+        iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => shortcut(key),
+            _ => None,
+        }),
     ])
+}
+
+fn shortcut(key: keyboard::Key) -> Option<Message> {
+    match key {
+        keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+        _ => None,
+    }
 }
 
 fn view(state: &App) -> Element<'_, Message> {
     let content = match &state.screen {
         Screen::Booting => center_text("Restoring session..."),
-        Screen::LoggedOut(form) => login_view(form, false),
-        Screen::LoggingIn(form) => login_view(form, true),
+        Screen::LoggedOut(form) => login_view(form, false, state),
+        Screen::LoggingIn(form) => login_view(form, true, state),
         Screen::LoggedIn(session) => session_view(session, state),
     };
 
@@ -974,11 +1025,16 @@ fn center_text(label: &str) -> Element<'_, Message> {
         .into()
 }
 
-fn login_view(form: &LoginForm, busy: bool) -> Element<'_, Message> {
+fn login_view<'a>(form: &'a LoginForm, busy: bool, state: &'a App) -> Element<'a, Message> {
+    let (p, l) = (&state.palette, &state.layout);
     let mut form_column = column![
-        text("Mesh").size(32),
-        text("A lightweight Matrix client").size(14),
-        Space::new().height(16),
+        row![
+            ui::mono_bold(">_", 28.0, p.accent()),
+            ui::mono_bold("mesh", 28.0, p.text_bright()),
+        ]
+        .spacing(10),
+        ui::mono("a lightweight matrix client", 12.0, p.text_muted()),
+        Space::new().height(12),
         text_input("Homeserver (e.g. https://matrix.org)", &form.homeserver)
             .on_input(Message::HomeserverChanged)
             .padding(10),
@@ -991,22 +1047,23 @@ fn login_view(form: &LoginForm, busy: bool) -> Element<'_, Message> {
             .on_submit(Message::LoginSubmitted)
             .padding(10),
     ]
-    .spacing(12)
-    .max_width(360);
+    .spacing(12);
 
     if let Some(error) = &form.error {
-        form_column = form_column.push(text(error.clone()).size(13));
+        form_column = form_column.push(text(error.clone()).size(13).color(p.danger()));
     }
 
-    let submit = if busy {
-        button(text("Logging in...")).padding(10)
+    let (label, msg) = if busy {
+        ("Logging in…", None)
     } else {
-        button(text("Log in")).on_press(Message::LoginSubmitted).padding(10)
+        ("Log in", Some(Message::LoginSubmitted))
     };
+    form_column = form_column.push(
+        ui::primary_button(ui::sans(label, 14.0, Weight::Semibold, p.accent_text()), msg, p, l)
+            .padding(10),
+    );
 
-    form_column = form_column.push(submit);
-
-    container(form_column)
+    container(ui::pane(form_column.padding(28), true, p, l, true).max_width(420))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1015,35 +1072,455 @@ fn login_view(form: &LoginForm, busy: bool) -> Element<'_, Message> {
 }
 
 fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
-    let palette = &state.palette;
-    // `responsive` gives us the available size so we can drop the member list on
-    // narrow windows — basic but keeps the chat usable when the window shrinks.
+    let (p, l) = (&state.palette, &state.layout);
+    // `responsive` gives us the window size, so the member pane can drop out
+    // on narrow windows and leave the chat usable.
     responsive(move |size| {
-        let sidebar = sidebar_view(session, palette);
-
-        let main_panel: Element<'_, Message> = if session.show_settings {
-            settings_view(session, state)
-        } else {
-            room_view(session, palette)
-        };
-
-        let main_area: Element<'_, Message> = if let Some(call) = &session.call {
-            column![
-                call_bar(call, palette),
-                container(main_panel).height(Length::Fill),
-            ]
-            .into()
-        } else {
-            main_panel
-        };
-
-        let mut panes = row![sidebar, container(main_area).width(Length::Fill)];
-        if !session.show_settings && session.selected_room.is_some() && size.width > 820.0 {
-            panes = panes.push(member_list_view(&session.members, palette));
+        let mut panes = row![
+            tile(session, Pane::Rail, rail_view(session, p, l), 64.0 + 2.0 * l.border_size, p, l),
+            tile(session, Pane::Channels, channel_pane(session, p, l), 248.0, p, l),
+            tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l),
+        ]
+        .spacing(l.gaps_out)
+        .height(Length::Fill);
+        if session.show_members
+            && !session.show_settings
+            && session.selected_room.is_some()
+            && size.width > 1100.0
+        {
+            panes = panes.push(tile(session, Pane::Members, member_pane(session, p), 236.0, p, l));
         }
-        panes.into()
+        column![top_bar(session, p, l), panes]
+            .spacing(l.gaps_out)
+            .padding(l.gaps_out)
+            .into()
     })
     .into()
+}
+
+/// One focusable pane of the tiled shell; `width` 0 fills the rest.
+fn tile<'a>(
+    session: &Session,
+    pane: Pane,
+    content: Element<'a, Message>,
+    width: f32,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let width = if width > 0.0 { Length::Fixed(width) } else { Length::Fill };
+    mouse_area(
+        ui::pane(content, session.focused == pane, p, l, true)
+            .width(width)
+            .height(Length::Fill),
+    )
+    .on_press(Message::FocusPane(pane))
+    .into()
+}
+
+fn selected_room(session: &Session) -> Option<&RoomSummary> {
+    session
+        .selected_room
+        .as_ref()
+        .and_then(|id| session.rooms.iter().find(|r| &r.id == id))
+}
+
+/// How a room is named in headers: `#name` for rooms, plain for DMs.
+fn room_label(room: &RoomSummary) -> String {
+    if room.is_direct {
+        room.name.clone()
+    } else {
+        format!("#{}", room.name)
+    }
+}
+
+fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let wordmark = row![
+        ui::mono_bold(">_", 14.0, p.accent()),
+        ui::mono_bold("mesh", 14.0, p.text_bright()),
+    ]
+    .spacing(8);
+
+    let mut crumb = row![ui::mono("home", 12.0, p.text_muted())]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+    if let Some(room) = selected_room(session) {
+        crumb = crumb
+            .push(ui::mono("/", 12.0, p.text_muted()))
+            .push(ui::mono(room_label(room), 12.0, p.text_bright()));
+    }
+
+    let mut chips = row![].spacing(6).align_y(iced::Alignment::Center);
+    if let Some(profile) = &session.my_profile {
+        chips = chips.push(connection_chip(
+            "mx",
+            p.proto_mx(),
+            profile.user_id.server_name().to_string(),
+            p,
+        ));
+    }
+
+    ui::pane(
+        row![wordmark, crumb, Space::new().width(Length::Fill), chips]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .padding([6, 10]),
+        false,
+        p,
+        l,
+        true,
+    )
+    .width(Length::Fill)
+    .into()
+}
+
+/// `● mx strange.lab`: a status dot, the network tag and a name.
+fn connection_chip<'a>(
+    proto: &'a str,
+    color: iced::Color,
+    name: String,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
+    ui::outline_chip(
+        row![
+            ui::swatch(p.success(), 7.0, 7.0, 3.5),
+            ui::mono_bold(proto, 12.0, color),
+            ui::mono(name, 12.0, p.text()),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+        p,
+    )
+}
+
+/// The space rail: Home, then (later) one tile per space, then "+".
+fn rail_view<'a>(_session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let home = rail_tile(text("⌂").size(20).color(p.text_bright()).into(), true, None, p, l);
+    let add = ui::not_yet(
+        rail_tile(text("+").size(18).color(p.text_muted()).into(), false, None, p, l),
+        "Joining or creating a space isn't supported yet.",
+        p,
+    );
+    column![home, ui::swatch(p.border(), 28.0, 2.0, 1.0), add]
+        .spacing(8)
+        .padding([10, 0])
+        .width(Length::Fill)
+        .align_x(iced::Alignment::Center)
+        .into()
+}
+
+/// A 44×44 rail tile; the active one gets a `surface_alt` fill and an accent ring.
+fn rail_tile<'a>(
+    content: Element<'a, Message>,
+    active: bool,
+    msg: Option<Message>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let fill = if active {
+        p.surface_alt()
+    } else {
+        theme::mix(p.surface(), p.surface_alt(), 0.4)
+    };
+    let ring = if active { p.accent() } else { p.border_ctrl() };
+    let radius = l.rounding;
+    button(
+        container(content)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .on_press_maybe(msg)
+    .width(44)
+    .height(44)
+    .padding(0)
+    .style(move |_, _| button::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(radius)
+            .color(ring)
+            .width(if active { 2 } else { 1 }),
+        ..button::Style::default()
+    })
+    .into()
+}
+
+fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let mut title = row![
+        ui::sans("Home", 15.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
+    ]
+    .align_y(iced::Alignment::Center);
+    if session.discord_voice_url.is_some() {
+        title = title.push(
+            iced::widget::tooltip(
+                ui::icon_button("🎧", Some(Message::OpenDiscordVoice), false, p, l),
+                container(text("Open Discord voice").size(12).color(p.text())).padding([4, 8]),
+                iced::widget::tooltip::Position::Bottom,
+            ),
+        );
+    }
+    let header = column![title, ui::mono("friends & direct messages", 11.0, p.text_muted())]
+        .spacing(4)
+        .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
+
+    let mut list = column![].spacing(2).padding([10, 8]);
+    let (directs, rooms): (Vec<_>, Vec<_>) = session.rooms.iter().partition(|r| r.is_direct);
+    for (label, group) in [("Direct messages", directs), ("Rooms", rooms)] {
+        if group.is_empty() {
+            continue;
+        }
+        list = list.push(ui::section(label, p));
+        for room in group {
+            let selected = session.selected_room.as_ref() == Some(&room.id);
+            list = list.push(channel_row(room, selected, p, l));
+        }
+    }
+
+    column![
+        header,
+        ui::hline(p),
+        scrollable(list).height(Length::Fill),
+        ui::hline(p),
+        user_panel(session, p, l),
+    ]
+    .into()
+}
+
+/// A channel row. Active: `surface_alt` fill and an accent bar; unread:
+/// bright, semibold, with a count chip.
+fn channel_row<'a>(
+    room: &'a RoomSummary,
+    selected: bool,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let unread = room.unread_notifications > 0;
+    let color = if selected || unread { p.text_bright() } else { p.text() };
+    let bar = if selected { p.accent() } else { iced::Color::TRANSPARENT };
+    let mut label = row![
+        ui::swatch(bar, 2.0, 18.0, 1.0),
+        ui::mono(if room.is_direct { "@" } else { "#" }, 13.0, p.text_muted()),
+        ui::sans(&room.name, 14.0, if unread { Weight::Semibold } else { Weight::Normal }, color)
+            .width(Length::Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if unread {
+        label = label.push(ui::chip(room.unread_notifications.to_string(), p));
+    }
+    ui::row_button(label, Message::RoomSelected(room.id.clone()), selected, p, l)
+        .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 })
+        .into()
+}
+
+/// The user panel pinned under the channel list: you, mic, deafen, settings
+/// (and hang up while in a call).
+fn user_panel<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let (name, mxid) = session
+        .my_profile
+        .as_ref()
+        .map(|me| (me.display_name.clone(), me.user_id.to_string()))
+        .unwrap_or_else(|| ("…".to_string(), String::new()));
+    let sub = match &session.call {
+        Some(call) => ui::mono(call.state.label(), 10.0, p.accent()),
+        None => ui::mono(mxid, 10.0, p.text_muted()),
+    };
+
+    let mut controls = row![
+        ui::icon_button(
+            if session.self_muted { "🔇" } else { "🎙" },
+            Some(Message::ToggleMute),
+            session.self_muted,
+            p,
+            l,
+        ),
+        ui::icon_button("🎧", Some(Message::ToggleDeafen), session.self_deafened, p, l),
+    ]
+    .spacing(2);
+    if session.call.is_some() {
+        controls = controls.push(ui::icon_button("📵", Some(Message::HangUp), true, p, l));
+    }
+    controls = controls.push(ui::icon_button(
+        "⚙",
+        Some(Message::ToggleSettings),
+        session.show_settings,
+        p,
+        l,
+    ));
+
+    let fill = p.panel_dim();
+    let radius = (l.rounding - l.border_size).max(0.0);
+    container(
+        row![
+            ui::avatar(&name, 34.0, p.accent(), p, Some((p.success(), fill))),
+            // Clipped so a long MXID can't run under the buttons.
+            container(
+                column![ui::sans(name, 13.0, Weight::Semibold, p.text_bright()), sub.wrapping(text::Wrapping::None)]
+                    .spacing(1),
+            )
+            .width(Length::Fill)
+            .clip(true),
+            controls,
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(10)
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(iced::border::bottom(radius)),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
+    let (p, l) = (&state.palette, &state.layout);
+    if session.show_settings {
+        return column![
+            container(ui::sans("Settings", 15.0, Weight::Semibold, p.text_bright()))
+                .padding([12, 16]),
+            ui::hline(p),
+            container(settings_view(session, state)).padding([12, 16]),
+        ]
+        .into();
+    }
+
+    let room = selected_room(session);
+    let mut col = column![];
+    if let Some(room) = room {
+        let topic = room
+            .topic
+            .as_deref()
+            .and_then(|t| t.lines().next())
+            .unwrap_or_default();
+        let mut header = row![
+            ui::mono(if room.is_direct { "@" } else { "#" }, 18.0, p.text_muted()),
+            ui::sans(&room.name, 15.0, Weight::Semibold, p.text_bright()),
+            text(topic).size(13).color(p.text_muted()).width(Length::Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        if session.call.is_none() {
+            header = header.push(ui::icon_button("📞", Some(Message::PlaceCall), false, p, l));
+        }
+        let members_color = if session.show_members { p.text_bright() } else { p.text_muted() };
+        header = header.push(
+            button(text("👥").size(15).color(members_color))
+                .on_press(Message::ToggleMembers)
+                .padding(6)
+                .style(flat_button_style(p)),
+        );
+        col = col.push(container(header).padding([10, 16])).push(ui::hline(p));
+    }
+
+    if let Some(call) = &session.call {
+        col = col.push(container(call_bar(call, p)).padding([8, 16]));
+    }
+    if let Some(prompt) = &session.verification {
+        col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
+    }
+
+    let Some(room) = room else {
+        return col
+            .push(
+                container(
+                    text("Pick a room from the sidebar to start chatting.")
+                        .size(14)
+                        .color(p.text_muted()),
+                )
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
+            )
+            .into();
+    };
+
+    let me = session.my_profile.as_ref().map(|me| &me.user_id);
+    col = col.push(
+        scrollable(
+            container(timeline_view(&session.timeline, me, p))
+                .padding(iced::Padding { top: 16.0, right: 16.0, bottom: 8.0, left: 16.0 }),
+        )
+        .height(Length::Fill)
+        .anchor_bottom(),
+    );
+    if let Some(status) = &session.status {
+        col = col.push(container(text(status.clone()).size(13).color(p.danger())).padding([0, 16]));
+    }
+    col.push(composer(session, room, p, l)).into()
+}
+
+fn composer<'a>(
+    session: &'a Session,
+    room: &RoomSummary,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
+    let input = text_input(&format!("message {}", room_label(room)), &session.message_draft)
+        .on_input(Message::DraftChanged)
+        .on_submit(Message::SendMessage)
+        .padding(0)
+        .size(14)
+        .style(move |_, _| text_input::Style {
+            background: iced::Color::TRANSPARENT.into(),
+            border: iced::Border::default(),
+            icon: muted,
+            placeholder: muted,
+            value: bright,
+            selection,
+        });
+    let field = row![
+        ui::not_yet(
+            ui::icon_button("📎", None, false, p, l),
+            "Attachments aren't supported yet.",
+            p,
+        ),
+        input,
+        ui::primary_button(text("➤").size(14), Some(Message::SendMessage), p, l),
+    ]
+    .spacing(10)
+    .align_y(iced::Alignment::Center);
+
+    let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius() + 2.0);
+    column![
+        container(field)
+            .padding([6, 8])
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(radius).color(edge).width(1),
+                ..container::Style::default()
+            }),
+        row![
+            Space::new().width(Length::Fill),
+            ui::mono("Enter send · markdown on", 11.0, p.text_muted()),
+        ],
+    ]
+    .spacing(6)
+    .padding(iced::Padding { top: 8.0, right: 16.0, bottom: 14.0, left: 16.0 })
+    .into()
+}
+
+fn member_pane<'a>(session: &'a Session, p: &theme::Palette) -> Element<'a, Message> {
+    let mut list = column![ui::section(&format!("members — {}", session.members.len()), p)].spacing(2);
+    for member in &session.members {
+        let fill = if member.is_me { p.accent() } else { p.proto_mx() };
+        list = list.push(
+            container(
+                row![
+                    ui::avatar(&member.display_name, 32.0, fill, p, None),
+                    ui::sans(&member.display_name, 13.0, Weight::Medium, p.text_bright())
+                        .width(Length::Fill),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(6),
+        );
+    }
+    scrollable(container(list).padding([12, 10]))
+        .height(Length::Fill)
+        .width(Length::Fill)
+        .into()
 }
 
 fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Message> {
@@ -1066,7 +1543,7 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
     let border_color = palette.border();
     container(
         row![
-            text(title).size(15).color(palette.text()).width(Length::Fill),
+            text(title).size(15).color(palette.text_bright()).width(Length::Fill),
             controls,
         ]
         .align_y(iced::Alignment::Center),
@@ -1081,180 +1558,6 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
     .into()
 }
 
-/// A Discord-style default avatar: a colored circle with the first initial.
-fn avatar<'a>(name: &str, size: f32) -> Element<'a, Message> {
-    let initial = name
-        .chars()
-        .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string());
-    let color = avatar_color(name);
-    container(text(initial).size(size * 0.42).color(iced::Color::WHITE))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .center_x(Length::Fixed(size))
-        .center_y(Length::Fixed(size))
-        .style(move |_theme| container::Style {
-            background: Some(color.into()),
-            border: iced::border::rounded(size / 2.0),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-/// Same color at a given alpha — used to let the rain glow faintly through
-/// the side panels.
-fn translucent(color: iced::Color, alpha: f32) -> iced::Color {
-    iced::Color { a: alpha, ..color }
-}
-
-/// Deterministic avatar color from a name.
-fn avatar_color(name: &str) -> iced::Color {
-    const COLORS: [(u8, u8, u8); 6] = [
-        (88, 101, 242),
-        (87, 171, 111),
-        (240, 171, 64),
-        (237, 102, 105),
-        (155, 120, 205),
-        (64, 166, 214),
-    ];
-    let sum: usize = name.bytes().map(|b| b as usize).sum();
-    let (r, g, b) = COLORS[sum % COLORS.len()];
-    iced::Color::from_rgb8(r, g, b)
-}
-
-/// Right-hand member list panel.
-fn member_list_view<'a>(members: &'a [MemberInfo], palette: &'a theme::Palette) -> Element<'a, Message> {
-    let mut list = column![container(
-        text(format!("Members — {}", members.len()))
-            .size(12)
-            .color(palette.text_muted()),
-    )
-    .padding([8, 8])]
-    .spacing(2);
-
-    for member in members {
-        let name_color = if member.is_me {
-            palette.accent()
-        } else {
-            palette.text()
-        };
-        list = list.push(
-            container(
-                row![
-                    avatar(&member.display_name, 30.0),
-                    text(&member.display_name).size(14).color(name_color),
-                ]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-            )
-            .padding([4, 8]),
-        );
-    }
-
-    let surface = translucent(palette.surface(), 0.86);
-    container(scrollable(list).height(Length::Fill))
-        .width(Length::Fixed(200.0))
-        .height(Length::Fill)
-        .style(move |_theme| container::Style {
-            background: Some(surface.into()),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-/// The persistent bottom-left user panel: identity + mic/deafen controls,
-/// and a disconnect button while in a call.
-fn user_panel_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<'a, Message> {
-    let name = session
-        .my_profile
-        .as_ref()
-        .map(|p| p.display_name.clone())
-        .unwrap_or_else(|| "…".to_string());
-    let in_call = session.call.is_some();
-    let status = session
-        .call
-        .as_ref()
-        .map(|c| c.state.label())
-        .unwrap_or("Not in a call");
-
-    let mic_label = if session.self_muted { "🔇" } else { "🎙" };
-    let deaf_label = if session.self_deafened { "🔇" } else { "🎧" };
-
-    let mut controls = row![
-        panel_button(mic_label, Message::ToggleMute, session.self_muted, palette),
-        panel_button(deaf_label, Message::ToggleDeafen, session.self_deafened, palette),
-    ]
-    .spacing(6);
-    if in_call {
-        controls = controls.push(panel_button("📵", Message::HangUp, true, palette));
-    }
-
-    let identity = column![
-        text(name).size(14).color(palette.text()),
-        text(status).size(11).color(if in_call {
-            palette.accent()
-        } else {
-            palette.text_muted()
-        }),
-    ]
-    .spacing(1)
-    .width(Length::Fill);
-
-    let avatar_name = session
-        .my_profile
-        .as_ref()
-        .map(|p| p.display_name.as_str())
-        .unwrap_or("?");
-    let surface_alt = palette.surface_alt();
-    container(
-        row![avatar(avatar_name, 34.0), identity, controls]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-    )
-    .padding(8)
-    .width(Length::Fill)
-    .style(move |_theme| container::Style {
-        background: Some(surface_alt.into()),
-        border: iced::border::rounded(8),
-        ..container::Style::default()
-    })
-    .into()
-}
-
-/// A small icon button for the user panel; `active` tints it with the danger
-/// color (muted / deafened / disconnect).
-fn panel_button<'a>(
-    label: &'static str,
-    msg: Message,
-    active: bool,
-    palette: &theme::Palette,
-) -> Element<'a, Message> {
-    let text_color = if active {
-        palette.danger()
-    } else {
-        palette.text()
-    };
-    let surface = palette.surface();
-    button(text(label).size(15))
-        .on_press(msg)
-        .padding(6)
-        .style(move |_theme, status| {
-            let background = if matches!(status, button::Status::Hovered) {
-                Some(surface.into())
-            } else {
-                None
-            };
-            button::Style {
-                background,
-                text_color,
-                border: iced::border::rounded(6),
-                ..button::Style::default()
-            }
-        })
-        .into()
-}
-
 /// Opens `url` in the default browser.
 fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(windows)]
@@ -1266,120 +1569,6 @@ fn open_url(url: &str) -> std::io::Result<()> {
     #[cfg(not(windows))]
     let mut cmd = std::process::Command::new("xdg-open");
     cmd.arg(url).spawn().map(|_| ())
-}
-
-fn sidebar_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<'a, Message> {
-    let mut room_list = column![].spacing(2);
-
-    let (directs, rooms): (Vec<_>, Vec<_>) =
-        session.rooms.iter().partition(|room| room.is_direct);
-
-    for (label, group) in [("Direct messages", directs), ("Rooms", rooms)] {
-        if group.is_empty() {
-            continue;
-        }
-        room_list = room_list.push(
-            container(text(label).size(12).color(palette.text_muted()))
-                .padding([8, 8]),
-        );
-        for room in group {
-            let selected = session.selected_room.as_ref() == Some(&room.id);
-            room_list = room_list.push(room_button(room, selected, palette));
-        }
-    }
-
-    let mut header = row![
-        text("Mesh").size(18).color(palette.text()),
-        Space::new().width(Length::Fill),
-    ]
-    .align_y(iced::Alignment::Center);
-    if session.discord_voice_url.is_some() {
-        header = header.push(
-            button(text("🎧").size(14))
-                .on_press(Message::OpenDiscordVoice)
-                .padding(6)
-                .style(flat_button_style(palette)),
-        );
-    }
-    let header = header.push(
-        button(text("⚙").size(14))
-            .on_press(Message::ToggleSettings)
-            .padding(6)
-            .style(flat_button_style(palette)),
-    );
-
-    let sidebar = column![
-        header,
-        scrollable(room_list).height(Length::Fill),
-        user_panel_view(session, palette),
-        button(text("Log out").size(13))
-            .on_press(Message::LogOut)
-            .padding(8)
-            .style(flat_button_style(palette)),
-    ]
-    .spacing(8)
-    .width(Length::Fixed(240.0))
-    .padding(12);
-
-    let surface = translucent(palette.surface(), 0.86);
-    container(sidebar)
-        .height(Length::Fill)
-        .style(move |_theme| container::Style {
-            background: Some(surface.into()),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn room_button<'a>(
-    room: &'a RoomSummary,
-    selected: bool,
-    palette: &theme::Palette,
-) -> Element<'a, Message> {
-    let mut label = row![
-        text(&room.name).size(14).width(Length::Fill),
-    ]
-    .spacing(6)
-    .align_y(iced::Alignment::Center);
-
-    if room.unread_notifications > 0 {
-        let accent = palette.accent();
-        let accent_text = palette.accent_text();
-        label = label.push(
-            container(
-                text(room.unread_notifications.to_string())
-                    .size(11)
-                    .color(accent_text),
-            )
-            .padding([2, 6])
-            .style(move |_theme| container::Style {
-                background: Some(accent.into()),
-                border: iced::border::rounded(8),
-                ..container::Style::default()
-            }),
-        );
-    }
-
-    let text_color = palette.text();
-    let surface_alt = palette.surface_alt();
-    button(label)
-        .on_press(Message::RoomSelected(room.id.clone()))
-        .width(Length::Fill)
-        .padding(8)
-        .style(move |_theme, status| {
-            let background = if selected || matches!(status, button::Status::Hovered) {
-                Some(surface_alt.into())
-            } else {
-                None
-            };
-            button::Style {
-                background,
-                text_color,
-                border: iced::border::rounded(6),
-                ..button::Style::default()
-            }
-        })
-        .into()
 }
 
 /// A borderless button that just shows text in the palette's text color.
@@ -1403,83 +1592,15 @@ fn flat_button_style(
     }
 }
 
-fn room_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<'a, Message> {
-    let selected = session
-        .selected_room
-        .as_ref()
-        .and_then(|id| session.rooms.iter().find(|r| &r.id == id));
-
-    let header_label = selected
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| "Select a room".to_string());
-
-    let mut header = row![
-        text(header_label).size(20).color(palette.text()).width(Length::Fill),
-    ]
-    .align_y(iced::Alignment::Center);
-    if session.selected_room.is_some() && session.call.is_none() {
-        header = header.push(
-            button(text("📞 Call").size(13))
-                .on_press(Message::PlaceCall)
-                .padding(8),
-        );
-    }
-
-    let mut main_panel = column![header].spacing(12).padding(12);
-
-    if let Some(topic) = selected.and_then(|r| r.topic.as_ref()) {
-        main_panel = main_panel.push(
-            text(topic.clone()).size(12).color(palette.text_muted()),
-        );
-    }
-
-    if let Some(prompt) = &session.verification {
-        main_panel = main_panel.push(verification_banner(prompt, palette));
-    }
-
-    let body: Element<'_, Message> = if session.selected_room.is_some() {
-        scrollable(timeline_view(&session.timeline, palette))
-            .height(Length::Fill)
-            .anchor_bottom()
-            .into()
-    } else {
-        container(
-            text("Pick a room from the sidebar to start chatting.")
-                .size(14)
-                .color(palette.text_muted()),
-        )
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
-    };
-    main_panel = main_panel.push(body);
-
-    if let Some(status) = &session.status {
-        main_panel = main_panel.push(text(status.clone()).size(13).color(palette.danger()));
-    }
-
-    main_panel = main_panel.push(
-        row![
-            text_input("Message", &session.message_draft)
-                .on_input(Message::DraftChanged)
-                .on_submit(Message::SendMessage)
-                .padding(10),
-            button(text("Send")).on_press(Message::SendMessage).padding(10),
-        ]
-        .spacing(8),
-    );
-
-    main_panel.into()
-}
-
 fn timeline_view<'a>(
     timeline: &'a [TimelineMessage],
-    palette: &'a theme::Palette,
+    me: Option<&OwnedUserId>,
+    p: &theme::Palette,
 ) -> Element<'a, Message> {
-    let mut list = column![].spacing(3).padding([0, 8]);
+    let mut list = column![].spacing(4);
     let mut previous_day: Option<chrono::NaiveDate> = None;
     let mut previous_sender: Option<&OwnedUserId> = None;
+    let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
 
     for message in timeline {
         let local: Option<DateTime<Local>> =
@@ -1493,9 +1614,14 @@ fn timeline_view<'a>(
                 previous_sender = None;
                 day_changed = true;
                 list = list.push(
-                    container(text(day_label(day)).size(12).color(palette.text_muted()))
-                        .padding([6, 0])
-                        .center_x(Length::Fill),
+                    row![
+                        ui::hline(p),
+                        ui::mono(day_label(day).to_lowercase(), 11.0, p.text_muted()),
+                        ui::hline(p),
+                    ]
+                    .spacing(10)
+                    .padding([8, 0])
+                    .align_y(iced::Alignment::Center),
                 );
             }
         }
@@ -1503,33 +1629,32 @@ fn timeline_view<'a>(
         let time_label = local
             .map(|t| t.format("%H:%M").to_string())
             .unwrap_or_default();
+        let body = text(&message.body).size(14).color(body_color).width(Length::Fill);
 
-        // A new author (or a new day) starts a fresh group with avatar + header;
-        // consecutive messages from the same author are indented under it.
-        let new_group = day_changed || previous_sender != Some(&message.sender);
-        if new_group {
+        // A new author (or a new day) starts a group with avatar + header;
+        // their next messages sit under it.
+        if day_changed || previous_sender != Some(&message.sender) {
+            let fill = if me == Some(&message.sender) { p.accent() } else { p.proto_mx() };
             list = list.push(
                 row![
-                    avatar(&message.sender_name, 38.0),
+                    ui::avatar(&message.sender_name, 38.0, fill, p, None),
                     column![
                         row![
-                            text(&message.sender_name).size(13).color(palette.accent()),
-                            text(time_label).size(11).color(palette.text_muted()),
+                            ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright()),
+                            ui::mono(time_label, 11.0, p.text_muted()),
                         ]
                         .spacing(8)
                         .align_y(iced::Alignment::Center),
-                        text(&message.body).size(14).color(palette.text()),
+                        body,
                     ]
                     .spacing(2)
                     .width(Length::Fill),
                 ]
-                .spacing(10),
+                .spacing(12)
+                .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO }),
             );
         } else {
-            list = list.push(row![
-                Space::new().width(Length::Fixed(48.0)),
-                text(&message.body).size(14).color(palette.text()).width(Length::Fill),
-            ]);
+            list = list.push(row![Space::new().width(Length::Fixed(50.0)), body]);
         }
 
         previous_sender = Some(&message.sender);
@@ -1748,6 +1873,11 @@ fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Messag
         audio_view(session, palette),
         Space::new().height(8),
         backup_view(&session.backup, palette),
+        Space::new().height(8),
+        button(text("Log out").size(13))
+            .on_press(Message::LogOut)
+            .padding(8)
+            .style(flat_button_style(palette)),
     ]
     .spacing(12)
     .padding(12)
@@ -1847,7 +1977,10 @@ fn main() -> iced::Result {
 
     tracing_subscriber::fmt::init();
 
-    iced::application(boot, update, view)
+    let app = ui::FONTS
+        .into_iter()
+        .fold(iced::application(boot, update, view), |app, font| app.font(font));
+    app.default_font(ui::SANS)
         .theme(theme)
         .subscription(subscription)
         .title("Mesh")

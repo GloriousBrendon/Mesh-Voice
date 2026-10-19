@@ -79,10 +79,12 @@ Working today:
   restore your message keys from an existing backup with that recovery key —
   so keys survive across sessions instead of being lost.
 - In-app theme switcher with persisted choice.
-- Discord-style layout: three panes (rooms │ chat │ member list), a persistent
-  bottom-left user panel (your avatar/name + mic-mute and deafen toggles),
-  default initials avatars, and messages grouped by author. The member list
-  collapses on narrow windows.
+- Tiled layout like a Hyprland desktop: top bar, space rail, channel pane,
+  chat pane and member pane, separated by your `gaps_out` with your border
+  width and rounding. The focused pane gets the accent border. A user panel
+  (avatar, MXID, mic, deafen, settings) sits under the channel list. The member
+  pane toggles from the chat header and hides on narrow windows. `Esc` closes
+  settings. IBM Plex Sans and JetBrains Mono are bundled.
 - Animated "digital rain" background (an iced canvas), drawn in the palette's
   colors so it still follows your rice/theme. Side panels are slightly
   translucent so it glows faintly behind them.
