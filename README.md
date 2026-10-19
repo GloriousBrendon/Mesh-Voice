@@ -89,6 +89,12 @@ Working today:
   rooms outside any space) and one tile per space with its mention count;
   `Alt+1..9` switches space. `Ctrl+K` opens a jump palette over all rooms and
   spaces (type, then Enter or click).
+- Network tags: Mesh spots Discord rooms bridged by mautrix-discord (their
+  `m.bridge` state event) and Discord users (bridge ghosts, `@discord_<id>:…`),
+  and tags them `dc`; everything else is `mx`. Tags show on space tiles,
+  message authors (`mx · server`), members and the top bar's connection chips.
+  In bridged rooms the composer says the message goes to Discord via the
+  bridge. Mesh only ever talks Matrix; Discord is reached through the bridge.
 - Animated "digital rain" background (an iced canvas), drawn in the palette's
   colors so it still follows your rice/theme. Side panels are slightly
   translucent so it glows faintly behind them.

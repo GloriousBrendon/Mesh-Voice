@@ -1,6 +1,6 @@
 //! Groups the flat room list into Home plus one group per `m.space`.
 
-use crate::RoomSummary;
+use crate::{Network, RoomSummary};
 use matrix_sdk::ruma::OwnedRoomId;
 use std::collections::HashSet;
 
@@ -25,6 +25,20 @@ impl SpaceGroup {
 
     pub fn mentions(&self) -> u64 {
         self.rooms.iter().map(|r| r.mentions).sum()
+    }
+
+    /// A space is Discord if it, or any of its rooms, is bridged (guild
+    /// spaces don't always carry the bridge event themselves). Home is Matrix.
+    pub fn network(&self) -> Network {
+        match &self.space {
+            Some(space)
+                if space.network == Network::Discord
+                    || self.rooms.iter().any(|r| r.network == Network::Discord) =>
+            {
+                Network::Discord
+            }
+            _ => Network::Matrix,
+        }
     }
 }
 
@@ -75,6 +89,7 @@ mod tests {
                 .iter()
                 .map(|c| OwnedRoomId::try_from(format!("!{c}:x.org")).unwrap())
                 .collect(),
+            network: if name == "beta" { Network::Discord } else { Network::Matrix },
         }
     }
 
@@ -97,5 +112,8 @@ mod tests {
         assert_eq!(names(&groups[1]), ["Alpha", "beta"]);
         assert_eq!(groups[1].mentions(), 2);
         assert_eq!(names(&groups[2]), ["Alpha"]);
+        assert_eq!(groups[0].network(), Network::Matrix);
+        assert_eq!(groups[1].network(), Network::Discord);
+        assert_eq!(groups[2].network(), Network::Matrix);
     }
 }

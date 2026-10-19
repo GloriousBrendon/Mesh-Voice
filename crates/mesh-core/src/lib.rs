@@ -1,11 +1,13 @@
 //! Matrix client logic shared by every mesh-app frontend.
 
 mod audio;
+mod bridge;
 mod call;
 mod session;
 mod spaces;
 mod verification;
 
+pub use bridge::{Network, user_network};
 pub use call::CallEngine;
 pub use session::{Session, SessionStore};
 pub use spaces::{SpaceGroup, group_by_space};
@@ -74,12 +76,16 @@ pub struct RoomSummary {
     pub is_space: bool,
     /// For spaces: the rooms listed by its `m.space.child` events.
     pub children: Vec<OwnedRoomId>,
+    /// Discord if a bridge says this room is a Discord portal.
+    pub network: Network,
 }
 
 #[derive(Debug, Clone)]
 pub struct TimelineMessage {
     pub sender: OwnedUserId,
     pub sender_name: String,
+    /// Discord for bridge ghosts.
+    pub sender_network: Network,
     pub body: String,
     /// Origin server timestamp in milliseconds since the epoch.
     pub timestamp_ms: u64,
@@ -99,6 +105,7 @@ pub struct MemberInfo {
     pub display_name: String,
     /// True for the logged-in user.
     pub is_me: bool,
+    pub network: Network,
 }
 
 /// The logged-in user's own identity, for the user panel.
@@ -268,6 +275,7 @@ impl MeshClient {
                 mentions: room.num_unread_mentions(),
                 is_space,
                 children,
+                network: bridge::room_network(&room).await,
             });
         }
         summaries.sort_by(|a, b| {
@@ -296,6 +304,7 @@ impl MeshClient {
                     .map(str::to_owned)
                     .unwrap_or_else(|| m.user_id().localpart().to_owned()),
                 is_me: Some(m.user_id()) == me,
+                network: user_network(m.user_id()),
                 user_id: m.user_id().to_owned(),
             })
             .collect();
@@ -376,6 +385,7 @@ impl MeshClient {
 
             timeline.push(TimelineMessage {
                 sender_name: display_names[&sender].clone(),
+                sender_network: user_network(&sender),
                 sender,
                 body,
                 timestamp_ms: ts.0.into(),

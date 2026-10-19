@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
-    RoomSummary, SasEmoji, SpaceGroup, TimelineMessage, group_by_space,
+    Network, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage, group_by_space,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1265,6 +1265,22 @@ fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
     .into()
 }
 
+fn net_color(network: Network, p: &theme::Palette) -> iced::Color {
+    match network {
+        Network::Matrix => p.proto_mx(),
+        Network::Discord => p.proto_dc(),
+    }
+}
+
+/// Your homeserver's name, e.g. `strange.lab`.
+fn my_server(session: &Session) -> String {
+    session
+        .my_profile
+        .as_ref()
+        .map(|me| me.user_id.server_name().to_string())
+        .unwrap_or_default()
+}
+
 fn active_group(session: &Session) -> Option<&SpaceGroup> {
     session
         .groups
@@ -1350,6 +1366,9 @@ fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> E
             profile.user_id.server_name().to_string(),
             p,
         ));
+    }
+    if session.rooms.iter().any(|r| r.network == Network::Discord) {
+        chips = chips.push(connection_chip("dc", p.proto_dc(), "bridge".to_string(), p));
     }
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
@@ -1447,7 +1466,8 @@ fn rail_view<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) ->
             ]
             .into();
         }
-        let key = if index <= 9 { index.to_string() } else { String::new() };
+        let tag = group.network().tag();
+        let key = if index <= 9 { format!("{index}·{tag}") } else { tag.to_string() };
         tiles = tiles.push(
             iced::widget::tooltip(
                 column![
@@ -1531,8 +1551,17 @@ fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
         Some(g) => format!("{} channels", g.rooms.len()),
         None => "friends & direct messages".to_string(),
     };
-    let header = column![title, ui::mono(subtitle, 11.0, p.text_muted())]
-        .spacing(4)
+    let mut header = column![title, ui::mono(subtitle, 11.0, p.text_muted())].spacing(4);
+    if group.is_some_and(|g| g.network() == Network::Discord) {
+        header = header.push(
+            row![
+                ui::mono("dc", 11.0, p.proto_dc()),
+                ui::mono(format!("bridged via {}", my_server(session)), 11.0, p.text_muted()),
+            ]
+            .spacing(6),
+        );
+    }
+    let header = header
         .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
 
     let mut list = column![].spacing(2).padding([10, 8]);
@@ -1737,7 +1766,11 @@ fn composer<'a>(
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
-    let input = text_input(&format!("message {}", room_label(room)), &session.message_draft)
+    let placeholder = match room.network {
+        Network::Discord => format!("message {}  —  sends to discord via bridge", room_label(room)),
+        Network::Matrix => format!("message {}", room_label(room)),
+    };
+    let input = text_input(&placeholder, &session.message_draft)
         .on_input(Message::DraftChanged)
         .on_submit(Message::SendMessage)
         .padding(0)
@@ -1784,13 +1817,15 @@ fn composer<'a>(
 fn member_pane<'a>(session: &'a Session, p: &theme::Palette) -> Element<'a, Message> {
     let mut list = column![ui::section(&format!("members — {}", session.members.len()), p)].spacing(2);
     for member in &session.members {
-        let fill = if member.is_me { p.accent() } else { p.proto_mx() };
+        let net = net_color(member.network, p);
+        let fill = if member.is_me { p.accent() } else { net };
         list = list.push(
             container(
                 row![
                     ui::avatar(&member.display_name, 32.0, fill, p, None),
                     ui::sans(&member.display_name, 13.0, Weight::Medium, p.text_bright())
                         .width(Length::Fill),
+                    ui::mono(member.network.tag(), 10.0, net),
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -1915,13 +1950,19 @@ fn timeline_view<'a>(
         // A new author (or a new day) starts a group with avatar + header;
         // their next messages sit under it.
         if day_changed || previous_sender != Some(&message.sender) {
-            let fill = if me == Some(&message.sender) { p.accent() } else { p.proto_mx() };
+            let net = net_color(message.sender_network, p);
+            let fill = if me == Some(&message.sender) { p.accent() } else { net };
+            let tag = match message.sender_network {
+                Network::Discord => "dc".to_string(),
+                Network::Matrix => format!("mx · {}", message.sender.server_name()),
+            };
             list = list.push(
                 row![
                     ui::avatar(&message.sender_name, 38.0, fill, p, None),
                     column![
                         row![
                             ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright()),
+                            ui::tag(tag, net, p),
                             ui::mono(time_label, 11.0, p.text_muted()),
                         ]
                         .spacing(8)

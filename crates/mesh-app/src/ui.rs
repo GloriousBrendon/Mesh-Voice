@@ -93,7 +93,6 @@ pub fn swatch<'a>(color: Color, width: f32, height: f32, radius: f32) -> Element
         .into()
 }
 
-#[allow(dead_code)] // network tags land with bridge detection
 /// A small mono tag with a tinted outline, e.g. a network tag (`mx`, `dc`).
 pub fn tag<'a>(label: impl text::IntoFragment<'a>, color: Color, p: &Palette) -> Element<'a, Message> {
     let outline = mix(color, p.surface(), 0.6);
