@@ -74,7 +74,12 @@ struct App {
     theme_choice: String,
     iced_theme: IcedTheme,
     layout: theme::Layout,
+    layout_from_hyprland: bool,
     density: theme::Density,
+    extras: theme::Extras,
+    discord_warning_seen: bool,
+    /// When the theme files were last (re)read, "HH:MM", for the Rice page.
+    theme_reloaded: String,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
     theme_files: Vec<PathBuf>,
     theme_stamps: Vec<Option<std::time::SystemTime>>,
@@ -107,6 +112,7 @@ struct Session {
     status: Option<String>,
     verification: Option<VerificationPrompt>,
     show_settings: bool,
+    settings_page: SettingsPage,
     call: Option<CallUi>,
     members: Vec<MemberInfo>,
     my_profile: Option<MyProfile>,
@@ -140,6 +146,24 @@ const JUMP_INPUT: &str = "jump";
 
 /// How many matches the jump palette lists.
 const JUMP_RESULTS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Accounts,
+    Privacy,
+    Rice,
+    Keybinds,
+    Voice,
+}
+
+/// The Rice page's switches.
+#[derive(Debug, Clone, Copy)]
+enum Extra {
+    Rain,
+    Translucent,
+    Tags,
+    PlainText,
+}
 
 /// The tiled shell's panes, for focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +200,7 @@ impl Session {
             status: None,
             verification: None,
             show_settings: false,
+            settings_page: SettingsPage::Rice,
             call: None,
             members: Vec::new(),
             my_profile: None,
@@ -299,6 +324,12 @@ enum Message {
         mine: Option<OwnedEventId>,
     },
     ReactionDone(Result<(), String>),
+    OpenSettings(SettingsPage),
+    DensityChosen(theme::Density),
+    ToggleExtra(Extra),
+    /// Copy the generated theme.toml to the clipboard.
+    ExportTheme,
+    DiscordWarningSeen,
     /// Esc: close settings (and any open dialog).
     Escape,
     SetupBackup,
@@ -313,6 +344,7 @@ enum Message {
 }
 
 fn boot() -> (App, Task<Message>) {
+    let config = theme::load_config(&config_path());
     let theme_choice = theme::load_choice(&config_path());
     let palette = theme::palette_for_choice(&theme_choice, &theme_path());
     let iced_theme = palette.to_iced_theme();
@@ -339,7 +371,11 @@ fn boot() -> (App, Task<Message>) {
             theme_choice,
             iced_theme,
             layout: theme::layout_for_config(&config_path()),
-            density: theme::load_config(&config_path()).density.unwrap_or_default(),
+            layout_from_hyprland: config.layout_from_hyprland.unwrap_or(true),
+            density: config.density.unwrap_or_default(),
+            extras: config.extras,
+            discord_warning_seen: config.discord_warning_seen,
+            theme_reloaded: Local::now().format("%H:%M").to_string(),
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
             screen,
@@ -505,13 +541,16 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             ])
         }
         Message::TimelineLoaded(room_id, result) => {
+            let plain = state.extras.plain_text_mode;
             if let Screen::LoggedIn(session) = &mut state.screen
                 && session.selected_room.as_ref() == Some(&room_id)
             {
                 match result {
                     Ok(timeline) => {
                         session.timeline = timeline;
-                        return load_images(session);
+                        if !plain {
+                            return load_images(session);
+                        }
                     }
                     Err(err) => session.status = Some(format!("Failed to load messages: {err}")),
                 }
@@ -944,9 +983,24 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ToggleSettings => {
+            match &mut state.screen {
+                Screen::LoggedIn(session) if session.show_settings => {
+                    session.show_settings = false;
+                    Task::none()
+                }
+                Screen::LoggedIn(session) => {
+                    let page = session.settings_page;
+                    update(state, Message::OpenSettings(page))
+                }
+                _ => Task::none(),
+            }
+        }
+        Message::OpenSettings(page) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                session.show_settings = !session.show_settings;
-                if session.show_settings {
+                session.show_settings = true;
+                session.settings_page = page;
+                session.focused = Pane::Chat;
+                {
                     session.backup.status = Some(session.client.backup_status());
                     // Refresh the audio device lists (default sentinel first).
                     session.input_devices = std::iter::once(DEFAULT_DEVICE.to_string())
@@ -1125,6 +1179,47 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             update(state, Message::RoomSelected(room_id))
         }
+        Message::DensityChosen(density) => {
+            state.density = density;
+            persist(|c| c.density = Some(density));
+            Task::none()
+        }
+        Message::ToggleExtra(extra) => {
+            let x = &mut state.extras;
+            let flag = match extra {
+                Extra::Rain => &mut x.digital_rain,
+                Extra::Translucent => &mut x.translucent_panes,
+                Extra::Tags => &mut x.show_network_tags,
+                Extra::PlainText => &mut x.plain_text_mode,
+            };
+            *flag = !*flag;
+            let extras = *x;
+            persist(|c| c.extras = extras);
+            // Turning plain-text off: fetch the images it skipped.
+            match &mut state.screen {
+                Screen::LoggedIn(session) if !extras.plain_text_mode => load_images(session),
+                _ => Task::none(),
+            }
+        }
+        Message::ExportTheme => {
+            let toml = theme::export_toml(
+                &state.theme_choice,
+                &state.palette,
+                &state.layout,
+                state.layout_from_hyprland,
+                state.density,
+                &state.extras,
+            );
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.status = Some("theme.toml copied to the clipboard.".to_string());
+            }
+            iced::clipboard::write(toml)
+        }
+        Message::DiscordWarningSeen => {
+            state.discord_warning_seen = true;
+            persist(|c| c.discord_warning_seen = true);
+            Task::none()
+        }
         Message::ThemeCheck => {
             if theme::stamps(&state.theme_files) != state.theme_stamps {
                 reload_theme(state);
@@ -1150,11 +1245,23 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
     }
 }
 
+/// Saves a config change, logging (not surfacing) a failure: the setting
+/// still applies for this run.
+fn persist(change: impl FnOnce(&mut theme::Config)) {
+    if let Err(err) = theme::update_config(&config_path(), change) {
+        tracing::warn!("failed to save config: {err}");
+    }
+}
+
 /// Re-reads the palette and layout from the current theme choice's files.
 fn reload_theme(state: &mut App) {
     state.palette = theme::palette_for_choice(&state.theme_choice, &theme_path());
     state.iced_theme = state.palette.to_iced_theme();
     state.layout = theme::layout_for_config(&config_path());
+    state.layout_from_hyprland = theme::load_config(&config_path())
+        .layout_from_hyprland
+        .unwrap_or(true);
+    state.theme_reloaded = Local::now().format("%H:%M").to_string();
     state.theme_files = theme::watched_files(&state.theme_choice, &theme_path());
     state.theme_stamps = theme::stamps(&state.theme_files);
 }
@@ -1163,10 +1270,14 @@ fn theme(state: &App) -> IcedTheme {
     state.iced_theme.clone()
 }
 
-fn subscription(_state: &App) -> Subscription<Message> {
+fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
-        // Drive the animated background at ~15 fps.
-        iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick),
+        // Drive the animated background at ~15 fps (only while it's on).
+        if state.extras.digital_rain {
+            iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        },
         // Hot-reload the rice: an mtime poll is cheap and works everywhere.
         iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
         // Global shortcuts work even while an input has focus.
@@ -1211,11 +1322,11 @@ fn view(state: &App) -> Element<'_, Message> {
     };
 
     // The animated digital-rain background sits behind every screen.
-    stack![
-        rain::background(&state.palette, state.rain_time),
-        content,
-    ]
-    .into()
+    if state.extras.digital_rain {
+        stack![rain::background(&state.palette, state.rain_time), content].into()
+    } else {
+        content
+    }
 }
 
 fn center_text(label: &str) -> Element<'_, Message> {
@@ -1265,7 +1376,8 @@ fn login_view<'a>(form: &'a LoginForm, busy: bool, state: &'a App) -> Element<'a
             .padding(10),
     );
 
-    container(ui::pane(form_column.padding(28), true, p, l, true).max_width(420))
+    let translucent = state.extras.translucent_panes;
+    container(ui::pane(form_column.padding(28), true, p, l, translucent).max_width(420))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -1274,25 +1386,29 @@ fn login_view<'a>(form: &'a LoginForm, busy: bool, state: &'a App) -> Element<'a
 }
 
 fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
-    let (p, l) = (&state.palette, &state.layout);
-    // `responsive` gives us the window size, so the member pane can drop out
-    // on narrow windows and leave the chat usable.
+    let (p, l, x) = (&state.palette, &state.layout, &state.extras);
+    // `responsive` gives us the window size, so side panes can drop out on
+    // narrow windows and leave the chat usable.
     responsive(move |size| {
-        let mut panes = row![
-            tile(session, Pane::Rail, rail_view(session, p, l), 64.0 + 2.0 * l.border_size, p, l),
-            tile(session, Pane::Channels, channel_pane(session, p, l), 248.0, p, l),
-            tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l),
-        ]
-        .spacing(l.gaps_out)
-        .height(Length::Fill);
-        if session.show_members
-            && !session.show_settings
-            && session.selected_room.is_some()
-            && size.width > 1100.0
-        {
-            panes = panes.push(tile(session, Pane::Members, member_pane(session, p), 236.0, p, l));
-        }
-        let shell = column![top_bar(session, p, l), panes]
+        let wide = size.width > 1100.0;
+        let panes: Element<'_, Message> = if session.show_settings {
+            settings_shell(session, state, wide)
+        } else {
+            let rail = rail_view(session, p, l, x.show_network_tags);
+            let mut panes = row![
+                tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
+                tile(session, Pane::Channels, channel_pane(session, p, l), 248.0, p, l, x),
+                tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l, x),
+            ]
+            .spacing(l.gaps_out)
+            .height(Length::Fill);
+            if session.show_members && session.selected_room.is_some() && wide {
+                let members = member_pane(session, p, x.show_network_tags);
+                panes = panes.push(tile(session, Pane::Members, members, 236.0, p, l, x));
+            }
+            panes.into()
+        };
+        let shell = column![top_bar(session, p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
         if session.jump.is_some() {
@@ -1397,10 +1513,11 @@ fn tile<'a>(
     width: f32,
     p: &theme::Palette,
     l: &theme::Layout,
+    x: &theme::Extras,
 ) -> Element<'a, Message> {
     let width = if width > 0.0 { Length::Fixed(width) } else { Length::Fill };
     mouse_area(
-        ui::pane(content, session.focused == pane, p, l, true)
+        ui::pane(content, session.focused == pane, p, l, x.translucent_panes)
             .width(width)
             .height(Length::Fill),
     )
@@ -1424,7 +1541,12 @@ fn room_label(room: &RoomSummary) -> String {
     }
 }
 
-fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn top_bar<'a>(
+    session: &'a Session,
+    p: &theme::Palette,
+    l: &theme::Layout,
+    translucent: bool,
+) -> Element<'a, Message> {
     let wordmark = row![
         ui::mono_bold(">_", 14.0, p.accent()),
         ui::mono_bold("mesh", 14.0, p.text_bright()),
@@ -1491,7 +1613,7 @@ fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> E
         false,
         p,
         l,
-        true,
+        translucent,
     )
     .width(Length::Fill)
     .into()
@@ -1517,7 +1639,12 @@ fn connection_chip<'a>(
 }
 
 /// The space rail: Home, then (later) one tile per space, then "+".
-fn rail_view<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn rail_view<'a>(
+    session: &'a Session,
+    p: &theme::Palette,
+    l: &theme::Layout,
+    tags: bool,
+) -> Element<'a, Message> {
     let home = rail_tile(
         text("⌂").size(20).color(p.text_bright()).into(),
         session.active_space.is_none(),
@@ -1557,7 +1684,12 @@ fn rail_view<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) ->
             .into();
         }
         let tag = group.network().tag();
-        let key = if index <= 9 { format!("{index}·{tag}") } else { tag.to_string() };
+        let key = match (index <= 9, tags) {
+            (true, true) => format!("{index}·{tag}"),
+            (true, false) => index.to_string(),
+            (false, true) => tag.to_string(),
+            (false, false) => String::new(),
+        };
         tiles = tiles.push(
             iced::widget::tooltip(
                 column![
@@ -1774,16 +1906,6 @@ fn user_panel<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -
 
 fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let (p, l) = (&state.palette, &state.layout);
-    if session.show_settings {
-        return column![
-            container(ui::sans("Settings", 15.0, Weight::Semibold, p.text_bright()))
-                .padding([12, 16]),
-            ui::hline(p),
-            container(settings_view(session, state)).padding([12, 16]),
-        ]
-        .into();
-    }
-
     let room = selected_room(session);
     let mut col = column![];
     if let Some(room) = room {
@@ -1837,7 +1959,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let me = session.my_profile.as_ref().map(|me| &me.user_id);
     col = col.push(
         scrollable(
-            container(timeline_view(session, me, state.density, p))
+            container(timeline_view(session, me, state.density, &state.extras, p))
                 .padding(iced::Padding { top: 16.0, right: 16.0, bottom: 8.0, left: 16.0 }),
         )
         .height(Length::Fill)
@@ -1905,7 +2027,7 @@ fn composer<'a>(
     .into()
 }
 
-fn member_pane<'a>(session: &'a Session, p: &theme::Palette) -> Element<'a, Message> {
+fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Element<'a, Message> {
     let mut list = column![ui::section(&format!("members — {}", session.members.len()), p)].spacing(2);
     for member in &session.members {
         let net = net_color(member.network, p);
@@ -1916,7 +2038,7 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette) -> Element<'a, Mess
                     ui::avatar(&member.display_name, 32.0, fill, p, None),
                     ui::sans(&member.display_name, 13.0, Weight::Medium, p.text_bright())
                         .width(Length::Fill),
-                    ui::mono(member.network.tag(), 10.0, net),
+                    ui::mono(if tags { member.network.tag() } else { "" }, 10.0, net),
                 ]
                 .spacing(10)
                 .align_y(iced::Alignment::Center),
@@ -2003,8 +2125,10 @@ fn timeline_view<'a>(
     session: &'a Session,
     me: Option<&OwnedUserId>,
     density: theme::Density,
+    x: &theme::Extras,
     p: &theme::Palette,
 ) -> Element<'a, Message> {
+    let tags = x.show_network_tags;
     let mut list = column![].spacing(if density == theme::Density::Cozy { 4 } else { 2 });
     let mut previous_day: Option<chrono::NaiveDate> = None;
     let mut previous_sender: Option<&OwnedUserId> = None;
@@ -2045,7 +2169,7 @@ fn timeline_view<'a>(
                     Space::new().width(indent),
                     ui::mono("→", 11.0, net),
                     ui::mono(&message.body, 11.0, p.text_muted()),
-                    ui::mono(message.sender_network.tag(), 11.0, net),
+                    ui::mono(if tags { message.sender_network.tag() } else { "" }, 11.0, net),
                 ]
                 .spacing(8)
                 .padding([4, 0]),
@@ -2054,7 +2178,8 @@ fn timeline_view<'a>(
             continue;
         }
 
-        let content = message_content(message, session, density == theme::Density::Irc, p);
+        let irc = density == theme::Density::Irc;
+        let content = message_content(message, session, irc, x.plain_text_mode, p);
         let name_color = if is_me { p.accent() } else { p.text_bright() };
         list = list.push(match density {
             theme::Density::Cozy => {
@@ -2066,17 +2191,17 @@ fn timeline_view<'a>(
                         Network::Matrix => format!("mx · {}", message.sender.server_name()),
                     };
                     let fill = if is_me { p.accent() } else { net };
+                    let mut header = row![ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright())]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center);
+                    if tags {
+                        header = header.push(ui::tag(tag, net, p));
+                    }
                     Element::from(
                         row![
                             ui::avatar(&message.sender_name, 38.0, fill, p, None),
                             column![
-                                row![
-                                    ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright()),
-                                    ui::tag(tag, net, p),
-                                    ui::mono(time_label, 11.0, p.text_muted()),
-                                ]
-                                .spacing(8)
-                                .align_y(iced::Alignment::Center),
+                                header.push(ui::mono(time_label, 11.0, p.text_muted())),
                                 content,
                             ]
                             .spacing(4)
@@ -2092,7 +2217,7 @@ fn timeline_view<'a>(
             theme::Density::Compact => row![
                 ui::mono(time_label, 11.0, p.text_muted()).width(Length::Fixed(40.0)),
                 ui::sans(&message.sender_name, 14.0, Weight::Semibold, name_color),
-                ui::mono(message.sender_network.tag(), 10.0, net),
+                ui::mono(if tags { message.sender_network.tag() } else { "" }, 10.0, net),
                 content,
             ]
             .spacing(8)
@@ -2118,12 +2243,17 @@ fn message_content<'a>(
     message: &'a TimelineMessage,
     session: &'a Session,
     all_mono: bool,
+    plain: bool,
     p: &theme::Palette,
 ) -> Element<'a, Message> {
     let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
     let mut col = column![].spacing(6).width(Length::Fill);
 
     match &message.kind {
+        MessageKind::Image(info) if plain => {
+            let size = info.size.map(|s| format!(" · {}", human_size(s))).unwrap_or_default();
+            col = col.push(ui::mono(format!("🖼 {}{size}", message.body), 12.0, p.text_muted()));
+        }
         MessageKind::Image(info) => {
             col = col.push(image_figure(&message.body, info, session, p));
         }
@@ -2464,91 +2594,718 @@ fn audio_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<
     .into()
 }
 
-fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
-    let palette = &state.palette;
-    let mut choices = column![].spacing(6);
+/// The settings layout: nav │ page │ (on the Rice page) preview + export.
+fn settings_shell<'a>(session: &'a Session, state: &'a App, wide: bool) -> Element<'a, Message> {
+    let (p, l, x) = (&state.palette, &state.layout, &state.extras);
+    let mut panes = row![
+        tile(session, Pane::Channels, settings_nav(session, p, l), 220.0, p, l, x),
+        tile(session, Pane::Chat, settings_page(session, state), 0.0, p, l, x),
+    ]
+    .spacing(l.gaps_out)
+    .height(Length::Fill);
+    if session.settings_page == SettingsPage::Rice && wide {
+        panes = panes.push(
+            column![
+                ui::pane(rice_preview(p), false, p, l, x.translucent_panes).width(Length::Fill),
+                ui::pane(rice_export(state), false, p, l, x.translucent_panes)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ]
+            .spacing(l.gaps_out)
+            .width(300),
+        );
+    }
+    panes.into()
+}
 
-    let mut entries = vec![(
-        "Follow my rice (colors.conf)".to_string(),
-        theme::RICE.to_string(),
-    )];
-    entries.extend(
-        theme::presets()
-            .into_iter()
-            .map(|(name, _)| (name.to_string(), name.to_string())),
-    );
-    entries.push((
-        "Custom (theme.toml)".to_string(),
-        theme::CUSTOM.to_string(),
-    ));
-
-    for (label, choice) in entries {
-        let active = state.theme_choice == choice;
-        let marker = if active { "●" } else { "○" };
-        let accent = palette.accent();
-        let text_color = palette.text();
-        let surface_alt = palette.surface_alt();
-        choices = choices.push(
-            button(
-                row![
-                    text(marker).size(13).color(if active { accent } else { text_color }),
-                    text(label).size(14),
-                ]
+fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let item = |label: &'static str, page: SettingsPage| -> Element<'a, Message> {
+        let active = session.settings_page == page;
+        let bar = if active { p.accent() } else { iced::Color::TRANSPARENT };
+        let color = if active { p.text_bright() } else { p.text() };
+        let weight = if active { Weight::Semibold } else { Weight::Normal };
+        ui::row_button(
+            row![ui::swatch(bar, 2.0, 18.0, 1.0), ui::sans(label, 14.0, weight, color)]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-            )
-            .on_press(Message::ThemeChosen(choice))
-            .width(Length::Fixed(280.0))
-            .padding(8)
-            .style(move |_theme, status| {
-                let background = if active || matches!(status, button::Status::Hovered) {
-                    Some(surface_alt.into())
-                } else {
-                    None
-                };
-                button::Style {
-                    background,
-                    text_color,
+            Message::OpenSettings(page),
+            active,
+            p,
+            l,
+        )
+        .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 })
+        .into()
+    };
+    let disabled = |label: &'static str, why: &'static str| {
+        ui::not_yet(
+            container(ui::sans(label, 14.0, Weight::Normal, p.text_muted())).padding([7, 10]),
+            why,
+            p,
+        )
+    };
+    column![
+        button(
+            row![
+                ui::mono("← back", 12.0, p.text_muted()).width(Length::Fill),
+                ui::outline_chip(ui::mono("Esc", 11.0, p.text_muted()), p),
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ToggleSettings)
+        .padding([6, 8])
+        .style(flat_button_style(p)),
+        ui::section("user", p),
+        item("Accounts & bridges", SettingsPage::Accounts),
+        disabled("Friends", "Coming with the add-friend dialog."),
+        item("Privacy & E2EE", SettingsPage::Privacy),
+        ui::section("app", p),
+        item("Rice", SettingsPage::Rice),
+        item("Keybinds", SettingsPage::Keybinds),
+        item("Voice & audio", SettingsPage::Voice),
+        disabled("Notifications", "Desktop notifications aren't supported yet."),
+        Space::new().height(Length::Fill),
+        container(ui::mono(
+            concat!("mesh ", env!("CARGO_PKG_VERSION"), "\niced · matrix-rust-sdk"),
+            11.0,
+            p.text_muted(),
+        ))
+        .padding(10),
+    ]
+    .spacing(2)
+    .padding([14, 10])
+    .height(Length::Fill)
+    .into()
+}
+
+fn settings_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
+    let p = &state.palette;
+    let page: Element<'a, Message> = match session.settings_page {
+        SettingsPage::Rice => rice_page(state),
+        SettingsPage::Accounts => accounts_page(session, state),
+        SettingsPage::Privacy => column![
+            page_header("Privacy & E2EE", "Your message keys, backed up so they follow you.", p),
+            backup_view(&session.backup, p),
+        ]
+        .spacing(20)
+        .into(),
+        SettingsPage::Voice => voice_page(session, p),
+        SettingsPage::Keybinds => keybinds_page(p),
+    };
+    scrollable(container(page).padding([24, 28]).width(Length::Fill))
+        .height(Length::Fill)
+        .into()
+}
+
+fn page_header<'a>(title: &'a str, sub: &'a str, p: &theme::Palette) -> Element<'a, Message> {
+    column![
+        ui::sans(title, 22.0, Weight::Semibold, p.text_bright()),
+        text(sub).size(14).color(p.text_muted()),
+    ]
+    .spacing(4)
+    .into()
+}
+
+/// A mono uppercase heading for a settings section.
+fn heading<'a>(label: impl Into<String>, p: &theme::Palette) -> Element<'a, Message> {
+    ui::mono(label.into().to_uppercase(), 12.0, p.text_muted()).into()
+}
+
+fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
+    let (p, l) = (&state.palette, &state.layout);
+    let choice = state.theme_choice.as_str();
+    let is_preset = choice != theme::RICE && choice != theme::CUSTOM;
+    let source = match choice {
+        theme::RICE => "rice",
+        theme::CUSTOM => "toml",
+        _ => "preset",
+    };
+
+    let rice_meta = if theme::colors_conf_path().exists() {
+        (format!("● watching · reloaded {}", state.theme_reloaded), p.success())
+    } else {
+        ("not found · using defaults".to_string(), p.warning())
+    };
+    let toml_meta = if theme_path().exists() {
+        ("hand-edited".to_string(), p.text_muted())
+    } else {
+        ("not found · using defaults".to_string(), p.warning())
+    };
+    let first_preset = theme::presets()[0].0.to_string();
+    let sources = column![
+        source_card(
+            "Follow my rice",
+            theme::colors_conf_path().display().to_string(),
+            rice_meta,
+            choice == theme::RICE,
+            Message::ThemeChosen(theme::RICE.to_string()),
+            p,
+        ),
+        source_card(
+            "Built-in preset",
+            theme::presets().iter().map(|(n, _)| *n).collect::<Vec<_>>().join(" · "),
+            (format!("{} presets", theme::presets().len()), p.text_muted()),
+            is_preset,
+            Message::ThemeChosen(if is_preset { choice.to_string() } else { first_preset }),
+            p,
+        ),
+        source_card(
+            "Custom theme.toml",
+            theme_path().display().to_string(),
+            toml_meta,
+            choice == theme::CUSTOM,
+            Message::ThemeChosen(theme::CUSTOM.to_string()),
+            p,
+        ),
+    ]
+    .spacing(8);
+    let mut source_section = column![heading("theme source", p), sources].spacing(8);
+    if is_preset {
+        let mut chips = row![].spacing(6);
+        for (name, _) in theme::presets() {
+            chips = chips.push(segment(name, choice == name, Message::ThemeChosen(name.to_string()), p, l));
+        }
+        source_section = source_section.push(chips);
+    }
+
+    // Base tokens use the rice's names when following it.
+    let rice_keys = choice == theme::RICE;
+    let base = [
+        ("$bg2", "background", p.background(), "Gaps / window background, inputs, code blocks"),
+        ("$bg1", "surface", p.surface(), "Pane background"),
+        ("$surface", "surface_alt", p.surface_alt(), "Selected rows, chips, active space tile"),
+        ("$accent", "accent", p.accent(), "Focused pane border, active indicators, primary buttons"),
+        ("$text", "text", p.text(), "Body text"),
+    ];
+    let mut table = column![];
+    for (rice_key, field, color, used_for) in base {
+        let key = if rice_keys { rice_key } else { field };
+        table = table.push(token_row(key.to_string(), color, used_for.to_string(), source, p.proto_mx(), p));
+    }
+    let muted_contrast = theme::contrast(p.text_muted(), p.surface_alt());
+    let derived = [
+        ("text_bright", &p.text_bright, p.text_bright(), "Names, headings, active labels".to_string()),
+        ("text_muted", &p.text_muted, p.text_muted(), format!("Timestamps, hints · {muted_contrast:.1}:1 on surface_alt")),
+        ("accent_text", &p.accent_text, p.accent_text(), "Text on accent fills".to_string()),
+        ("border", &p.border, p.border(), "Unfocused pane borders, separators".to_string()),
+        ("border_ctrl", &p.border_ctrl, p.border_ctrl(), "Input and chip borders".to_string()),
+        ("panel_dim", &p.panel_dim, p.panel_dim(), "User panel and footer strips".to_string()),
+    ];
+    for (key, set, color, used_for) in derived {
+        let (tag, tag_color) = if set.is_some() { ("set", p.text_muted()) } else { ("derived", p.warning()) };
+        table = table.push(token_row(key.to_string(), color, used_for, tag, tag_color, p));
+    }
+    let edge = p.border();
+    let tokens = column![
+        heading(
+            match choice {
+                theme::RICE => "tokens — read from colors.conf".to_string(),
+                theme::CUSTOM => "tokens — read from theme.toml".to_string(),
+                _ => format!("tokens — {choice}"),
+            },
+            p,
+        ),
+        container(table).style(move |_| container::Style {
+            border: iced::border::rounded(8).color(edge).width(1),
+            ..container::Style::default()
+        }),
+        text("Muted text is derived and nudged until it reaches 4.5:1 contrast, so a dark rice never turns into unreadable grey.")
+            .size(12)
+            .color(p.text_muted()),
+    ]
+    .spacing(8);
+
+    let knobs = row![
+        knob("gaps_in", l.gaps_in, 24.0, p),
+        knob("gaps_out", l.gaps_out, 24.0, p),
+        knob("border_size", l.border_size, 8.0, p),
+        knob("rounding", l.rounding, 20.0, p),
+    ]
+    .spacing(8);
+    let mut densities = row![].spacing(2);
+    for density in theme::Density::ALL {
+        densities = densities.push(segment(
+            density.label(),
+            state.density == density,
+            Message::DensityChosen(density),
+            p,
+            l,
+        ));
+    }
+    let (fill, ctrl) = (p.background(), p.border_ctrl());
+    let layout = column![
+        heading(
+            if state.layout_from_hyprland {
+                "layout — mirrors hyprland.conf"
+            } else {
+                "layout — defaults (layout_from_hyprland = false)"
+            },
+            p,
+        ),
+        knobs,
+        row![
+            ui::sans("Message density", 14.0, Weight::Normal, p.text_bright()),
+            container(densities).padding(3).style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(8).color(ctrl).width(1),
+                ..container::Style::default()
+            }),
+            ui::mono(state.density.hint(), 12.0, p.text_muted()),
+        ]
+        .spacing(16)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(10);
+
+    let x = &state.extras;
+    let extras = column![
+        heading("extras", p),
+        switch_row("Digital rain background", "Animated canvas behind the panes, drawn in your accent and muted text", x.digital_rain, Extra::Rain, p),
+        switch_row("Translucent panes", "Panes at 92% opacity so Hyprland's blur shows through", x.translucent_panes, Extra::Translucent, p),
+        switch_row("Show platform tags", "mx / dc next to names, so you always know where a message goes", x.show_network_tags, Extra::Tags, p),
+        switch_row("Plain-text mode", "No image downloads or previews: just text, links and code", x.plain_text_mode, Extra::PlainText, p),
+    ]
+    .spacing(2);
+
+    column![
+        page_header("Rice", "Mesh wears your desktop. Change your theme once, every pane follows.", p),
+        source_section,
+        tokens,
+        layout,
+        extras,
+    ]
+    .spacing(20)
+    .into()
+}
+
+/// A radio card for the theme source.
+fn source_card<'a>(
+    title: &'a str,
+    path: String,
+    (meta, meta_color): (String, iced::Color),
+    on: bool,
+    msg: Message,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
+    let edge = if on { p.accent() } else { p.border_ctrl() };
+    let fill = if on { theme::mix(p.surface(), p.surface_alt(), 0.5) } else { iced::Color::TRANSPARENT };
+    let dot = if on { p.accent() } else { iced::Color::TRANSPARENT };
+    let radio = container(ui::swatch(dot, 6.0, 6.0, 3.0))
+        .center_x(16)
+        .center_y(16)
+        .style(move |_| container::Style {
+            border: iced::border::rounded(8).color(edge).width(2),
+            ..container::Style::default()
+        });
+    button(
+        row![
+            radio,
+            column![
+                ui::sans(title, 14.0, Weight::Medium, p.text_bright()),
+                ui::mono(path, 12.0, p.text_muted()),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            ui::mono(meta, 11.0, meta_color),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(msg)
+    .width(Length::Fill)
+    .padding([12, 14])
+    .style(move |_, _| button::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..button::Style::default()
+    })
+    .into()
+}
+
+fn token_row<'a>(
+    key: String,
+    color: iced::Color,
+    used_for: String,
+    tag: &'a str,
+    tag_color: iced::Color,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
+    let edge = p.border_ctrl();
+    let chip = container(Space::new()).width(22).height(22).style(move |_| container::Style {
+        background: Some(color.into()),
+        border: iced::border::rounded(5).color(edge).width(1),
+        ..container::Style::default()
+    });
+    column![
+        ui::hline(p),
+        row![
+            ui::mono(key, 12.0, p.text_bright()).width(120),
+            chip,
+            ui::mono(theme::to_hex(color), 12.0, p.text()).width(80),
+            text(used_for).size(13).color(p.text_muted()).width(Length::Fill),
+            ui::mono(tag, 12.0, tag_color),
+        ]
+        .spacing(12)
+        .padding([8, 14])
+        .align_y(iced::Alignment::Center),
+    ]
+    .into()
+}
+
+/// A read-only layout value with a bar showing it against `max`.
+fn knob<'a>(key: &'a str, value: f32, max: f32, p: &theme::Palette) -> Element<'a, Message> {
+    let filled = ((value / max).clamp(0.0, 1.0) * 100.0).round() as u16;
+    let (fill, edge, track, accent) = (p.panel_dim(), p.border(), p.surface_alt(), p.accent());
+    let bar = container(
+        row![
+            container(Space::new())
+                .width(Length::FillPortion(filled.max(1)))
+                .height(4)
+                .style(move |_| container::Style {
+                    background: Some(accent.into()),
+                    border: iced::border::rounded(2),
+                    ..container::Style::default()
+                }),
+            Space::new().width(Length::FillPortion(100 - filled.min(99))),
+        ],
+    )
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(track.into()),
+        border: iced::border::rounded(2),
+        ..container::Style::default()
+    });
+    container(
+        column![
+            ui::mono(key, 11.0, p.text_muted()),
+            row![
+                ui::mono_bold(format!("{value}"), 18.0, p.text_bright()),
+                ui::mono(" px", 11.0, p.text_muted()),
+            ]
+            .align_y(iced::Alignment::End),
+            bar,
+        ]
+        .spacing(4),
+    )
+    .padding([10, 12])
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// One option of a segmented control (density, preset, add-friend mode).
+fn segment<'a>(label: &'a str, on: bool, msg: Message, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let (fill, fg) = if on {
+        (p.surface_alt(), p.text_bright())
+    } else {
+        (iced::Color::TRANSPARENT, p.text_muted())
+    };
+    let radius = l.control_radius();
+    button(ui::mono(label, 12.0, fg))
+        .on_press(msg)
+        .padding([6, 14])
+        .style(move |_, _| button::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(radius),
+            ..button::Style::default()
+        })
+        .into()
+}
+
+fn switch_row<'a>(title: &'a str, sub: &'a str, on: bool, extra: Extra, p: &theme::Palette) -> Element<'a, Message> {
+    let (track, knob) = if on { (p.accent(), p.accent_text()) } else { (p.border_ctrl(), p.text_muted()) };
+    let switch = container(ui::swatch(knob, 16.0, 16.0, 8.0))
+        .width(38)
+        .height(22)
+        .padding(3)
+        .align_x(if on { iced::Alignment::End } else { iced::Alignment::Start })
+        .style(move |_| container::Style {
+            background: Some(track.into()),
+            border: iced::border::rounded(11),
+            ..container::Style::default()
+        });
+    column![
+        button(
+            row![
+                column![
+                    ui::sans(title, 14.0, Weight::Normal, p.text_bright()),
+                    text(sub).size(12).color(p.text_muted()),
+                ]
+                .width(Length::Fill),
+                switch,
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .on_press(Message::ToggleExtra(extra))
+        .padding([10, 0])
+        .style(|_, _| button::Style::default()),
+        ui::hline(p),
+    ]
+    .into()
+}
+
+/// A tiny drawing of the shell in the current colors.
+fn rice_preview<'a>(p: &theme::Palette) -> Element<'a, Message> {
+    let mini = |content: Element<'a, Message>, width: Length, focused: bool| {
+        let (fill, edge) = (p.surface(), if focused { p.accent() } else { p.border() });
+        container(content)
+            .width(width)
+            .height(Length::Fill)
+            .padding(6)
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(4).color(edge).width(1),
+                ..container::Style::default()
+            })
+    };
+    let line = |color: iced::Color, width: f32| ui::swatch(color, width, 5.0, 2.0);
+    let (bg, ctrl) = (p.background(), p.border_ctrl());
+    let input = container(Space::new()).width(Length::Fill).height(14).style(move |_| container::Style {
+        background: Some(bg.into()),
+        border: iced::border::rounded(3).color(ctrl).width(1),
+        ..container::Style::default()
+    });
+    let window = row![
+        mini(column![ui::swatch(p.surface_alt(), 12.0, 12.0, 3.0), ui::swatch(p.accent(), 12.0, 12.0, 3.0)].spacing(4).into(), Length::Fixed(24.0), false),
+        mini(column![line(p.border_ctrl(), 40.0), line(p.text(), 30.0), line(p.text_muted(), 36.0)].spacing(5).into(), Length::Fixed(60.0), false),
+        mini(
+            column![
+                line(p.text(), 60.0),
+                line(p.border_ctrl(), 100.0),
+                line(p.text(), 50.0),
+                ui::swatch(p.background(), 110.0, 30.0, 3.0),
+                Space::new().height(Length::Fill),
+                input,
+            ]
+            .spacing(6)
+            .into(),
+            Length::Fill,
+            true,
+        ),
+    ]
+    .spacing(5)
+    .padding(5)
+    .height(190);
+    let fill = p.background();
+    column![
+        ui::mono("LIVE PREVIEW", 11.0, p.text_muted()),
+        container(window).style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(6),
+            ..container::Style::default()
+        }),
+    ]
+    .spacing(10)
+    .padding(14)
+    .into()
+}
+
+fn rice_export<'a>(state: &'a App) -> Element<'a, Message> {
+    let (p, l) = (&state.palette, &state.layout);
+    let toml = theme::export_toml(
+        &state.theme_choice,
+        p,
+        l,
+        state.layout_from_hyprland,
+        state.density,
+        &state.extras,
+    );
+    let fill = p.background();
+    column![
+        ui::mono("THEME.TOML", 11.0, p.text_muted()),
+        scrollable(
+            container(ui::mono(toml, 11.0, p.text()))
+                .padding(12)
+                .width(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(fill.into()),
                     border: iced::border::rounded(6),
-                    ..button::Style::default()
-                }
+                    ..container::Style::default()
+                }),
+        )
+        .height(Length::Fill),
+        row![
+            ui::primary_button(
+                container(ui::sans("Export theme", 13.0, Weight::Semibold, p.accent_text())).center_x(Length::Fill),
+                Some(Message::ExportTheme),
+                p,
+                l,
+            )
+            .width(Length::Fill),
+            ui::not_yet(
+                button(container(ui::sans("Share to #rice-showcase", 13.0, Weight::Normal, p.text_muted())).center_x(Length::Fill))
+                    .padding([6, 10])
+                    .width(Length::Fill)
+                    .style(flat_button_style(p)),
+                "Sharing a theme to a room isn't built yet: paste the exported text.",
+                p,
+            ),
+        ]
+        .spacing(8),
+        ui::mono("Export copies it to the clipboard.", 11.0, p.text_muted()),
+    ]
+    .spacing(10)
+    .padding(14)
+    .into()
+}
+
+fn voice_page<'a>(session: &'a Session, p: &'a theme::Palette) -> Element<'a, Message> {
+    let discord = match &session.discord_voice_url {
+        Some(url) => format!("The 🎧 button opens {url} for Discord voice."),
+        None => "Set discord_voice_url in config.toml to get a 🎧 button for Discord voice.".to_string(),
+    };
+    column![
+        page_header("Voice & audio", "Devices for 1:1 calls, and Discord voice.", p),
+        audio_view(session, p),
+        text(discord).size(13).color(p.text_muted()),
+        text("Mesh calls have no echo cancellation yet: use headphones, or an EasyEffects input preset with an echo canceller.")
+            .size(13)
+            .color(p.text_muted()),
+    ]
+    .spacing(20)
+    .into()
+}
+
+fn keybinds_page<'a>(p: &theme::Palette) -> Element<'a, Message> {
+    let mut rows = column![].spacing(2);
+    for (keys, what) in [
+        ("Alt+1..9", "Switch to space n on the rail"),
+        ("Ctrl+K", "Jump to a room or space"),
+        ("Esc", "Close settings, dialogs and the jump palette"),
+        ("Enter", "Send the message"),
+    ] {
+        rows = rows.push(
+            column![
+                row![
+                    container(ui::outline_chip(ui::mono(keys, 12.0, p.text_bright()), p)).width(140),
+                    text(what).size(14).color(p.text()),
+                ]
+                .spacing(12)
+                .padding([8, 0])
+                .align_y(iced::Alignment::Center),
+                ui::hline(p),
+            ],
+        );
+    }
+    column![
+        page_header("Keybinds", "Keyboard first. These work everywhere in Mesh.", p),
+        rows,
+        text("Rebinding isn't supported yet.").size(12).color(p.text_muted()),
+    ]
+    .spacing(20)
+    .into()
+}
+
+fn accounts_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
+    let (p, l) = (&state.palette, &state.layout);
+    let (name, mxid) = session
+        .my_profile
+        .as_ref()
+        .map(|me| (me.display_name.clone(), me.user_id.to_string()))
+        .unwrap_or_default();
+    let (fill, edge) = (p.panel_dim(), p.border());
+    let badge_fill = theme::mix(p.accent(), p.surface(), 0.8);
+    let primary = container(ui::mono("PRIMARY", 10.0, p.accent()))
+        .padding([1, 5])
+        .style(move |_| container::Style {
+            background: Some(badge_fill.into()),
+            border: iced::border::rounded(4),
+            ..container::Style::default()
+        });
+    let backup = match session.backup.status {
+        Some(BackupStatus::Enabled) => ("key backup on", p.success()),
+        Some(BackupStatus::Incomplete) => ("key backup needs your recovery key", p.warning()),
+        Some(BackupStatus::Disabled) => ("no key backup", p.warning()),
+        _ => ("checking key backup…", p.text_muted()),
+    };
+    let account = container(
+        row![
+            container(ui::mono_bold(initials(&my_server(session)), 13.0, p.text_bright()))
+                .center_x(40)
+                .center_y(40)
+                .style({
+                    let tile = p.surface_alt();
+                    move |_| container::Style {
+                        background: Some(tile.into()),
+                        border: iced::border::rounded(8),
+                        ..container::Style::default()
+                    }
+                }),
+            column![
+                row![ui::mono(mxid, 13.0, p.text_bright()), primary].spacing(8).align_y(iced::Alignment::Center),
+                row![
+                    ui::mono(format!("{name} · {}", my_server(session)), 11.0, p.text_muted()),
+                    ui::mono("· syncing", 11.0, p.success()),
+                    ui::mono(format!("· {}", backup.0), 11.0, backup.1),
+                ]
+                .spacing(6),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            button(text("Log out").size(13))
+                .on_press(Message::LogOut)
+                .padding([6, 12])
+                .style(flat_button_style(p)),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([12, 14])
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    });
+
+    let add_account = ui::not_yet(
+        container(ui::mono("+ add a homeserver", 12.0, p.text_muted())).padding([10, 14]),
+        "Multiple accounts aren't supported yet.",
+        p,
+    );
+
+    let bridged = session.rooms.iter().filter(|r| r.network == Network::Discord).count();
+    let bridge_line = if bridged > 0 {
+        format!("mautrix-discord on {} · {bridged} bridged rooms", my_server(session))
+    } else {
+        format!("No bridged Discord rooms seen yet. DM your bridge bot on {} and send `login-qr` to link an account.", my_server(session))
+    };
+    let mut discord = column![
+        heading("discord through a bridge", p),
+        row![ui::mono("dc", 12.0, p.proto_dc()), text(bridge_line).size(13).color(p.text())].spacing(8),
+    ]
+    .spacing(8);
+    if !state.discord_warning_seen {
+        let (warn_fill, warn) = (theme::mix(p.warning(), p.surface(), 0.88), p.warning());
+        discord = discord.push(
+            container(
+                column![
+                    ui::sans("Discord doesn't allow third-party clients", 14.0, Weight::Semibold, warn),
+                    text("A personal account linked through a bridge can be flagged or banned by Discord. Use an account you can afford to lose.")
+                        .size(13)
+                        .color(p.text()),
+                    ui::primary_button(ui::sans("Got it", 13.0, Weight::Semibold, p.accent_text()), Some(Message::DiscordWarningSeen), p, l),
+                ]
+                .spacing(8),
+            )
+            .padding([12, 14])
+            .style(move |_| container::Style {
+                background: Some(warn_fill.into()),
+                border: iced::border::rounded(8).color(warn).width(1),
+                ..container::Style::default()
             }),
         );
     }
 
-    let content = column![
-        row![
-            text("Settings").size(20).color(palette.text()),
-            Space::new().width(Length::Fill),
-            button(text("Close").size(13))
-                .on_press(Message::ToggleSettings)
-                .padding(8)
-                .style(flat_button_style(palette)),
-        ]
-        .align_y(iced::Alignment::Center),
-        text("Theme").size(14).color(palette.text_muted()),
-        choices,
-        text(format!(
-            "Custom colors are read from {}",
-            theme_path().display()
-        ))
-        .size(12)
-        .color(palette.text_muted()),
-        Space::new().height(8),
-        audio_view(session, palette),
-        Space::new().height(8),
-        backup_view(&session.backup, palette),
-        Space::new().height(8),
-        button(text("Log out").size(13))
-            .on_press(Message::LogOut)
-            .padding(8)
-            .style(flat_button_style(palette)),
+    column![
+        page_header("Accounts & bridges", "Where your messages go, and through what.", p),
+        column![heading("matrix homeservers", p), account, add_account].spacing(8),
+        discord,
     ]
-    .spacing(12)
-    .padding(12)
-    .max_width(520);
-
-    scrollable(content).height(Length::Fill).into()
+    .spacing(20)
+    .into()
 }
 
 /// Secure Backup controls: status, set-up (shows the recovery key once), and

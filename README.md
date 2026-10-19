@@ -33,9 +33,13 @@ Mesh wears your desktop. By default it follows your rice:
 Both files are watched: edit them and Mesh restyles within a second.
 Missing files fall back to the defaults in [design/DESIGN.md](design/DESIGN.md).
 
-The settings screen (gear icon) switches between "Follow my rice", the
-built-in presets (Catppuccin Mocha, Nord, Gruvbox Dark) and "Custom
-(theme.toml)" — `~/.config/mesh/theme.toml` (`%APPDATA%\mesh\theme.toml` on
+Settings → **Rice** (gear icon in the user panel) switches between "Follow my
+rice", the built-in presets (Catppuccin Mocha, Nord, Gruvbox Dark) and "Custom
+theme.toml", shows every colour token (and which are derived), the layout
+values, the message density, and four switches: digital rain, translucent
+panes, network tags and plain-text mode (no image downloads). "Export theme"
+copies the current look as a theme.toml to the clipboard. Custom theme.toml is
+read from `~/.config/mesh/theme.toml` (`%APPDATA%\mesh\theme.toml` on
 Windows), see [theme.example.toml](theme.example.toml). The choice persists in
 `~/.config/mesh/config.toml` (`%APPDATA%\mesh\config.toml` on Windows).
 
@@ -84,7 +88,10 @@ Working today:
   backup status, sets it up (and shows a recovery key to save once), and can
   restore your message keys from an existing backup with that recovery key —
   so keys survive across sessions instead of being lost.
-- In-app theme switcher with persisted choice.
+- Settings with a left nav: Accounts & bridges (your account, key backup
+  state, log out, Discord bridge status and a one-time warning about Discord's
+  rules), Privacy & E2EE (Secure Backup), Rice, Keybinds, Voice & audio
+  (devices). `Esc` goes back.
 - Tiled layout like a Hyprland desktop: top bar, space rail, channel pane,
   chat pane and member pane, separated by your `gaps_out` with your border
   width and rounding. The focused pane gets the accent border. A user panel
