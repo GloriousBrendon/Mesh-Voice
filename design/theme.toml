@@ -1,0 +1,33 @@
+# Mesh theme — "rice" defaults (matches ~/.config/themes/active/colors.conf defaults)
+# Linux: ~/.config/mesh/theme.toml   Windows: %APPDATA%\mesh\theme.toml
+source = "rice"      # "rice" = follow colors.conf · "preset" · "toml" = use [colors] below
+watch  = true        # hot-reload when the source file changes
+
+[colors]
+background  = "#080c10"   # $bg2
+surface     = "#0f1822"   # $bg1
+surface_alt = "#1f252e"   # $surface
+accent      = "#d88f92"   # $accent
+text        = "#a8b0be"   # $text
+# derived if omitted:
+text_bright = "#e3e7ee"
+text_muted  = "#8892a0"
+accent_text = "#1a0d0e"
+border      = "#1f2a36"
+success     = "#8fc79a"
+warning     = "#e0b36a"
+danger      = "#e07a7a"
+
+[layout]
+from_hyprland = true      # read gaps/border/rounding from ~/.config/hypr/hyprland.conf
+gaps_in     = 4
+gaps_out    = 8
+border_size = 2
+rounding    = 10
+density     = "cozy"      # compact | cozy | irc
+
+[extras]
+digital_rain       = true
+translucent_panes  = true
+show_network_tags  = true
+plain_text_mode    = false

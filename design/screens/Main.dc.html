@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh — main window</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#080c10}
+a{color:#d88f92}a:hover{color:#ebb3b5}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+</style>
+</helmet>
+<div style="min-height: 900px; background: #080c10; color: #a8b0be; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; padding: {{gap}}px; gap: {{gap}}px; box-sizing: border-box">
+
+  <!-- top bar -->
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 12px; background: #0f1822; border: 2px solid #1f2a36; border-radius: {{radius}}px; font-family: 'JetBrains Mono', monospace; font-size: 12px">
+    <div style="display: flex; align-items: center; gap: 8px; color: #e3e7ee; font-weight: 700; font-size: 14px">
+      <span style="color: {{accent}}">&gt;_</span><span>mesh</span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 6px; color: #8892a0">
+      <span style="color: #e3e7ee; background: #1f252e; padding: 3px 7px; border-radius: 4px">2</span>
+      <span>tiling.club</span><span>/</span><span style="color: #e3e7ee">#rice-showcase</span>
+    </div>
+    <button aria-label="Search or jump to" style="flex: 1 1 260px; max-width: 460px; margin: 0 auto; display: flex; align-items: center; gap: 8px; padding: 7px 10px; background: #080c10; border: 1px solid #253040; border-radius: 6px; color: #8892a0; font-family: 'JetBrains Mono', monospace; font-size: 12px; text-align: left">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+      <span style="flex: 1">search or jump — rooms, people, @user:server</span>
+      <span style="border: 1px solid #253040; border-radius: 4px; padding: 1px 5px">Ctrl K</span>
+    </button>
+    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+      <sc-for list="{{links}}" as="l" hint-placeholder-count="3">
+        <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid #253040; border-radius: 4px; color: #a8b0be">
+          <span style="width: 7px; height: 7px; border-radius: 50%; background: {{l.dot}}"></span>
+          <span style="color: {{l.color}}; font-weight: 700">{{l.proto}}</span>{{l.name}}
+        </span>
+      </sc-for>
+      <a href="AddFriend.dc.html" aria-label="Add friend" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 6px; background: {{accent}}; color: #1a0d0e; font-weight: 700; text-decoration: none">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M19 8v6M22 11h-6"></path></svg>
+        add friend
+      </a>
+    </div>
+  </header>
+
+  <!-- tiled panes -->
+  <div style="flex: 1; display: flex; flex-wrap: wrap; gap: {{gap}}px; min-height: 0">
+
+    <!-- workspace rail -->
+    <nav aria-label="Spaces" style="flex: 0 0 64px; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; background: #0f1822; border: 2px solid #1f2a36; border-radius: {{radius}}px">
+      <button aria-label="Home — friends and DMs" style="width: 44px; height: 44px; border-radius: 10px; background: #1f252e; color: #e3e7ee; display: grid; place-items: center">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"></path></svg>
+      </button>
+      <div style="width: 28px; height: 2px; background: #1f2a36"></div>
+      <sc-for list="{{spaces}}" as="s" hint-placeholder-count="5">
+        <div style="position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px">
+          <button aria-label="{{s.name}}" onClick="{{s.pick}}" style="position: relative; width: 44px; height: 44px; border-radius: 10px; background: {{s.bg}}; color: {{s.fg}}; border: 2px solid {{s.ring}}; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 13px; display: grid; place-items: center; box-sizing: border-box">
+            {{s.initials}}
+            <sc-if value="{{s.hasMention}}" hint-placeholder-val="{{false}}">
+              <span style="position: absolute; right: -6px; bottom: -4px; min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box; border-radius: 9px; background: #e07a7a; color: #1a0808; font-size: 11px; line-height: 18px; border: 2px solid #0f1822">{{s.mentions}}</span>
+            </sc-if>
+          </button>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: {{s.keyColor}}">{{s.key}}·{{s.proto}}</span>
+        </div>
+      </sc-for>
+      <button aria-label="Join or create a space" style="width: 44px; height: 44px; border-radius: 10px; border: 1px dashed #3a4656; color: #8892a0; display: grid; place-items: center">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+      </button>
+    </nav>
+
+    <!-- channel pane -->
+    <aside style="flex: 1 1 232px; max-width: 260px; display: flex; flex-direction: column; background: #0f1822; border: 2px solid #1f2a36; border-radius: {{radius}}px; overflow: hidden">
+      <div style="padding: 14px 14px 10px; border-bottom: 1px solid #1f2a36">
+        <div style="color: #e3e7ee; font-weight: 600; font-size: 15px">tiling.club</div>
+        <div style="margin-top: 4px; display: flex; align-items: center; gap: 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"></path><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"></path></svg>
+          <span><span style="color: #9aa6f5">dc</span> bridged via strange.lab</span>
+        </div>
+      </div>
+      <div style="flex: 1; overflow: auto; padding: 10px 8px; display: flex; flex-direction: column; gap: 2px">
+        <div style="padding: 6px 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">TEXT</div>
+        <sc-for list="{{channels}}" as="c" hint-placeholder-count="5">
+          <button style="display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; background: {{c.bg}}; color: {{c.fg}}; text-align: left; box-shadow: inset 2px 0 0 {{c.bar}}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"></path></svg>
+            <span style="flex: 1; font-weight: {{c.weight}}">{{c.name}}</span>
+            <sc-if value="{{c.hasUnread}}" hint-placeholder-val="{{false}}">
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #1f252e; color: #e3e7ee">{{c.unread}}</span>
+            </sc-if>
+          </button>
+        </sc-for>
+        <div style="padding: 14px 8px 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">VOICE</div>
+        <button style="display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; color: #e3e7ee; text-align: left">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4V5z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>
+          <span style="flex: 1">jam-room</span>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8fc79a">03:12</span>
+        </button>
+        <div style="display: flex; flex-direction: column; gap: 4px; padding: 2px 8px 8px 32px">
+          <sc-for list="{{voice}}" as="v" hint-placeholder-count="3">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 13px">
+              <span style="width: 22px; height: 22px; border-radius: 50%; background: {{v.bg}}; color: #080c10; font-size: 10px; font-weight: 700; display: grid; place-items: center; box-shadow: 0 0 0 2px {{v.ring}}">{{v.initial}}</span>
+              <span style="flex: 1; color: #a8b0be">{{v.name}}</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: {{v.protoColor}}">{{v.proto}}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <!-- user panel -->
+      <div style="display: flex; align-items: center; gap: 8px; padding: 10px; background: #0b1219; border-top: 1px solid #1f2a36">
+        <span style="position: relative; width: 34px; height: 34px; border-radius: 50%; background: {{accent}}; color: #1a0d0e; font-weight: 700; display: grid; place-items: center">S
+          <span style="position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; background: #8fc79a; border: 2px solid #0b1219"></span>
+        </span>
+        <div style="flex: 1; min-width: 0">
+          <div style="color: #e3e7ee; font-weight: 600; font-size: 13px">strange</div>
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #8892a0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">@strange:strange.lab</div>
+        </div>
+        <button aria-label="{{micLabel}}" aria-pressed="{{muted}}" onClick="{{toggleMute}}" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: {{micColor}}; background: {{micBg}}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4"></path></svg>
+        </button>
+        <button aria-label="{{deafLabel}}" aria-pressed="{{deaf}}" onClick="{{toggleDeaf}}" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: {{deafColor}}; background: {{deafBg}}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 18v-6a9 9 0 0 1 18 0v6"></path><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"></path></svg>
+        </button>
+        <a href="Rice.dc.html" aria-label="Rice settings" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: #a8b0be">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>
+        </a>
+      </div>
+    </aside>
+
+    <!-- chat pane (focused) -->
+    <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; background: #0f1822; border: 2px solid {{accent}}; border-radius: {{radius}}px; overflow: hidden">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #1f2a36">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8892a0" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"></path></svg>
+        <span style="color: #e3e7ee; font-weight: 600; font-size: 15px">rice-showcase</span>
+        <span style="color: #8892a0; font-size: 13px; flex: 1; min-width: 160px">post your desktop. dotfiles or it didn't happen.</span>
+        <button aria-label="Pinned messages" style="color: #a8b0be; padding: 6px">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5M9 3h6l-1 6 4 4H6l4-4z"></path></svg>
+        </button>
+        <button aria-label="Notification settings" style="color: #a8b0be; padding: 6px">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"></path></svg>
+        </button>
+        <button aria-label="{{membersLabel}}" aria-pressed="{{showMembers}}" onClick="{{toggleMembers}}" style="color: {{membersColor}}; padding: 6px">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"></path></svg>
+        </button>
+      </div>
+
+      <div style="flex: 1; overflow: auto; padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 18px">
+        <div style="display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">
+          <span style="flex: 1; height: 1px; background: #1f2a36"></span>today<span style="flex: 1; height: 1px; background: #1f2a36"></span>
+        </div>
+
+        <!-- message: nixwitch -->
+        <article style="display: flex; gap: 12px">
+          <span style="flex: 0 0 38px; height: 38px; border-radius: 50%; background: #9aa6f5; color: #080c10; font-weight: 700; display: grid; place-items: center">N</span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+            <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px">
+              <span style="color: #e3e7ee; font-weight: 600">nixwitch</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #9aa6f5; border: 1px solid #3c4580; border-radius: 4px; padding: 1px 4px">dc</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">14:02</span>
+            </div>
+            <div style="color: #c4cad4; line-height: 1.5">finally finished the gruvbox-material rice. waybar is 100% css now, no modules from the AUR.</div>
+            <figure style="margin: 0; width: 100%; max-width: 440px; border: 1px solid #253040; border-radius: 8px; overflow: hidden; background: #1d2021">
+              <div style="height: 220px; padding: 8px; box-sizing: border-box; display: flex; flex-direction: column; gap: 6px">
+                <div style="height: 14px; border-radius: 3px; background: #282828; display: flex; align-items: center; gap: 4px; padding: 0 6px">
+                  <span style="width: 10px; height: 6px; background: #d79921; border-radius: 1px"></span><span style="width: 10px; height: 6px; background: #504945; border-radius: 1px"></span><span style="width: 10px; height: 6px; background: #504945; border-radius: 1px"></span>
+                </div>
+                <div style="flex: 1; display: flex; gap: 6px">
+                  <div style="flex: 3; border: 2px solid #d79921; border-radius: 4px; background: #282828; padding: 8px; font-family: 'JetBrains Mono', monospace; font-size: 9px; line-height: 1.6; color: #b8bb26">~ $ fastfetch<br><span style="color: #ebdbb2">os  CachyOS x86_64<br>wm  Hyprland<br>sh  fish</span></div>
+                  <div style="flex: 2; display: flex; flex-direction: column; gap: 6px">
+                    <div style="flex: 1; border: 2px solid #504945; border-radius: 4px; background: #282828"></div>
+                    <div style="flex: 1; border: 2px solid #504945; border-radius: 4px; background: #32302f"></div>
+                  </div>
+                </div>
+              </div>
+              <figcaption style="display: flex; justify-content: space-between; padding: 6px 10px; background: #141820; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0"><span>rice-2026-10.png</span><span>2560×1440 · 1.8 MB</span></figcaption>
+            </figure>
+            <div style="display: flex; gap: 6px">
+              <button style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 12px; background: #2a1d22; border: 1px solid {{accent}}; color: #e3e7ee; font-family: 'JetBrains Mono', monospace; font-size: 11px">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="2.2" stroke-linejoin="round" aria-hidden="true"><path d="M12 2c1 4 6 6 6 12a6 6 0 0 1-12 0c0-3 2-5 3-7 1 2 2 3 3 3 0-3-1-5 0-8z"></path></svg>14
+              </button>
+              <button style="padding: 3px 8px; border-radius: 12px; background: #141c26; border: 1px solid #253040; color: #a8b0be; font-family: 'JetBrains Mono', monospace; font-size: 11px">+1 · 6</button>
+              <button style="padding: 3px 8px; border-radius: 12px; background: #141c26; border: 1px solid #253040; color: #a8b0be; font-family: 'JetBrains Mono', monospace; font-size: 11px">:wq · 2</button>
+            </div>
+          </div>
+        </article>
+
+        <!-- message: tux_fan -->
+        <article style="display: flex; gap: 12px">
+          <span style="flex: 0 0 38px; height: 38px; border-radius: 50%; background: #8fd6cc; color: #080c10; font-weight: 700; display: grid; place-items: center">T</span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+            <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px">
+              <span style="color: #e3e7ee; font-weight: 600">tux_fan</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #8fd6cc; border: 1px solid #2f5a55; border-radius: 4px; padding: 1px 4px">mx · matrix.org</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">14:05</span>
+            </div>
+            <div style="color: #c4cad4; line-height: 1.5">clean. dots?</div>
+          </div>
+        </article>
+
+        <!-- message: nixwitch reply w/ code -->
+        <article style="display: flex; gap: 12px">
+          <span style="flex: 0 0 38px"></span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+            <div style="color: #c4cad4; line-height: 1.5">border bit of my hyprland.conf, rest is on my git:</div>
+            <pre style="margin: 0; max-width: 520px; padding: 12px 14px; background: #080c10; border: 1px solid #1f2a36; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; color: #a8b0be; overflow-x: auto"><span style="color: #9aa6f5">general</span> {
+  gaps_in     = <span style="color: #e0b36a">4</span>
+  gaps_out    = <span style="color: #e0b36a">8</span>
+  border_size = <span style="color: #e0b36a">2</span>
+  col.active_border = <span style="color: #d88f92">$accent</span>
+}</pre>
+          </div>
+        </article>
+
+        <!-- message: strange -->
+        <article style="display: flex; gap: 12px">
+          <span style="flex: 0 0 38px; height: 38px; border-radius: 50%; background: {{accent}}; color: #1a0d0e; font-weight: 700; display: grid; place-items: center">S</span>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+            <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px">
+              <span style="color: #e3e7ee; font-weight: 600">strange</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #8fd6cc; border: 1px solid #2f5a55; border-radius: 4px; padding: 1px 4px">mx · strange.lab</span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">14:11</span>
+            </div>
+            <div style="color: #c4cad4; line-height: 1.5">stealing that border setup. mesh already picked up the new accent from <code style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: #1f252e; padding: 1px 5px; border-radius: 4px; color: #e3e7ee">colors.conf</code> before I'd even switched windows.</div>
+          </div>
+        </article>
+
+        <div style="display: flex; align-items: center; gap: 8px; padding-left: 50px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">
+          <span style="color: #8fd6cc">→</span> kernel_panic joined from <span style="color: #8fd6cc">mx</span> arch-za
+        </div>
+      </div>
+
+      <!-- composer -->
+      <div style="padding: 8px 16px 14px">
+        <div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: #080c10; border: 1px solid #253040; border-radius: 8px">
+          <button aria-label="Attach file" style="color: #a8b0be; display: grid; place-items: center">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"></path></svg>
+          </button>
+          <label for="composer" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Message #rice-showcase</label>
+          <input id="composer" placeholder="message #rice-showcase  —  sends to discord via bridge" style="flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: #e3e7ee; font-family: 'IBM Plex Sans', sans-serif; font-size: 14px">
+          <button aria-label="Send" style="width: 32px; height: 32px; border-radius: 6px; background: {{accent}}; color: #1a0d0e; display: grid; place-items: center">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"></path></svg>
+          </button>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">
+          <span><span style="color: #8fd6cc">tux_fan</span> is typing…</span>
+          <span>/ commands · Enter send · Shift+Enter newline · markdown on</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- members -->
+    <sc-if value="{{showMembers}}" hint-placeholder-val="{{true}}">
+      <aside aria-label="Members" style="flex: 1 1 220px; max-width: 250px; background: #0f1822; border: 2px solid #1f2a36; border-radius: {{radius}}px; padding: 12px 10px; display: flex; flex-direction: column; gap: 4px; overflow: auto">
+        <sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
+          <div style="padding: 8px 6px 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">{{g.title}}</div>
+          <sc-for list="{{g.members}}" as="m" hint-placeholder-count="3">
+            <button style="display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 6px; text-align: left; opacity: {{m.opacity}}">
+              <span style="position: relative; flex: 0 0 32px; height: 32px; border-radius: 50%; background: {{m.bg}}; color: #080c10; font-weight: 700; font-size: 13px; display: grid; place-items: center">{{m.initial}}
+                <span style="position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: 50%; background: {{m.dot}}; border: 2px solid #0f1822"></span>
+              </span>
+              <span style="flex: 1; min-width: 0">
+                <span style="display: block; color: #e3e7ee; font-size: 13px; font-weight: 500">{{m.name}}</span>
+                <span style="display: block; color: #8892a0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{m.status}}</span>
+              </span>
+              <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: {{m.protoColor}}">{{m.proto}}</span>
+            </button>
+          </sc-for>
+        </sc-for>
+      </aside>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#d88f92","options":["#d88f92","#89b4fa","#d79921","#88c0d0"],"section":"Rice"},"gap":{"editor":"range","default":8,"min":0,"max":24,"step":2,"unit":"px","section":"Rice"},"radius":{"editor":"range","default":10,"min":0,"max":20,"step":1,"unit":"px","section":"Rice"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { space: 'tc', muted: false, deaf: false, showMembers: true }; }
+  renderVals() {
+    const accent = this.props.accent ?? '#d88f92';
+    const MX = '#8fd6cc', DC = '#9aa6f5';
+    const s = this.state;
+    const spaces = [
+      { id: 'sl', name: 'strange.lab', initials: 'SL', key: '1', proto: 'mx', mentions: 0 },
+      { id: 'tc', name: 'tiling.club', initials: 'TC', key: '2', proto: 'dc', mentions: 0 },
+      { id: 'da', name: 'dotfiles anon', initials: 'DA', key: '3', proto: 'mx', mentions: 2 },
+      { id: 'nb', name: 'Nagbreek', initials: 'NB', key: '4', proto: 'dc', mentions: 1 },
+      { id: 'az', name: 'arch-za', initials: 'AZ', key: '5', proto: 'mx', mentions: 0 }
+    ].map((x) => {
+      const on = x.id === s.space;
+      return { ...x, hasMention: x.mentions > 0, bg: on ? '#1f252e' : '#141c26', fg: on ? '#e3e7ee' : '#a8b0be', ring: on ? accent : 'transparent', keyColor: on ? '#e3e7ee' : '#8892a0', pick: () => this.setState({ space: x.id }) };
+    });
+    const channels = [
+      { name: 'announcements', unread: 0 }, { name: 'rice-showcase', unread: 0, on: true },
+      { name: 'dotfiles', unread: 0 }, { name: 'help-wayland', unread: 3 }, { name: 'off-topic', unread: 12 }
+    ].map((c) => ({ ...c, hasUnread: c.unread > 0, bg: c.on ? '#1f252e' : 'transparent', fg: c.on || c.unread ? '#e3e7ee' : '#a8b0be', bar: c.on ? accent : 'transparent', weight: c.unread ? 600 : 400 }));
+    const voice = [
+      { name: 'strange', initial: 'S', bg: accent, ring: '#8fc79a', proto: 'mx', protoColor: MX },
+      { name: 'nixwitch', initial: 'N', bg: DC, ring: 'transparent', proto: 'dc', protoColor: DC },
+      { name: 'tux_fan', initial: 'T', bg: MX, ring: '#8fc79a', proto: 'mx', protoColor: MX }
+    ];
+    const mk = (m) => ({ ...m, protoColor: m.proto === 'dc' ? DC : MX, bg: m.bg || (m.proto === 'dc' ? DC : MX) });
+    const groups = [
+      { title: 'ONLINE — 4', members: [
+        { name: 'nixwitch', initial: 'N', status: 'editing waybar/style.css', dot: '#8fc79a', proto: 'dc', opacity: 1 },
+        { name: 'tux_fan', initial: 'T', status: 'in jam-room', dot: '#8fc79a', proto: 'mx', opacity: 1 },
+        { name: 'strange', initial: 'S', status: 'hyprland · fish', dot: '#8fc79a', proto: 'mx', opacity: 1, bg: accent },
+        { name: 'kernel_panic', initial: 'K', status: 'idle 12m', dot: '#e0b36a', proto: 'mx', opacity: 1, bg: '#d9b98a' }
+      ].map(mk) },
+      { title: 'OFFLINE — 2', members: [
+        { name: 'wayland_wanda', initial: 'W', status: 'last seen 2h ago', dot: '#5a6474', proto: 'dc', opacity: 0.6 },
+        { name: '0xdeadbeef', initial: '0', status: 'last seen yesterday', dot: '#5a6474', proto: 'mx', opacity: 0.6 }
+      ].map(mk) }
+    ];
+    return {
+      accent, gap: this.props.gap ?? 8, radius: this.props.radius ?? 10,
+      links: [
+        { proto: 'mx', name: 'strange.lab', color: MX, dot: '#8fc79a' },
+        { proto: 'mx', name: 'matrix.org', color: MX, dot: '#8fc79a' },
+        { proto: 'dc', name: 'bridge', color: DC, dot: '#8fc79a' }
+      ],
+      spaces, channels, voice, groups,
+      muted: s.muted, deaf: s.deaf, showMembers: s.showMembers,
+      micLabel: s.muted ? 'Unmute microphone' : 'Mute microphone',
+      deafLabel: s.deaf ? 'Undeafen' : 'Deafen',
+      membersLabel: s.showMembers ? 'Hide member list' : 'Show member list',
+      micColor: s.muted ? '#e07a7a' : '#a8b0be', micBg: s.muted ? '#2a1618' : 'transparent',
+      deafColor: s.deaf ? '#e07a7a' : '#a8b0be', deafBg: s.deaf ? '#2a1618' : 'transparent',
+      membersColor: s.showMembers ? '#e3e7ee' : '#8892a0',
+      toggleMute: () => this.setState({ muted: !s.muted }),
+      toggleDeaf: () => this.setState({ deaf: !s.deaf, muted: !s.deaf ? true : s.muted }),
+      toggleMembers: () => this.setState({ showMembers: !s.showMembers })
+    };
+  }
+}
+</script>
+</body>
+</html>

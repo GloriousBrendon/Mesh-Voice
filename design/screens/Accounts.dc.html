@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh — accounts and bridges</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#080c10}
+a{color:#d88f92}a:hover{color:#ebb3b5}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+input::placeholder{color:#8892a0}
+</style>
+</helmet>
+<div style="width: 1200px; height: 800px; box-sizing: border-box; padding: 8px; gap: 8px; display: flex; background: #080c10; color: #a8b0be; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px">
+
+  <main style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 22px; padding: 24px 28px; background: #0f1822; border: 2px solid #d88f92; border-radius: 10px; overflow: auto">
+    <div style="display: flex; align-items: flex-end; gap: 12px">
+      <div style="flex: 1">
+        <h1 style="margin: 0; color: #e3e7ee; font-size: 22px; font-weight: 600">Accounts &amp; bridges</h1>
+        <p style="margin: 4px 0 0; color: #8892a0">One client, every network. Matrix is native; Discord comes in through a bridge you control.</p>
+      </div>
+      <a href="Main.dc.html" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0; text-decoration: none; border: 1px solid #253040; border-radius: 6px; padding: 6px 10px">← back · Esc</a>
+    </div>
+
+    <!-- matrix -->
+    <section style="display: flex; flex-direction: column; gap: 8px">
+      <h2 style="margin: 0; display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: #8892a0; letter-spacing: 0.04em"><span style="color: #8fd6cc; font-weight: 700">mx</span> MATRIX HOMESERVERS</h2>
+      <div style="border: 1px solid #1f2a36; border-radius: 8px; overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 14px; padding: 14px">
+          <span style="flex: 0 0 40px; height: 40px; border-radius: 10px; background: #1f252e; color: #8fd6cc; font-family: 'JetBrains Mono', monospace; font-weight: 700; display: grid; place-items: center">SL</span>
+          <div style="flex: 1; min-width: 0">
+            <div style="display: flex; align-items: center; gap: 8px"><span style="color: #e3e7ee; font-weight: 600">@strange:strange.lab</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #1a0d0e; background: #d88f92; border-radius: 4px; padding: 1px 5px">PRIMARY</span></div>
+            <div style="margin-top: 2px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0">synapse · self-hosted · via tailscale</div>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-family: 'JetBrains Mono', monospace; font-size: 11px">
+            <span style="color: #8fc79a">● synced</span><span style="color: #a8b0be">device verified · key backup on</span>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 14px; padding: 14px; border-top: 1px solid #1a2430">
+          <span style="flex: 0 0 40px; height: 40px; border-radius: 10px; background: #1f252e; color: #8fd6cc; font-family: 'JetBrains Mono', monospace; font-weight: 700; display: grid; place-items: center">MO</span>
+          <div style="flex: 1; min-width: 0">
+            <div style="color: #e3e7ee; font-weight: 600">@strange_za:matrix.org</div>
+            <div style="margin-top: 2px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0">public homeserver · 14 rooms</div>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-family: 'JetBrains Mono', monospace; font-size: 11px">
+            <span style="color: #8fc79a">● synced</span><span style="color: #e0b36a">1 unverified session</span>
+          </div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-top: 1px solid #1a2430; background: #0b1219">
+          <label for="hs" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #a8b0be">add homeserver</label>
+          <input id="hs" placeholder="matrix.example.org  — we check .well-known for you" style="flex: 1; min-width: 240px; padding: 9px 12px; background: #080c10; border: 1px solid #253040; border-radius: 6px; color: #e3e7ee; font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none">
+          <button style="padding: 9px 14px; border-radius: 6px; border: 1px solid #253040; color: #e3e7ee">Sign in</button>
+          <button style="padding: 9px 14px; border-radius: 6px; border: 1px solid #253040; color: #e3e7ee">SSO / OIDC</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- discord -->
+    <section style="display: flex; flex-direction: column; gap: 8px">
+      <h2 style="margin: 0; display: flex; align-items: center; gap: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: #8892a0; letter-spacing: 0.04em"><span style="color: #9aa6f5; font-weight: 700">dc</span> DISCORD — THROUGH A BRIDGE</h2>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+        <div style="padding: 14px; border: 1px solid #d88f92; background: #1a1f28; border-radius: 8px">
+          <div style="display: flex; align-items: center; gap: 8px"><span style="width: 14px; height: 14px; border-radius: 50%; border: 2px solid #d88f92; box-sizing: border-box; display: grid; place-items: center"><span style="width: 6px; height: 6px; border-radius: 50%; background: #d88f92"></span></span><span style="color: #e3e7ee; font-weight: 600">My homeserver's bridge</span></div>
+          <div style="margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0">mautrix-discord on strange.lab</div>
+          <div style="margin-top: 6px; font-size: 12px; line-height: 1.5; color: #a8b0be">Your messages only pass through your own server on the way to Discord. Recommended.</div>
+        </div>
+        <div style="padding: 14px; border: 1px solid #253040; border-radius: 8px">
+          <div style="display: flex; align-items: center; gap: 8px"><span style="width: 14px; height: 14px; border-radius: 50%; border: 2px solid #3a4656; box-sizing: border-box"></span><span style="color: #e3e7ee; font-weight: 600">A bridge I trust</span></div>
+          <div style="margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0">@discordbot:[BRIDGE SERVER]</div>
+          <div style="margin-top: 6px; font-size: 12px; line-height: 1.5; color: #a8b0be">No homeserver of your own? Point Mesh at someone else's bridge bot. They can read what passes through it.</div>
+        </div>
+      </div>
+
+      <div style="border: 1px solid #1f2a36; border-radius: 8px; overflow: hidden">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: #0b1219">
+          <span style="flex: 0 0 34px; height: 34px; border-radius: 50%; background: #9aa6f5; color: #080c10; font-weight: 700; display: grid; place-items: center">S</span>
+          <div style="flex: 1"><div style="color: #e3e7ee; font-weight: 600">linked as strange</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">QR login · 4 servers · friends + DMs synced</div></div>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8fc79a">● bridged</span>
+          <button style="padding: 7px 12px; border-radius: 6px; border: 1px solid #253040; color: #e3e7ee; font-size: 13px">Unlink</button>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr))">
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid #1a2430"><span style="flex: 1; color: #e3e7ee">tiling.club</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">all channels</span><span role="switch" aria-checked="true" aria-label="Bridge tiling.club" style="width: 34px; height: 20px; border-radius: 10px; background: #d88f92; position: relative"><span style="position: absolute; top: 3px; left: 17px; width: 14px; height: 14px; border-radius: 50%; background: #1a0d0e"></span></span></div>
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid #1a2430; border-left: 1px solid #1a2430"><span style="flex: 1; color: #e3e7ee">Nagbreek</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">all channels</span><span role="switch" aria-checked="true" aria-label="Bridge Nagbreek" style="width: 34px; height: 20px; border-radius: 10px; background: #d88f92; position: relative"><span style="position: absolute; top: 3px; left: 17px; width: 14px; height: 14px; border-radius: 50%; background: #1a0d0e"></span></span></div>
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid #1a2430"><span style="flex: 1; color: #e3e7ee">gaming-za</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">3 of 21 channels</span><span role="switch" aria-checked="true" aria-label="Bridge gaming-za" style="width: 34px; height: 20px; border-radius: 10px; background: #d88f92; position: relative"><span style="position: absolute; top: 3px; left: 17px; width: 14px; height: 14px; border-radius: 50%; background: #1a0d0e"></span></span></div>
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid #1a2430; border-left: 1px solid #1a2430"><span style="flex: 1; color: #a8b0be">big-public-server</span><span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">off</span><span role="switch" aria-checked="false" aria-label="Bridge big-public-server" style="width: 34px; height: 20px; border-radius: 10px; background: #253040; position: relative"><span style="position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #8892a0"></span></span></div>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; padding: 12px 14px; border: 1px solid #5a4a2a; background: #1a1710; border-radius: 8px; font-size: 13px; line-height: 1.5; color: #d9c79f">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e0b36a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 18px; margin-top: 1px"><path d="M12 3 2 21h20L12 3zM12 10v5M12 18v.01"></path></svg>
+        <span>Discord doesn't officially allow third-party clients. Bridging a personal account works for most people, but Discord can flag or lock it. Mesh tells you once, then leaves it to you.</span>
+      </div>
+    </section>
+  </main>
+
+  <!-- flow -->
+  <aside aria-label="How messages flow" style="flex: 0 0 300px; display: flex; flex-direction: column; gap: 10px; padding: 18px; background: #0f1822; border: 2px solid #1f2a36; border-radius: 10px">
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">WHERE A MESSAGE GOES</div>
+    <div style="padding: 12px; border: 1px solid #d88f92; border-radius: 8px; background: #1a1f28"><div style="color: #e3e7ee; font-weight: 600">mesh</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">your desktop</div></div>
+    <div style="align-self: center; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">↓ matrix c-s api · e2ee</div>
+    <div style="padding: 12px; border: 1px solid #2f5a55; border-radius: 8px"><div style="color: #e3e7ee; font-weight: 600"><span style="color: #8fd6cc; font-family: 'JetBrains Mono', monospace; font-size: 11px">mx</span> strange.lab</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">synapse · homelab</div></div>
+    <div style="display: flex; gap: 8px">
+      <div style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">↓ federation</div>
+        <div style="width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #2f5a55; border-radius: 8px; text-align: center"><div style="color: #e3e7ee; font-size: 13px">matrix.org</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #8892a0">+ every other hs</div></div>
+      </div>
+      <div style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px">
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">↓ appservice</div>
+        <div style="width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #3c4580; border-radius: 8px; text-align: center"><div style="color: #e3e7ee; font-size: 13px">mautrix-discord</div><div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #8892a0">docker · same box</div></div>
+        <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">↓ gateway</div>
+        <div style="width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #3c4580; border-radius: 8px; text-align: center"><div style="color: #e3e7ee; font-size: 13px"><span style="color: #9aa6f5; font-family: 'JetBrains Mono', monospace; font-size: 11px">dc</span> discord</div></div>
+      </div>
+    </div>
+    <p style="margin: auto 0 0; font-size: 12px; line-height: 1.6; color: #8892a0">Mesh itself only ever speaks Matrix. Discord support is a bridge on your server, so the client stays small and <span style="font-family: 'JetBrains Mono', monospace">mesh-core</span> stays one protocol.</p>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1200,"height":800}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

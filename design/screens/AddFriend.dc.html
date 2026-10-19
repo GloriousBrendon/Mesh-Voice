@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh — add friend</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#080c10}
+a{color:#d88f92}a:hover{color:#ebb3b5}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+input::placeholder{color:#8892a0}
+</style>
+</helmet>
+<div style="width: 720px; height: 680px; box-sizing: border-box; padding: 8px; background: #080c10; color: #a8b0be; font-family: 'IBM Plex Sans', system-ui, sans-serif; font-size: 14px">
+  <div role="dialog" aria-labelledby="af-title" style="height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 18px; padding: 24px; background: #0f1822; border: 2px solid #d88f92; border-radius: 10px">
+    <div style="display: flex; align-items: flex-start; gap: 12px">
+      <div style="flex: 1">
+        <h1 id="af-title" style="margin: 0; color: #e3e7ee; font-size: 20px; font-weight: 600">Add a friend</h1>
+        <p style="margin: 4px 0 0; color: #8892a0">Paste anything — a Matrix ID, a Discord username. Mesh works out where it goes.</p>
+      </div>
+      <a href="Main.dc.html" aria-label="Close" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: #a8b0be; border: 1px solid #253040; text-decoration: none">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"></path></svg>
+      </a>
+    </div>
+
+    <div role="radiogroup" aria-label="Platform" style="display: flex; gap: 6px">
+      <sc-for list="{{modes}}" as="m" hint-placeholder-count="3">
+        <button role="radio" aria-checked="{{m.on}}" onClick="{{m.pick}}" style="padding: 6px 12px; border-radius: 6px; border: 1px solid {{m.border}}; background: {{m.bg}}; color: {{m.fg}}; font-family: 'JetBrains Mono', monospace; font-size: 12px">{{m.label}}</button>
+      </sc-for>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <label for="friend-id" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">USER ID OR USERNAME</label>
+      <div style="display: flex; align-items: center; gap: 10px; padding: 4px 4px 4px 14px; background: #080c10; border: 1px solid {{inputBorder}}; border-radius: 8px">
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: {{protoColor}}; min-width: 18px">{{protoTag}}</span>
+        <input id="friend-id" value="{{query}}" onChange="{{onQuery}}" placeholder="@someone:matrix.org  or  discord_name" autocomplete="off" spellcheck="false" style="flex: 1; min-width: 0; padding: 10px 0; background: transparent; border: 0; outline: none; color: #e3e7ee; font-family: 'JetBrains Mono', monospace; font-size: 15px">
+        <button onClick="{{send}}" style="padding: 10px 16px; border-radius: 6px; background: {{sendBg}}; color: {{sendFg}}; font-weight: 600; white-space: nowrap">{{sendLabel}}</button>
+      </div>
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: {{hintColor}}">{{hint}}</div>
+    </div>
+
+    <sc-if value="{{hasMatch}}" hint-placeholder-val="{{true}}">
+      <div style="display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: #141c26; border: 1px solid #253040; border-radius: 8px">
+        <span style="flex: 0 0 40px; height: 40px; border-radius: 50%; background: {{protoColor}}; color: #080c10; font-weight: 700; display: grid; place-items: center">{{initial}}</span>
+        <div style="flex: 1; min-width: 0">
+          <div style="color: #e3e7ee; font-weight: 600">{{displayName}}</div>
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #8892a0">{{route}}</div>
+        </div>
+        <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0">{{mutual}}</span>
+      </div>
+    </sc-if>
+
+    <div style="padding: 10px 12px; border: 1px dashed #253040; border-radius: 8px; font-size: 12px; line-height: 1.5; color: #8892a0">{{explain}}</div>
+
+    <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; overflow: auto">
+      <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #8892a0; letter-spacing: 0.04em">PENDING — {{pendingCount}}</div>
+      <sc-for list="{{pending}}" as="p" hint-placeholder-count="3">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid #1a2430">
+          <span style="flex: 0 0 32px; height: 32px; border-radius: 50%; background: {{p.color}}; color: #080c10; font-weight: 700; font-size: 13px; display: grid; place-items: center">{{p.initial}}</span>
+          <div style="flex: 1; min-width: 0">
+            <div style="color: #e3e7ee; font-size: 13px; font-family: 'JetBrains Mono', monospace">{{p.id}}</div>
+            <div style="font-size: 11px; color: #8892a0">{{p.dir}}</div>
+          </div>
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: {{p.color}}">{{p.proto}}</span>
+          <sc-if value="{{p.incoming}}" hint-placeholder-val="{{true}}">
+            <button onClick="{{p.accept}}" style="padding: 6px 12px; border-radius: 6px; background: #d88f92; color: #1a0d0e; font-weight: 600; font-size: 13px">Accept</button>
+            <button onClick="{{p.drop}}" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #253040; color: #a8b0be; font-size: 13px">Ignore</button>
+          </sc-if>
+          <sc-if value="{{p.outgoing}}" hint-placeholder-val="{{false}}">
+            <button onClick="{{p.drop}}" style="padding: 6px 12px; border-radius: 6px; border: 1px solid #253040; color: #a8b0be; font-size: 13px">Cancel</button>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":680}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { mode: 'auto', query: '@nixwitch:tiling.club', pending: [
+      { id: '@kernel_panic:arch-za.org', proto: 'mx', incoming: true, dir: 'wants to connect · 2 shared rooms' },
+      { id: 'wayland_wanda', proto: 'dc', incoming: true, dir: 'wants to be friends · in tiling.club' },
+      { id: '@0xdeadbeef:matrix.org', proto: 'mx', incoming: false, dir: 'invite sent 3d ago' }
+    ] };
+  }
+  detect(q, mode) {
+    const v = q.trim();
+    if (!v) return { kind: 'empty' };
+    const mx = /^@[a-z0-9._=\-\/]+:[a-z0-9.\-]+\.[a-z]{2,}(:\d+)?$/i;
+    const dc = /^[a-z0-9_.]{2,32}$/;
+    if (mode !== 'dc' && mx.test(v)) return { kind: 'mx', id: v, local: v.slice(1).split(':')[0], server: v.split(':')[1] };
+    if (mode === 'mx' && dc.test(v)) return { kind: 'mx', id: '@' + v + ':strange.lab', local: v, server: 'strange.lab', guessed: true };
+    if (mode !== 'mx' && dc.test(v.toLowerCase())) return { kind: 'dc', id: v.toLowerCase(), local: v.toLowerCase() };
+    if (mode !== 'mx' && /^.+#\d{4}$/.test(v)) return { kind: 'bad', why: 'Discord dropped #1234 tags — use their new username.' };
+    if (v.startsWith('@') && !v.includes(':')) return { kind: 'bad', why: 'Matrix IDs need a server: @' + v.slice(1) + ':matrix.org' };
+    return { kind: 'bad', why: 'Not a Matrix ID or Discord username.' };
+  }
+  renderVals() {
+    const s = this.state, A = '#d88f92', MX = '#8fd6cc', DC = '#9aa6f5';
+    const r = this.detect(s.query, s.mode);
+    const isMx = r.kind === 'mx', isDc = r.kind === 'dc', ok = isMx || isDc;
+    const modes = [['auto', 'auto-detect'], ['mx', 'matrix'], ['dc', 'discord']].map(([id, label]) => {
+      const on = id === s.mode; return { label, on, border: on ? A : '#253040', bg: on ? '#2a1d22' : 'transparent', fg: on ? '#e3e7ee' : '#a8b0be', pick: () => this.setState({ mode: id }) };
+    });
+    const pending = s.pending.map((p) => ({ ...p, outgoing: !p.incoming, initial: p.id.replace('@', '').charAt(0).toUpperCase(), color: p.proto === 'dc' ? DC : MX,
+      accept: () => this.setState({ pending: s.pending.filter((x) => x.id !== p.id) }),
+      drop: () => this.setState({ pending: s.pending.filter((x) => x.id !== p.id) }) }));
+    let hint = 'Start typing — @user:server for Matrix, a plain username for Discord.', hintColor = '#8892a0';
+    if (isMx) { hint = r.guessed ? '✓ matrix · assumed your homeserver — ' + r.id : '✓ matrix user on ' + r.server; hintColor = MX; }
+    if (isDc) { hint = '✓ discord username · via your bridge on strange.lab'; hintColor = DC; }
+    if (r.kind === 'bad') { hint = '✗ ' + r.why; hintColor = '#e07a7a'; }
+    const explain = isDc
+      ? 'Discord: the request goes out from your linked Discord account through the bridge. They accept it in Discord or in Mesh — both stay in sync.'
+      : 'Matrix has no friend list of its own, so Mesh opens an encrypted DM invite and saves them to your contacts (stored in your account data, so it follows you to every device).';
+    return {
+      modes, pending, pendingCount: pending.length, query: s.query,
+      onQuery: (e) => this.setState({ query: e.target.value }),
+      send: () => { if (!ok) return; this.setState({ query: '', pending: [{ id: r.id, proto: r.kind, incoming: false, dir: 'just sent' }, ...s.pending] }); },
+      protoTag: isMx ? 'mx' : isDc ? 'dc' : '··', protoColor: isMx ? MX : isDc ? DC : '#8892a0',
+      inputBorder: r.kind === 'bad' ? '#e07a7a' : ok ? A : '#253040',
+      sendLabel: isMx ? 'Send DM invite' : isDc ? 'Send friend request' : 'Send',
+      sendBg: ok ? A : '#1f252e', sendFg: ok ? '#1a0d0e' : '#8892a0',
+      hint, hintColor, hasMatch: ok,
+      initial: ok ? r.local.charAt(0).toUpperCase() : '',
+      displayName: ok ? r.local : '',
+      route: isMx ? r.id + '  →  from @strange:strange.lab' : isDc ? r.id + '  →  from strange (discord)' : '',
+      mutual: isMx ? '3 shared rooms' : isDc ? '1 shared server' : '',
+      explain
+    };
+  }
+}
+</script>
+</body>
+</html>
