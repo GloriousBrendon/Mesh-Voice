@@ -92,6 +92,12 @@ Working today:
   state, log out, Discord bridge status and a one-time warning about Discord's
   rules), Privacy & E2EE (Secure Backup), Rice, Keybinds, Voice & audio
   (devices). `Esc` goes back.
+- Add friend (top bar, or Settings → Friends): paste a Matrix ID or a
+  Discord username and Mesh works out which it is (or force matrix/discord),
+  with specific errors for `name#1234` and `@name` without a server. For
+  Matrix it looks up the profile and opens an encrypted DM invite (Matrix has
+  no friend list; the DM is recorded in `m.direct`). The pending list shows
+  incoming DM invites (accept / ignore) and invites you sent (cancel).
 - Tiled layout like a Hyprland desktop: top bar, space rail, channel pane,
   chat pane and member pane, separated by your `gaps_out` with your border
   width and rounding. The focused pane gets the accent border. A user panel
@@ -125,4 +131,9 @@ Working today:
 Not there yet: echo cancellation, video calls, group (Element Call) calls,
 history pagination on scroll-up, room avatars, sending our own typing
 notices, read receipts, sending attachments (the 📎 button is disabled),
-adding a new reaction (only existing pills can be clicked), notifications.
+adding a new reaction (only existing pills can be clicked), notifications,
+Discord friend requests (mautrix-discord can't send them; the button is
+disabled with an explanation), a separate `org.mesh.contacts` list (DMs in
+`m.direct` serve as the contact list), joining or creating spaces, voice
+channels, multiple accounts, choosing a third-party bridge, rebinding keys,
+and sharing a theme to a room.

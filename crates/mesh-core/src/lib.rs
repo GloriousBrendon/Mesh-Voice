@@ -3,6 +3,7 @@
 mod audio;
 mod bridge;
 mod call;
+mod contacts;
 mod session;
 mod spaces;
 mod timeline;
@@ -10,6 +11,7 @@ mod verification;
 
 pub use bridge::{Network, user_network};
 pub use call::CallEngine;
+pub use contacts::PendingContact;
 pub use session::{Session, SessionStore};
 pub use spaces::{SpaceGroup, group_by_space};
 pub use timeline::{ImageInfo, MediaRef, MessageKind, Reaction, TimelineMessage};

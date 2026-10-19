@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
-    MessageKind, Network, OwnedEventId, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
+    MessageKind, Network, OwnedEventId, PendingContact, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
     group_by_space,
 };
 use std::collections::HashMap;
@@ -139,6 +139,8 @@ struct Session {
     typing: HashMap<OwnedRoomId, Vec<String>>,
     /// Downloaded images by media key; `None` while loading.
     images: HashMap<String, Option<iced::widget::image::Handle>>,
+    /// The add-friend dialog, while it's open.
+    add_friend: Option<AddFriend>,
 }
 
 /// Text input id of the jump palette, to focus it on open.
@@ -219,6 +221,7 @@ impl Session {
             jump: None,
             typing: HashMap::new(),
             images: HashMap::new(),
+            add_friend: None,
         }
     }
 }
@@ -330,6 +333,18 @@ enum Message {
     /// Copy the generated theme.toml to the clipboard.
     ExportTheme,
     DiscordWarningSeen,
+    OpenAddFriend,
+    FriendMode(FriendMode),
+    FriendQuery(String),
+    /// A profile lookup finished: (user id, display name).
+    FriendProfile(String, Option<String>),
+    FriendSend,
+    FriendSent(Result<OwnedRoomId, String>),
+    PendingLoaded(Vec<PendingContact>),
+    PendingAccept(OwnedRoomId),
+    PendingIgnore(OwnedRoomId),
+    PendingCancel(OwnedRoomId, OwnedUserId),
+    PendingDone(Result<(), String>),
     /// Esc: close settings (and any open dialog).
     Escape,
     SetupBackup,
@@ -1108,7 +1123,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::Escape => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                if session.jump.is_some() {
+                if session.add_friend.is_some() {
+                    session.add_friend = None;
+                } else if session.jump.is_some() {
                     session.jump = None;
                 } else {
                     session.show_settings = false;
@@ -1215,6 +1232,130 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             iced::clipboard::write(toml)
         }
+        Message::OpenAddFriend => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.jump = None;
+            session.add_friend = Some(AddFriend::default());
+            Task::batch([
+                load_pending(session.client.clone()),
+                iced::widget::operation::focus(iced::widget::Id::new(FRIEND_INPUT)),
+            ])
+        }
+        Message::FriendMode(mode) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(dialog) = &mut session.add_friend
+            {
+                dialog.mode = mode;
+            }
+            Task::none()
+        }
+        Message::FriendQuery(query) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            let server = my_server(session);
+            let Some(dialog) = &mut session.add_friend else {
+                return Task::none();
+            };
+            dialog.query = query;
+            dialog.note = None;
+            // Look up the profile once the input is a complete Matrix ID.
+            let Detected::Matrix { id, .. } = detect_friend(&dialog.query, dialog.mode, &server) else {
+                return Task::none();
+            };
+            if dialog.profile.as_ref().is_some_and(|(looked_up, _)| *looked_up == id) {
+                return Task::none();
+            }
+            let Ok(user_id) = OwnedUserId::try_from(id.as_str()) else {
+                return Task::none();
+            };
+            let client = session.client.clone();
+            Task::perform(
+                async move { (id, client.display_name_of(&user_id).await) },
+                |(id, name)| Message::FriendProfile(id, name),
+            )
+        }
+        Message::FriendProfile(id, name) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(dialog) = &mut session.add_friend
+            {
+                dialog.profile = Some((id, name));
+            }
+            Task::none()
+        }
+        Message::FriendSend => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            let server = my_server(session);
+            let Some(dialog) = &mut session.add_friend else {
+                return Task::none();
+            };
+            // Only Matrix can be sent; Discord requests aren't possible through the bridge.
+            let Detected::Matrix { id, .. } = detect_friend(&dialog.query, dialog.mode, &server) else {
+                return Task::none();
+            };
+            let Ok(user_id) = OwnedUserId::try_from(id.as_str()) else {
+                return Task::none();
+            };
+            if dialog.busy {
+                return Task::none();
+            }
+            dialog.busy = true;
+            let client = session.client.clone();
+            Task::perform(
+                async move { client.start_dm(&user_id).await.map_err(|e| e.to_string()) },
+                Message::FriendSent,
+            )
+        }
+        Message::FriendSent(result) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            let Some(dialog) = &mut session.add_friend else {
+                return Task::none();
+            };
+            dialog.busy = false;
+            match result {
+                Ok(_) => {
+                    dialog.note = Some((format!("DM invite sent to {}.", dialog.query.trim()), false));
+                    dialog.query.clear();
+                    load_pending(session.client.clone())
+                }
+                Err(err) => {
+                    dialog.note = Some((format!("Couldn't send: {err}"), true));
+                    Task::none()
+                }
+            }
+        }
+        Message::PendingLoaded(pending) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(dialog) = &mut session.add_friend
+            {
+                dialog.pending = pending;
+            }
+            Task::none()
+        }
+        Message::PendingAccept(room_id) => pending_action(state, move |client| async move {
+            client.accept_invite(&room_id).await
+        }),
+        Message::PendingIgnore(room_id) => pending_action(state, move |client| async move {
+            client.leave_room(&room_id).await
+        }),
+        Message::PendingCancel(room_id, user_id) => pending_action(state, move |client| async move {
+            client.cancel_invite(&room_id, &user_id).await
+        }),
+        Message::PendingDone(result) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            if let Some(dialog) = &mut session.add_friend {
+                dialog.note = result.err().map(|err| (format!("That didn't work: {err}"), true));
+            }
+            load_pending(session.client.clone())
+        }
         Message::DiscordWarningSeen => {
             state.discord_warning_seen = true;
             persist(|c| c.discord_warning_seen = true);
@@ -1243,6 +1384,19 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             task
         }
     }
+}
+
+/// Runs an accept / ignore / cancel on a pending contact, then reloads the list.
+fn pending_action<F, Fut>(state: &App, action: F) -> Task<Message>
+where
+    F: FnOnce(Arc<MeshClient>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), mesh_core::MeshError>> + Send + 'static,
+{
+    let Screen::LoggedIn(session) = &state.screen else {
+        return Task::none();
+    };
+    let job = action(session.client.clone());
+    Task::perform(async move { job.await.map_err(|e| e.to_string()) }, Message::PendingDone)
 }
 
 /// Saves a config change, logging (not surfacing) a failure: the setting
@@ -1411,7 +1565,9 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         let shell = column![top_bar(session, p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
-        if session.jump.is_some() {
+        if let Some(dialog) = &session.add_friend {
+            stack![shell, add_friend_view(session, dialog, p, l)].into()
+        } else if session.jump.is_some() {
             stack![shell, jump_palette(session, p, l)].into()
         } else {
             shell.into()
@@ -1606,6 +1762,12 @@ fn top_bar<'a>(
             crumb,
             container(container(search).max_width(460)).width(Length::Fill).center_x(Length::Fill),
             chips,
+            ui::primary_button(
+                ui::sans("+ add friend", 13.0, Weight::Semibold, p.accent_text()),
+                Some(Message::OpenAddFriend),
+                p,
+                l,
+            ),
         ]
             .spacing(12)
             .align_y(iced::Alignment::Center)
@@ -2656,7 +2818,11 @@ fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         .style(flat_button_style(p)),
         ui::section("user", p),
         item("Accounts & bridges", SettingsPage::Accounts),
-        disabled("Friends", "Coming with the add-friend dialog."),
+        button(ui::sans("Friends", 14.0, Weight::Normal, p.text()))
+            .on_press(Message::OpenAddFriend)
+            .width(Length::Fill)
+            .padding([7, 10])
+            .style(flat_button_style(p)),
         item("Privacy & E2EE", SettingsPage::Privacy),
         ui::section("app", p),
         item("Rice", SettingsPage::Rice),
@@ -3308,6 +3474,316 @@ fn accounts_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Messag
     .into()
 }
 
+/// Which network the add-friend input is read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FriendMode {
+    #[default]
+    Auto,
+    Matrix,
+    Discord,
+}
+
+/// What the add-friend input looks like.
+#[derive(Debug, Clone, PartialEq)]
+enum Detected {
+    Empty,
+    /// `guessed`: a bare name completed with your homeserver.
+    Matrix { id: String, guessed: bool },
+    Discord(String),
+    Bad(String),
+}
+
+/// Reads the add-friend input: `@name:server` is Matrix, a new-style
+/// Discord username (`[a-z0-9_.]{2,32}`) is Discord, and the usual mistakes
+/// get a specific explanation.
+fn detect_friend(query: &str, mode: FriendMode, my_server: &str) -> Detected {
+    let v = query.trim();
+    if v.is_empty() {
+        return Detected::Empty;
+    }
+    let is_discord = |v: &str| {
+        (2..=32).contains(&v.len())
+            && v.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+    };
+    let is_matrix = v.starts_with('@')
+        && v.split_once(':').is_some_and(|(local, server)| local.len() > 1 && !server.is_empty())
+        && OwnedUserId::try_from(v).is_ok();
+    if mode != FriendMode::Discord && is_matrix {
+        return Detected::Matrix { id: v.to_string(), guessed: false };
+    }
+    let lower = v.to_lowercase();
+    if mode == FriendMode::Matrix && is_discord(&lower) && !my_server.is_empty() {
+        return Detected::Matrix { id: format!("@{lower}:{my_server}"), guessed: true };
+    }
+    if mode != FriendMode::Matrix && is_discord(&lower) {
+        return Detected::Discord(lower);
+    }
+    if mode != FriendMode::Matrix
+        && let Some((_, tag)) = v.rsplit_once('#')
+        && tag.len() == 4
+        && tag.chars().all(|c| c.is_ascii_digit())
+    {
+        return Detected::Bad("Discord dropped #1234 tags — use their new username.".to_string());
+    }
+    if v.starts_with('@') && !v.contains(':') {
+        return Detected::Bad(format!("Matrix IDs need a server: {v}:matrix.org"));
+    }
+    Detected::Bad("Not a Matrix ID or Discord username.".to_string())
+}
+
+/// The add-friend dialog's state.
+#[derive(Default)]
+struct AddFriend {
+    mode: FriendMode,
+    query: String,
+    /// The last profile lookup: (user id, display name if found).
+    profile: Option<(String, Option<String>)>,
+    pending: Vec<PendingContact>,
+    busy: bool,
+    /// Last result, and whether it's an error.
+    note: Option<(String, bool)>,
+}
+
+/// Text input id of the add-friend field, to focus it on open.
+const FRIEND_INPUT: &str = "friend";
+
+const DISCORD_REQUESTS_UNSUPPORTED: &str = "mautrix-discord can't send Discord friend requests. Message them in a server you share; the DM shows up here once it's bridged.";
+
+fn load_pending(client: Arc<MeshClient>) -> Task<Message> {
+    Task::perform(async move { client.pending_contacts().await }, Message::PendingLoaded)
+}
+
+/// The add-friend dialog, over the shell.
+fn add_friend_view<'a>(
+    session: &'a Session,
+    dialog: &'a AddFriend,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let server = my_server(session);
+    let detected = detect_friend(&dialog.query, dialog.mode, &server);
+    let (tag, tag_color) = match &detected {
+        Detected::Matrix { .. } => ("mx", p.proto_mx()),
+        Detected::Discord(_) => ("dc", p.proto_dc()),
+        _ => ("··", p.text_muted()),
+    };
+    let (hint, hint_color) = match &detected {
+        Detected::Empty => (
+            "Start typing — @user:server for Matrix, a plain username for Discord.".to_string(),
+            p.text_muted(),
+        ),
+        Detected::Matrix { id, guessed: true } => (format!("✓ matrix · assumed your homeserver — {id}"), p.proto_mx()),
+        Detected::Matrix { id, .. } => (
+            format!("✓ matrix user on {}", id.split_once(':').map_or("", |(_, s)| s)),
+            p.proto_mx(),
+        ),
+        Detected::Discord(_) => (format!("✓ discord username · via your bridge on {server}"), p.proto_dc()),
+        Detected::Bad(why) => (format!("✗ {why}"), p.danger()),
+    };
+    let edge = match &detected {
+        Detected::Bad(_) => p.danger(),
+        Detected::Matrix { .. } | Detected::Discord(_) => p.accent(),
+        Detected::Empty => p.border_ctrl(),
+    };
+
+    let send: Element<'_, Message> = match &detected {
+        Detected::Matrix { .. } => ui::primary_button(
+            ui::sans(if dialog.busy { "Sending…" } else { "Send DM invite" }, 14.0, Weight::Semibold, p.accent_text()),
+            (!dialog.busy).then_some(Message::FriendSend),
+            p,
+            l,
+        )
+        .padding([10, 16])
+        .into(),
+        Detected::Discord(_) => ui::not_yet(
+            ui::primary_button(ui::sans("Send friend request", 14.0, Weight::Semibold, p.accent_text()), None, p, l)
+                .padding([10, 16]),
+            DISCORD_REQUESTS_UNSUPPORTED,
+            p,
+        ),
+        _ => ui::primary_button(ui::sans("Send", 14.0, Weight::Semibold, p.accent_text()), None, p, l)
+            .padding([10, 16])
+            .into(),
+    };
+    let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
+    let input = text_input("@someone:matrix.org  or  discord_name", &dialog.query)
+        .id(iced::widget::Id::new(FRIEND_INPUT))
+        .on_input(Message::FriendQuery)
+        .on_submit(Message::FriendSend)
+        .padding([10, 0])
+        .size(14)
+        .font(ui::MONO)
+        .style(move |_, _| text_input::Style {
+            background: iced::Color::TRANSPARENT.into(),
+            border: iced::Border::default(),
+            icon: muted,
+            placeholder: muted,
+            value: bright,
+            selection,
+        });
+    let fill = p.background();
+    let field = container(
+        row![
+            container(ui::mono_bold(tag, 11.0, tag_color)).width(20),
+            input,
+            send,
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(iced::Padding { top: 4.0, right: 4.0, bottom: 4.0, left: 14.0 })
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    });
+
+    let mut modes = row![].spacing(6);
+    for (mode, label) in [
+        (FriendMode::Auto, "auto-detect"),
+        (FriendMode::Matrix, "matrix"),
+        (FriendMode::Discord, "discord"),
+    ] {
+        modes = modes.push(segment(label, dialog.mode == mode, Message::FriendMode(mode), p, l));
+    }
+
+    let mut col = column![
+        row![
+            column![
+                ui::sans("Add a friend", 20.0, Weight::Semibold, p.text_bright()),
+                text("Paste anything — a Matrix ID, a Discord username. Mesh works out where it goes.")
+                    .size(14)
+                    .color(p.text_muted()),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            ui::icon_button("✕", Some(Message::Escape), false, p, l),
+        ],
+        modes,
+        column![
+            ui::mono("USER ID OR USERNAME", 11.0, p.text_muted()),
+            field,
+            ui::mono(hint, 12.0, hint_color),
+        ]
+        .spacing(8),
+    ]
+    .spacing(18);
+
+    // Preview card: who this reaches, and from which account.
+    let me = session.my_profile.as_ref().map(|m| m.user_id.to_string()).unwrap_or_default();
+    let preview = match &detected {
+        Detected::Matrix { id, .. } => {
+            let name = dialog
+                .profile
+                .as_ref()
+                .filter(|(looked_up, _)| looked_up == id)
+                .and_then(|(_, name)| name.clone())
+                .unwrap_or_else(|| id.trim_start_matches('@').split(':').next().unwrap_or_default().to_string());
+            Some((name, format!("{id}  →  from {me}"), p.proto_mx()))
+        }
+        Detected::Discord(name) => Some((name.clone(), format!("{name}  →  through your bridge on {server}"), p.proto_dc())),
+        _ => None,
+    };
+    if let Some((name, route, color)) = preview {
+        let (card, card_edge) = (theme::mix(p.surface(), p.surface_alt(), 0.4), p.border_ctrl());
+        col = col.push(
+            container(
+                row![
+                    ui::avatar(&name, 40.0, color, p, None),
+                    column![
+                        ui::sans(name, 14.0, Weight::Semibold, p.text_bright()),
+                        ui::mono(route, 12.0, p.text_muted()),
+                    ]
+                    .spacing(2),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([12, 14])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(card.into()),
+                border: iced::border::rounded(8).color(card_edge).width(1),
+                ..container::Style::default()
+            }),
+        );
+    }
+
+    let explain = if matches!(detected, Detected::Discord(_)) {
+        DISCORD_REQUESTS_UNSUPPORTED
+    } else {
+        "Matrix has no friend list of its own, so Mesh opens an encrypted DM invite. It's recorded in your account data (m.direct), so it follows you to every device."
+    };
+    let box_edge = p.border_ctrl();
+    col = col.push(
+        container(text(explain).size(12).color(p.text_muted()))
+            .padding([10, 12])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                border: iced::border::rounded(8).color(box_edge).width(1),
+                ..container::Style::default()
+            }),
+    );
+    if let Some((note, error)) = &dialog.note {
+        col = col.push(ui::mono(note, 12.0, if *error { p.danger() } else { p.success() }));
+    }
+
+    let mut pending = column![ui::mono(format!("PENDING — {}", dialog.pending.len()), 11.0, p.text_muted())].spacing(6);
+    for contact in &dialog.pending {
+        let color = net_color(contact.network, p);
+        let mut line = row![
+            ui::avatar(contact.user_id.localpart(), 32.0, color, p, None),
+            column![
+                ui::mono(contact.user_id.to_string(), 13.0, p.text_bright()),
+                text(if contact.incoming { "wants to connect" } else { "invite sent" })
+                    .size(11)
+                    .color(p.text_muted()),
+            ]
+            .width(Length::Fill),
+            ui::mono(contact.network.tag(), 10.0, color),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center);
+        if contact.incoming {
+            line = line
+                .push(
+                    ui::primary_button(ui::sans("Accept", 13.0, Weight::Semibold, p.accent_text()), Some(Message::PendingAccept(contact.room_id.clone())), p, l),
+                )
+                .push(
+                    button(text("Ignore").size(13))
+                        .on_press(Message::PendingIgnore(contact.room_id.clone()))
+                        .padding([6, 12])
+                        .style(flat_button_style(p)),
+                );
+        } else {
+            line = line.push(
+                button(text("Cancel").size(13))
+                    .on_press(Message::PendingCancel(contact.room_id.clone(), contact.user_id.clone()))
+                    .padding([6, 12])
+                    .style(flat_button_style(p)),
+            );
+        }
+        pending = pending.push(column![container(line).padding([8, 4]), ui::hline(p)]);
+    }
+    col = col.push(scrollable(pending).height(Length::Fill));
+
+    let scrim = theme::alpha(p.background(), 0.6);
+    container(iced::widget::opaque(
+        ui::pane(col.padding(24), true, p, l, false)
+            .max_width(720)
+            .max_height(720),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(scrim.into()),
+        ..container::Style::default()
+    })
+    .into()
+}
+
 /// Secure Backup controls: status, set-up (shows the recovery key once), and
 /// restore-with-recovery-key to recover previously-undecryptable messages.
 fn backup_view<'a>(backup: &'a BackupUi, palette: &'a theme::Palette) -> Element<'a, Message> {
@@ -3422,6 +3898,26 @@ mod tests {
         );
         assert_eq!(split_fences("```unclosed\nx"), [(true, "x")]);
         assert_eq!(split_fences("plain"), [(false, "plain")]);
+    }
+
+    #[test]
+    fn friend_detection() {
+        use Detected::*;
+        let d = |q: &str, mode| detect_friend(q, mode, "strange.lab");
+        assert_eq!(d("", FriendMode::Auto), Empty);
+        assert_eq!(
+            d(" @nix:tiling.club ", FriendMode::Auto),
+            Matrix { id: "@nix:tiling.club".into(), guessed: false }
+        );
+        assert_eq!(
+            d("Nix", FriendMode::Matrix),
+            Matrix { id: "@nix:strange.lab".into(), guessed: true }
+        );
+        assert_eq!(d("wayland_wanda", FriendMode::Auto), Discord("wayland_wanda".into()));
+        assert!(matches!(d("@nix:tiling.club", FriendMode::Discord), Bad(_)));
+        assert!(matches!(d("wanda#1234", FriendMode::Auto), Bad(why) if why.contains("#1234")));
+        assert!(matches!(d("@nix", FriendMode::Auto), Bad(why) if why.contains("@nix:matrix.org")));
+        assert!(matches!(d("no spaces allowed", FriendMode::Auto), Bad(_)));
     }
 
     #[test]
