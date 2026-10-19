@@ -1319,10 +1319,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             };
             dialog.busy = false;
             match result {
-                Ok(_) => {
-                    dialog.note = Some((format!("DM invite sent to {}.", dialog.query.trim()), false));
-                    dialog.query.clear();
-                    load_pending(session.client.clone())
+                // Straight into the new (or existing) DM.
+                Ok(room_id) => {
+                    session.add_friend = None;
+                    session.active_space = None;
+                    let client = session.client.clone();
+                    Task::batch([
+                        Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
+                        update(state, Message::RoomSelected(room_id)),
+                    ])
                 }
                 Err(err) => {
                     dialog.note = Some((format!("Couldn't send: {err}"), true));
