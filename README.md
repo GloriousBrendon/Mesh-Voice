@@ -67,8 +67,14 @@ Working today:
 - Password login and session restore across restarts.
 - Room list sorted by recency, split into "Direct messages" and "Rooms"
   sections, with unread badges.
-- Timeline for the selected room: sender display names, timestamps, messages
-  grouped by day, anchored to the newest message. Loads the latest 50 events.
+- Timeline for the selected room: messages grouped by day and by author,
+  anchored to the newest message, from the latest 50 events. Fenced code blocks
+  and `inline code`, images (downloaded and decrypted, with a filename · size
+  caption), reaction pills (click to add yours or take it back), joins, leaves
+  and renames as small system lines, and "… is typing" under the composer.
+  Three densities: `cozy` (default), `compact` (no avatars, one line per
+  message) and `irc` (`[14:02] <nick> text`), set with `density = "compact"`
+  in `config.toml`.
 - Push-driven updates: the UI refreshes when sync delivers events (no polling).
 - Sending messages (composed as Markdown — `**bold**` etc. works).
 - E2EE device verification: incoming verification requests show a banner with
@@ -110,5 +116,6 @@ Working today:
   and output device on both ends.
 
 Not there yet: echo cancellation, video calls, group (Element Call) calls,
-history pagination on scroll-up, room avatars, typing indicators, read
-receipts, image attachments, notifications.
+history pagination on scroll-up, room avatars, sending our own typing
+notices, read receipts, sending attachments (the 📎 button is disabled),
+adding a new reaction (only existing pills can be clicked), notifications.

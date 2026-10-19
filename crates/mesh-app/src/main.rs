@@ -13,8 +13,10 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
-    Network, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage, group_by_space,
+    MessageKind, Network, OwnedEventId, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
+    group_by_space,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -72,6 +74,7 @@ struct App {
     theme_choice: String,
     iced_theme: IcedTheme,
     layout: theme::Layout,
+    density: theme::Density,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
     theme_files: Vec<PathBuf>,
     theme_stamps: Vec<Option<std::time::SystemTime>>,
@@ -126,6 +129,10 @@ struct Session {
     active_space: Option<OwnedRoomId>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
+    /// Who's typing, per room.
+    typing: HashMap<OwnedRoomId, Vec<String>>,
+    /// Downloaded images by media key; `None` while loading.
+    images: HashMap<String, Option<iced::widget::image::Handle>>,
 }
 
 /// Text input id of the jump palette, to focus it on open.
@@ -185,6 +192,8 @@ impl Session {
             groups: Vec::new(),
             active_space: None,
             jump: None,
+            typing: HashMap::new(),
+            images: HashMap::new(),
         }
     }
 }
@@ -282,6 +291,14 @@ enum Message {
     /// Enter in the jump palette: go to the top match.
     JumpSubmit,
     JumpTo(OwnedRoomId),
+    ImageLoaded(String, Result<Vec<u8>, String>),
+    /// Click on a reaction pill: add ours, or take it back (`mine`).
+    ToggleReaction {
+        event_id: OwnedEventId,
+        key: String,
+        mine: Option<OwnedEventId>,
+    },
+    ReactionDone(Result<(), String>),
     /// Esc: close settings (and any open dialog).
     Escape,
     SetupBackup,
@@ -322,6 +339,7 @@ fn boot() -> (App, Task<Message>) {
             theme_choice,
             iced_theme,
             layout: theme::layout_for_config(&config_path()),
+            density: theme::load_config(&config_path()).density.unwrap_or_default(),
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
             screen,
@@ -361,6 +379,27 @@ fn load_members(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message> 
         },
         |(room_id, members)| Message::MembersLoaded(room_id, members),
     )
+}
+
+/// Starts downloads for the timeline's images that aren't cached or loading.
+fn load_images(session: &mut Session) -> Task<Message> {
+    let mut tasks = Vec::new();
+    for message in &session.timeline {
+        let MessageKind::Image(info) = &message.kind else {
+            continue;
+        };
+        let key = info.media.key();
+        if session.images.contains_key(&key) {
+            continue;
+        }
+        session.images.insert(key.clone(), None);
+        let (client, media) = (session.client.clone(), info.media.clone());
+        tasks.push(Task::perform(
+            async move { client.media(&media).await.map_err(|e| e.to_string()) },
+            move |result| Message::ImageLoaded(key.clone(), result),
+        ));
+    }
+    Task::batch(tasks)
 }
 
 fn load_timeline(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message> {
@@ -470,9 +509,56 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 && session.selected_room.as_ref() == Some(&room_id)
             {
                 match result {
-                    Ok(timeline) => session.timeline = timeline,
+                    Ok(timeline) => {
+                        session.timeline = timeline;
+                        return load_images(session);
+                    }
                     Err(err) => session.status = Some(format!("Failed to load messages: {err}")),
                 }
+            }
+            Task::none()
+        }
+        Message::ImageLoaded(key, result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                match result {
+                    Ok(bytes) => {
+                        session
+                            .images
+                            .insert(key, Some(iced::widget::image::Handle::from_bytes(bytes)));
+                    }
+                    Err(err) => {
+                        // Leave it out of the cache so the next timeline load retries.
+                        tracing::warn!("image download failed: {err}");
+                        session.images.remove(&key);
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::ToggleReaction { event_id, key, mine } => {
+            let Screen::LoggedIn(session) = &state.screen else {
+                return Task::none();
+            };
+            let Some(room_id) = session.selected_room.clone() else {
+                return Task::none();
+            };
+            let client = session.client.clone();
+            Task::perform(
+                async move {
+                    match mine {
+                        Some(ours) => client.redact(&room_id, &ours).await,
+                        None => client.react(&room_id, &event_id, &key).await,
+                    }
+                    .map_err(|e| e.to_string())
+                },
+                Message::ReactionDone,
+            )
+        }
+        Message::ReactionDone(result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Err(err) = result
+            {
+                session.status = Some(format!("Reaction failed: {err}"));
             }
             Task::none()
         }
@@ -581,6 +667,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         session.call = None;
                         session.status = Some(format!("Call ended: {reason}"));
                     }
+                    Task::none()
+                }
+                MeshUpdate::Typing { room_id, names } => {
+                    session.typing.insert(room_id, names);
                     Task::none()
                 }
             }
@@ -1747,7 +1837,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let me = session.my_profile.as_ref().map(|me| &me.user_id);
     col = col.push(
         scrollable(
-            container(timeline_view(&session.timeline, me, p))
+            container(timeline_view(session, me, state.density, p))
                 .padding(iced::Padding { top: 16.0, right: 16.0, bottom: 8.0, left: 16.0 }),
         )
         .height(Length::Fill)
@@ -1805,6 +1895,7 @@ fn composer<'a>(
                 ..container::Style::default()
             }),
         row![
+            typing_line(session.typing.get(&room.id).map(Vec::as_slice).unwrap_or_default(), p),
             Space::new().width(Length::Fill),
             ui::mono("Enter send · markdown on", 11.0, p.text_muted()),
         ],
@@ -1909,16 +2000,16 @@ fn flat_button_style(
 }
 
 fn timeline_view<'a>(
-    timeline: &'a [TimelineMessage],
+    session: &'a Session,
     me: Option<&OwnedUserId>,
+    density: theme::Density,
     p: &theme::Palette,
 ) -> Element<'a, Message> {
-    let mut list = column![].spacing(4);
+    let mut list = column![].spacing(if density == theme::Density::Cozy { 4 } else { 2 });
     let mut previous_day: Option<chrono::NaiveDate> = None;
     let mut previous_sender: Option<&OwnedUserId> = None;
-    let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
 
-    for message in timeline {
+    for message in &session.timeline {
         let local: Option<DateTime<Local>> =
             Local.timestamp_millis_opt(message.timestamp_ms as i64).single();
 
@@ -1941,48 +2032,300 @@ fn timeline_view<'a>(
                 );
             }
         }
-
         let time_label = local
             .map(|t| t.format("%H:%M").to_string())
             .unwrap_or_default();
-        let body = text(&message.body).size(14).color(body_color).width(Length::Fill);
+        let net = net_color(message.sender_network, p);
+        let is_me = me == Some(&message.sender);
 
-        // A new author (or a new day) starts a group with avatar + header;
-        // their next messages sit under it.
-        if day_changed || previous_sender != Some(&message.sender) {
-            let net = net_color(message.sender_network, p);
-            let fill = if me == Some(&message.sender) { p.accent() } else { net };
-            let tag = match message.sender_network {
-                Network::Discord => "dc".to_string(),
-                Network::Matrix => format!("mx · {}", message.sender.server_name()),
-            };
+        if message.kind == MessageKind::System {
+            let indent = if density == theme::Density::Cozy { 50.0 } else { 0.0 };
             list = list.push(
                 row![
-                    ui::avatar(&message.sender_name, 38.0, fill, p, None),
-                    column![
-                        row![
-                            ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright()),
-                            ui::tag(tag, net, p),
-                            ui::mono(time_label, 11.0, p.text_muted()),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                        body,
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
+                    Space::new().width(indent),
+                    ui::mono("→", 11.0, net),
+                    ui::mono(&message.body, 11.0, p.text_muted()),
+                    ui::mono(message.sender_network.tag(), 11.0, net),
                 ]
-                .spacing(12)
-                .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO }),
+                .spacing(8)
+                .padding([4, 0]),
             );
-        } else {
-            list = list.push(row![Space::new().width(Length::Fixed(50.0)), body]);
+            previous_sender = None;
+            continue;
         }
+
+        let content = message_content(message, session, density == theme::Density::Irc, p);
+        let name_color = if is_me { p.accent() } else { p.text_bright() };
+        list = list.push(match density {
+            theme::Density::Cozy => {
+                // A new author (or a new day) starts a group with avatar + header;
+                // their next messages sit under it.
+                if day_changed || previous_sender != Some(&message.sender) {
+                    let tag = match message.sender_network {
+                        Network::Discord => "dc".to_string(),
+                        Network::Matrix => format!("mx · {}", message.sender.server_name()),
+                    };
+                    let fill = if is_me { p.accent() } else { net };
+                    Element::from(
+                        row![
+                            ui::avatar(&message.sender_name, 38.0, fill, p, None),
+                            column![
+                                row![
+                                    ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright()),
+                                    ui::tag(tag, net, p),
+                                    ui::mono(time_label, 11.0, p.text_muted()),
+                                ]
+                                .spacing(8)
+                                .align_y(iced::Alignment::Center),
+                                content,
+                            ]
+                            .spacing(4)
+                            .width(Length::Fill),
+                        ]
+                        .spacing(12)
+                        .padding(iced::Padding { top: 10.0, ..iced::Padding::ZERO }),
+                    )
+                } else {
+                    row![Space::new().width(Length::Fixed(50.0)), content].into()
+                }
+            }
+            theme::Density::Compact => row![
+                ui::mono(time_label, 11.0, p.text_muted()).width(Length::Fixed(40.0)),
+                ui::sans(&message.sender_name, 14.0, Weight::Semibold, name_color),
+                ui::mono(message.sender_network.tag(), 10.0, net),
+                content,
+            ]
+            .spacing(8)
+            .into(),
+            theme::Density::Irc => row![
+                ui::mono(format!("[{time_label}]"), 12.0, p.text_muted()),
+                ui::mono(format!("<{}>", message.sender_name), 12.0, if is_me { p.accent() } else { net }),
+                content,
+            ]
+            .spacing(8)
+            .into(),
+        });
 
         previous_sender = Some(&message.sender);
     }
 
     list.into()
+}
+
+/// A message's body: prose (with inline `code`), fenced code blocks, an
+/// image figure, and its reaction pills.
+fn message_content<'a>(
+    message: &'a TimelineMessage,
+    session: &'a Session,
+    all_mono: bool,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
+    let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
+    let mut col = column![].spacing(6).width(Length::Fill);
+
+    match &message.kind {
+        MessageKind::Image(info) => {
+            col = col.push(image_figure(&message.body, info, session, p));
+        }
+        MessageKind::Undecryptable => {
+            col = col.push(text(&message.body).size(13).color(p.warning()));
+        }
+        MessageKind::Emote => {
+            col = col.push(
+                text(format!("* {} {}", message.sender_name, message.body))
+                    .size(14)
+                    .color(body_color),
+            );
+        }
+        _ => {
+            for (is_code, part) in split_fences(&message.body) {
+                col = col.push(if is_code {
+                    code_block(part, p)
+                } else {
+                    prose(part, all_mono, body_color, p)
+                });
+            }
+        }
+    }
+
+    if !message.reactions.is_empty()
+        && let Some(event_id) = &message.event_id
+    {
+        let mut pills = row![].spacing(6);
+        for reaction in &message.reactions {
+            let mine = reaction.mine.is_some();
+            let (fill, edge) = if mine {
+                (theme::mix(p.accent(), p.surface(), 0.85), p.accent())
+            } else {
+                (theme::mix(p.surface(), p.surface_alt(), 0.5), p.border_ctrl())
+            };
+            let fg = if mine { p.text_bright() } else { p.text() };
+            pills = pills.push(
+                button(ui::mono(format!("{} {}", reaction.key, reaction.count), 11.0, fg))
+                    .on_press(Message::ToggleReaction {
+                        event_id: event_id.clone(),
+                        key: reaction.key.clone(),
+                        mine: reaction.mine.clone(),
+                    })
+                    .padding([3, 8])
+                    .style(move |_, _| button::Style {
+                        background: Some(fill.into()),
+                        border: iced::border::rounded(12).color(edge).width(1),
+                        ..button::Style::default()
+                    }),
+            );
+        }
+        col = col.push(pills);
+    }
+    col.into()
+}
+
+/// Splits a message into `(is_code, text)` parts at ``` fences; a fence's
+/// first line is dropped when it's a language tag. An unclosed fence is code
+/// to the end, like most renderers do.
+fn split_fences(body: &str) -> Vec<(bool, &str)> {
+    body.split("```")
+        .enumerate()
+        .filter_map(|(i, part)| {
+            let is_code = i % 2 == 1;
+            let part = if is_code {
+                match part.split_once('\n') {
+                    Some((first, rest)) if !first.trim().contains(' ') => rest,
+                    _ => part,
+                }
+            } else {
+                part
+            };
+            let part = part.trim_matches('\n');
+            (!part.trim().is_empty()).then_some((is_code, part))
+        })
+        .collect()
+}
+
+/// Prose with `inline code` spans.
+fn prose<'a>(body: &'a str, all_mono: bool, color: iced::Color, p: &theme::Palette) -> Element<'a, Message> {
+    let font = if all_mono { ui::MONO } else { ui::SANS };
+    let size = if all_mono { 12.0 } else { 14.0 };
+    if !body.contains('`') {
+        return text(body).font(font).size(size).color(color).into();
+    }
+    let (code_fill, code_fg) = (p.surface_alt(), p.text_bright());
+    let spans: Vec<iced::widget::text::Span<'a, (), iced::Font>> = body
+        .split('`')
+        .enumerate()
+        .map(|(i, part)| {
+            let span = iced::widget::span(part).size(size);
+            if i % 2 == 1 {
+                span.font(ui::MONO)
+                    .size(12)
+                    .color(code_fg)
+                    .background(code_fill)
+                    .border(iced::border::rounded(4))
+                    .padding([1, 5])
+            } else {
+                span.font(font).color(color)
+            }
+        })
+        .collect();
+    iced::widget::rich_text(spans).into()
+}
+
+fn code_block<'a>(code: &'a str, p: &theme::Palette) -> Element<'a, Message> {
+    let (fill, edge) = (p.background(), p.border());
+    container(ui::mono(code, 12.0, p.text()))
+        .padding([12, 14])
+        .max_width(520)
+        .style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(8).color(edge).width(1),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// An image with a mono caption (`name` · `W×H · size`), scaled to fit 440×320.
+fn image_figure<'a>(
+    name: &'a str,
+    info: &'a mesh_core::ImageInfo,
+    session: &'a Session,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
+    const MAX_W: f32 = 440.0;
+    const MAX_H: f32 = 320.0;
+    let (w, h) = match (info.width, info.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => {
+            let scale = (MAX_W / w as f32).min(MAX_H / h as f32).min(1.0);
+            (w as f32 * scale, h as f32 * scale)
+        }
+        _ => (MAX_W, 220.0),
+    };
+    let picture: Element<'_, Message> = match session.images.get(&info.media.key()) {
+        Some(Some(handle)) => iced::widget::image(handle.clone())
+            .width(w)
+            .height(h)
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        _ => container(ui::mono("loading…", 11.0, p.text_muted()))
+            .width(w)
+            .height(h)
+            .center_x(w)
+            .center_y(h)
+            .into(),
+    };
+
+    let mut details = Vec::new();
+    if let (Some(w), Some(h)) = (info.width, info.height) {
+        details.push(format!("{w}×{h}"));
+    }
+    if let Some(size) = info.size {
+        details.push(human_size(size));
+    }
+    let caption_fill = p.panel_dim();
+    let caption = container(
+        row![
+            ui::mono(name, 11.0, p.text_muted()).width(Length::Fill),
+            ui::mono(details.join(" · "), 11.0, p.text_muted()),
+        ]
+        .spacing(10),
+    )
+    .padding([6, 10])
+    .width(w)
+    .style(move |_| container::Style {
+        background: Some(caption_fill.into()),
+        ..container::Style::default()
+    });
+
+    let edge = p.border_ctrl();
+    container(column![picture, caption])
+        .clip(true)
+        .style(move |_| container::Style {
+            border: iced::border::rounded(8).color(edge).width(1),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn human_size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1 << 20 => format!("{:.1} MB", b as f64 / (1 << 20) as f64),
+        b if b >= 1 << 10 => format!("{} KB", b >> 10),
+        b => format!("{b} B"),
+    }
+}
+
+/// "alice is typing…" under the composer.
+fn typing_line<'a>(names: &[String], p: &theme::Palette) -> Element<'a, Message> {
+    let verb = match names.len() {
+        0 => return Space::new().into(),
+        1 => " is typing…",
+        _ => " are typing…",
+    };
+    let who = if names.len() > 3 {
+        "several people".to_string()
+    } else {
+        names.join(", ")
+    };
+    row![ui::mono(who, 11.0, p.proto_mx()), ui::mono(verb, 11.0, p.text_muted())].into()
 }
 
 fn day_label(day: chrono::NaiveDate) -> String {
@@ -2307,4 +2650,27 @@ fn main() -> iced::Result {
         .subscription(subscription)
         .title("Mesh")
         .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fences_split_prose_and_code() {
+        let body = "look:\n```toml\ngaps_in = 4\n```\nnice\n```\nraw code here\n```";
+        assert_eq!(
+            split_fences(body),
+            [(false, "look:"), (true, "gaps_in = 4"), (false, "nice"), (true, "raw code here")]
+        );
+        assert_eq!(split_fences("```unclosed\nx"), [(true, "x")]);
+        assert_eq!(split_fences("plain"), [(false, "plain")]);
+    }
+
+    #[test]
+    fn initials_from_words_or_letters() {
+        assert_eq!(initials("tiling club"), "TC");
+        assert_eq!(initials("Nagbreek"), "NA");
+        assert_eq!(initials("strange.lab"), "ST");
+    }
 }

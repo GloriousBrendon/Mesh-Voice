@@ -5,26 +5,24 @@ mod bridge;
 mod call;
 mod session;
 mod spaces;
+mod timeline;
 mod verification;
 
 pub use bridge::{Network, user_network};
 pub use call::CallEngine;
 pub use session::{Session, SessionStore};
 pub use spaces::{SpaceGroup, group_by_space};
+pub use timeline::{ImageInfo, MediaRef, MessageKind, Reaction, TimelineMessage};
 
-pub use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
+pub use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
 
 use matrix_sdk::{
     Client, Room,
     config::SyncSettings,
     encryption::verification::Verification,
     room::MessagesOptions,
-    ruma::events::{
-        AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-        room::message::{MessageType, RoomMessageEventContent},
-    },
+    ruma::events::room::message::{MessageType, RoomMessageEventContent},
 };
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -78,17 +76,6 @@ pub struct RoomSummary {
     pub children: Vec<OwnedRoomId>,
     /// Discord if a bridge says this room is a Discord portal.
     pub network: Network,
-}
-
-#[derive(Debug, Clone)]
-pub struct TimelineMessage {
-    pub sender: OwnedUserId,
-    pub sender_name: String,
-    /// Discord for bridge ghosts.
-    pub sender_network: Network,
-    pub body: String,
-    /// Origin server timestamp in milliseconds since the epoch.
-    pub timestamp_ms: u64,
 }
 
 /// One emoji of a SAS short-auth string, e.g. ("🐶", "Dog").
@@ -171,6 +158,11 @@ pub enum MeshUpdate {
     CallEnded {
         call_id: String,
         reason: String,
+    },
+    /// Who is typing in a room now (display names, never us); empty = nobody.
+    Typing {
+        room_id: OwnedRoomId,
+        names: Vec<String>,
     },
 }
 
@@ -347,54 +339,7 @@ impl MeshClient {
         options.limit = limit.into();
         let messages = room.messages(options).await?;
 
-        let mut display_names: HashMap<OwnedUserId, String> = HashMap::new();
-        let mut timeline = Vec::new();
-
-        for event in messages.chunk {
-            let (sender, body, ts) = match event.raw().deserialize() {
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-                    SyncMessageLikeEvent::Original(message),
-                ))) => {
-                    let Some(body) = plain_body(&message.content.msgtype) else {
-                        continue;
-                    };
-                    (message.sender, body.to_owned(), message.origin_server_ts)
-                }
-                // Still encrypted: we lack the key. Show it rather than silently drop it.
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(
-                    SyncMessageLikeEvent::Original(encrypted),
-                ))) => (
-                    encrypted.sender,
-                    "🔒 Unable to decrypt this message (restore keys in Settings → Secure Backup)"
-                        .to_owned(),
-                    encrypted.origin_server_ts,
-                ),
-                _ => continue,
-            };
-
-            if !display_names.contains_key(&sender) {
-                let name = room
-                    .get_member_no_sync(&sender)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|member| member.display_name().map(str::to_owned))
-                    .unwrap_or_else(|| sender.localpart().to_owned());
-                display_names.insert(sender.clone(), name);
-            }
-
-            timeline.push(TimelineMessage {
-                sender_name: display_names[&sender].clone(),
-                sender_network: user_network(&sender),
-                sender,
-                body,
-                timestamp_ms: ts.0.into(),
-            });
-        }
-
-        // `backward` pagination yields newest-first; the UI wants oldest-first.
-        timeline.reverse();
-        Ok(timeline)
+        Ok(timeline::build(&room, messages.chunk, self.client.user_id()).await)
     }
 
     /// Subscribes to push updates from the sync loop: room changes and
@@ -403,6 +348,7 @@ impl MeshClient {
         let (tx, rx) = mpsc::unbounded_channel();
 
         verification::register_handlers(&self.client, tx.clone());
+        timeline::register_typing_handler(&self.client, tx.clone());
         self.call.set_update_sender(tx.clone());
         self.call.register_handlers();
 
@@ -493,6 +439,34 @@ impl MeshClient {
             room.send(RoomMessageEventContent::text_markdown(body)).await?;
         }
         Ok(())
+    }
+
+    /// Reacts to `event_id` with `key` (an emoji, usually).
+    pub async fn react(&self, room_id: &OwnedRoomId, event_id: &OwnedEventId, key: &str) -> MeshResult<()> {
+        use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotation};
+        if let Some(room) = self.client.get_room(room_id) {
+            room.send(ReactionEventContent::new(Annotation::new(event_id.clone(), key.to_owned())))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Takes back one of our own events (e.g. a reaction).
+    pub async fn redact(&self, room_id: &OwnedRoomId, event_id: &OwnedEventId) -> MeshResult<()> {
+        if let Some(room) = self.client.get_room(room_id) {
+            room.redact(event_id, None, None)
+                .await
+                .map_err(matrix_sdk::Error::from)?;
+        }
+        Ok(())
+    }
+
+    /// Downloads (and decrypts, for encrypted rooms) a piece of media. Cached
+    /// in the local store, so a second call is cheap.
+    pub async fn media(&self, media: &MediaRef) -> MeshResult<Vec<u8>> {
+        use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
+        let request = MediaRequestParameters { source: media.0.clone(), format: MediaFormat::File };
+        Ok(self.client.media().get_media_content(&request, true).await?)
     }
 
     /// Logs out: invalidates the access token on the server (which also stops

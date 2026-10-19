@@ -362,6 +362,20 @@ pub struct Config {
     pub discord_voice_url: Option<String>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
+    pub density: Option<Density>,
+}
+
+/// How tightly the timeline is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Density {
+    /// No avatars, one line per message.
+    Compact,
+    /// Avatars and author headers, grouped by author.
+    #[default]
+    Cozy,
+    /// `[14:02] <nick> text`, all mono.
+    Irc,
 }
 
 pub fn load_config(config_path: &Path) -> Config {
