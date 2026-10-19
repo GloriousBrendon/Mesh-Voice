@@ -340,6 +340,9 @@ pub struct Config {
     /// Page to open for Discord voice (e.g. a self-hosted browser running
     /// Discord web). Hand-edited; when set, the sidebar shows a 🎧 button.
     pub discord_voice_url: Option<String>,
+    /// Command the 🎧 button runs instead (e.g. a script that shows a voice
+    /// window); wins over `discord_voice_url`.
+    pub discord_voice_command: Option<String>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
     pub density: Option<Density>,
@@ -471,8 +474,19 @@ pub fn update_config(config_path: &Path, change: impl FnOnce(&mut Config)) -> an
     Ok(())
 }
 
-pub fn load_discord_voice_url(config_path: &Path) -> Option<String> {
-    load_config(config_path).discord_voice_url
+/// What the 🎧 button does.
+#[derive(Debug, Clone)]
+pub enum DiscordVoice {
+    Command(String),
+    Url(String),
+}
+
+pub fn load_discord_voice(config_path: &Path) -> Option<DiscordVoice> {
+    let config = load_config(config_path);
+    config
+        .discord_voice_command
+        .map(DiscordVoice::Command)
+        .or(config.discord_voice_url.map(DiscordVoice::Url))
 }
 
 /// The persisted theme choice: a preset name, [`RICE`] (the default) or [`CUSTOM`].
@@ -649,7 +663,9 @@ mod tests {
         std::fs::write(&path, "theme = \"Nord\"\ndiscord_voice_url = \"https://x\"\n").unwrap();
         save_choice(&path, "Gruvbox Dark").unwrap();
         assert_eq!(load_choice(&path), "Gruvbox Dark");
-        assert_eq!(load_discord_voice_url(&path).as_deref(), Some("https://x"));
+        assert!(matches!(load_discord_voice(&path), Some(DiscordVoice::Url(u)) if u == "https://x"));
+        update_config(&path, |c| c.discord_voice_command = Some("toggle".into())).unwrap();
+        assert!(matches!(load_discord_voice(&path), Some(DiscordVoice::Command(c)) if c == "toggle"));
         let _ = std::fs::remove_file(&path);
     }
 

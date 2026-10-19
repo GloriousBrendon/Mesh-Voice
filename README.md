@@ -46,8 +46,10 @@ Windows), see [theme.example.toml](theme.example.toml). The choice persists in
 ### Discord voice button
 
 Add `discord_voice_url = "https://…"` to `config.toml` and a 🎧 button appears
-in the sidebar that opens it in your browser — e.g. a self-hosted browser
-running Discord web, for voice alongside a text-only Discord bridge.
+in the channel pane that opens it in your browser, e.g. a self-hosted browser
+running Discord web, for voice alongside a text-only Discord bridge. Or set
+`discord_voice_command = "…"` to have the button run a command instead (say, a
+script that shows or hides a voice window); it wins over the URL.
 
 ## Build & run
 

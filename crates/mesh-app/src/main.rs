@@ -125,7 +125,7 @@ struct Session {
     selected_input: String,
     selected_output: String,
     /// From config.toml; shows the 🎧 Discord voice button when set.
-    discord_voice_url: Option<String>,
+    discord_voice: Option<theme::DiscordVoice>,
     /// The pane with the accent border.
     focused: Pane,
     show_members: bool,
@@ -213,7 +213,7 @@ impl Session {
             output_devices: Vec::new(),
             selected_input: DEFAULT_DEVICE.to_string(),
             selected_output: DEFAULT_DEVICE.to_string(),
-            discord_voice_url: theme::load_discord_voice_url(&config_path()),
+            discord_voice: theme::load_discord_voice(&config_path()),
             focused: Pane::Chat,
             show_members: true,
             groups: Vec::new(),
@@ -1008,10 +1008,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::OpenDiscordVoice => {
             if let Screen::LoggedIn(session) = &mut state.screen
-                && let Some(url) = &session.discord_voice_url
-                && let Err(err) = open_url(url)
+                && let Some(voice) = &session.discord_voice
             {
-                session.status = Some(format!("Could not open {url}: {err}"));
+                let (what, result) = match voice {
+                    theme::DiscordVoice::Url(url) => (url, open_url(url)),
+                    theme::DiscordVoice::Command(cmd) => (cmd, run_command(cmd)),
+                };
+                if let Err(err) = result {
+                    session.status = Some(format!("Could not open {what}: {err}"));
+                }
             }
             Task::none()
         }
@@ -1994,7 +1999,7 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
             .width(Length::Fill),
     ]
     .align_y(iced::Alignment::Center);
-    if session.discord_voice_url.is_some() {
+    if session.discord_voice.is_some() {
         title = title.push(
             iced::widget::tooltip(
                 ui::icon_button("🎧", Some(Message::OpenDiscordVoice), false, p, l),
@@ -2330,6 +2335,23 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
         ..container::Style::default()
     })
     .into()
+}
+
+/// Runs a shell command in the background, without waiting for it.
+fn run_command(cmd: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C");
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c");
+        c
+    };
+    command.arg(cmd).spawn().map(|_| ())
 }
 
 /// Opens `url` in the default browser.
@@ -3402,9 +3424,10 @@ fn rice_export<'a>(state: &'a App) -> Element<'a, Message> {
 }
 
 fn voice_page<'a>(session: &'a Session, p: &'a theme::Palette) -> Element<'a, Message> {
-    let discord = match &session.discord_voice_url {
-        Some(url) => format!("The 🎧 button opens {url} for Discord voice."),
-        None => "Set discord_voice_url in config.toml to get a 🎧 button for Discord voice.".to_string(),
+    let discord = match &session.discord_voice {
+        Some(theme::DiscordVoice::Url(url)) => format!("The 🎧 button opens {url} for Discord voice."),
+        Some(theme::DiscordVoice::Command(cmd)) => format!("The 🎧 button runs `{cmd}` for Discord voice."),
+        None => "Set discord_voice_command or discord_voice_url in config.toml to get a 🎧 button for Discord voice.".to_string(),
     };
     column![
         page_header("Voice & audio", "Devices for 1:1 calls, and Discord voice.", p),
