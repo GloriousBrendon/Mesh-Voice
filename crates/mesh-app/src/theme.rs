@@ -95,14 +95,26 @@ pub const CUSTOM: &str = "custom";
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Config {
     theme: Option<String>,
+    /// Page to open for Discord voice (e.g. a self-hosted browser running
+    /// Discord web). Hand-edited; when set, the sidebar shows a 🎧 button.
+    discord_voice_url: Option<String>,
+}
+
+fn load_config(config_path: &PathBuf) -> Config {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<Config>(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn load_discord_voice_url(config_path: &PathBuf) -> Option<String> {
+    load_config(config_path).discord_voice_url
 }
 
 /// The persisted theme choice: a preset name, or [`CUSTOM`] (the default).
 pub fn load_choice(config_path: &PathBuf) -> String {
-    std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|s| toml::from_str::<Config>(&s).ok())
-        .and_then(|c| c.theme)
+    load_config(config_path)
+        .theme
         .unwrap_or_else(|| CUSTOM.to_string())
 }
 
@@ -110,8 +122,10 @@ pub fn save_choice(config_path: &PathBuf, choice: &str) -> anyhow::Result<()> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Keep the other (hand-edited) keys.
     let config = Config {
         theme: Some(choice.to_string()),
+        ..load_config(config_path)
     };
     std::fs::write(config_path, toml::to_string_pretty(&config)?)?;
     Ok(())
@@ -193,4 +207,19 @@ fn parse_hex(hex: &str) -> Color {
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
     Color::from_rgb8(r, g, b)
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn save_choice_keeps_other_keys() {
+        let path = std::env::temp_dir().join(format!("mesh-config-test-{}.toml", std::process::id()));
+        std::fs::write(&path, "theme = \"Nord\"\ndiscord_voice_url = \"https://x\"\n").unwrap();
+        save_choice(&path, "Gruvbox Dark").unwrap();
+        assert_eq!(load_choice(&path), "Gruvbox Dark");
+        assert_eq!(load_discord_voice_url(&path).as_deref(), Some("https://x"));
+        let _ = std::fs::remove_file(&path);
+    }
 }

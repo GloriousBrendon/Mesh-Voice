@@ -60,6 +60,12 @@ impl SessionStore {
     pub fn save(&self, session: &Session) -> MeshResult<()> {
         let json = serde_json::to_vec_pretty(session)?;
         std::fs::write(&self.path, json)?;
+        // Holds the access token: owner-only on Unix (Windows profile dirs already are).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 

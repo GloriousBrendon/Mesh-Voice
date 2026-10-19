@@ -20,7 +20,7 @@ use bytes::Bytes;
 use matrix_sdk::{
     Client,
     ruma::{
-        OwnedRoomId, OwnedUserId, OwnedVoipId, UInt, VoipVersionId,
+        MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, OwnedVoipId, UInt, VoipVersionId,
         api::client::voip::get_turn_server_info,
         events::call::{
             SessionDescription,
@@ -28,6 +28,7 @@ use matrix_sdk::{
             candidates::{Candidate, CallCandidatesEventContent, OriginalSyncCallCandidatesEvent},
             hangup::{CallHangupEventContent, OriginalSyncCallHangupEvent},
             invite::{CallInviteEventContent, OriginalSyncCallInviteEvent},
+            reject::OriginalSyncCallRejectEvent,
         },
     },
 };
@@ -145,7 +146,20 @@ impl CallEngine {
         client.add_event_handler(move |ev: OriginalSyncCallHangupEvent, _room: matrix_sdk::Room| {
             let engine = engine.clone();
             async move {
-                engine.on_hangup(ev).await;
+                engine
+                    .on_remote_end(ev.sender, ev.content.call_id.as_str(), "the other party hung up")
+                    .await;
+            }
+        });
+
+        // Element declines v1 calls with m.call.reject rather than a hangup.
+        let engine = self.clone();
+        client.add_event_handler(move |ev: OriginalSyncCallRejectEvent, _room: matrix_sdk::Room| {
+            let engine = engine.clone();
+            async move {
+                engine
+                    .on_remote_end(ev.sender, ev.content.call_id.as_str(), "call declined")
+                    .await;
             }
         });
     }
@@ -253,7 +267,9 @@ impl CallEngine {
             })
         }));
 
-        // Peer connection lifecycle -> UI updates.
+        // Peer connection lifecycle -> UI updates. `Disconnected` is transient
+        // (ICE often recovers from a network blip), so only `Failed` ends the
+        // call; `Closed` follows our own hangup, which already notified the UI.
         let engine = self.clone();
         let state_call = call_id.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
@@ -266,13 +282,10 @@ impl CallEngine {
                             call_id: state_call,
                         });
                     }
-                    RTCPeerConnectionState::Failed
-                    | RTCPeerConnectionState::Disconnected
-                    | RTCPeerConnectionState::Closed => {
-                        engine.clear_if(&state_call).await;
-                        engine.emit(MeshUpdate::CallEnded {
-                            call_id: state_call,
-                            reason: "connection lost".to_owned(),
+                    RTCPeerConnectionState::Failed => {
+                        // Off the callback: end_call closes this peer connection.
+                        tokio::spawn(async move {
+                            engine.end_call(&state_call, "connection lost").await;
                         });
                     }
                     _ => {}
@@ -390,7 +403,25 @@ impl CallEngine {
             _playback: Some(playback),
             _capture_task: Some(task),
         });
-        self.emit(MeshUpdate::CallConnecting { call_id });
+        drop(active);
+        self.emit(MeshUpdate::CallConnecting {
+            call_id: call_id.clone(),
+        });
+
+        // Stop ringing once the invite expires unanswered.
+        let engine = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(CALL_LIFETIME_MS.into())).await;
+            let unanswered = engine
+                .active
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|c| c.call_id == call_id && !c.remote_description_set);
+            if unanswered {
+                engine.end_call(&call_id, "no answer").await;
+            }
+        });
         Ok(())
     }
 
@@ -460,9 +491,18 @@ impl CallEngine {
 
     /// Hangs up / rejects the current call and sends `m.call.hangup`.
     pub async fn hangup(self: &Arc<Self>) -> Result<(), String> {
-        let call = self.active.lock().await.take();
-        let Some(call) = call else {
-            return Ok(());
+        let call_id = self.active.lock().await.as_ref().map(|c| c.call_id.clone());
+        if let Some(call_id) = call_id {
+            self.end_call(&call_id, "hung up").await;
+        }
+        Ok(())
+    }
+
+    /// Ends `call_id` if it is still the active call: stops media, sends
+    /// `m.call.hangup` so the other side stops too, and notifies the UI.
+    async fn end_call(&self, call_id: &str, reason: &str) {
+        let Some(call) = self.take_if(call_id).await else {
+            return;
         };
         if let Some(pc) = &call.peer {
             let _ = pc.close().await;
@@ -475,9 +515,8 @@ impl CallEngine {
         }
         self.emit(MeshUpdate::CallEnded {
             call_id: call.call_id,
-            reason: "hung up".to_owned(),
+            reason: reason.to_owned(),
         });
-        Ok(())
     }
 
     pub async fn set_muted(&self, muted: bool) {
@@ -486,11 +525,11 @@ impl CallEngine {
         }
     }
 
+    /// Silences remote audio. Mic mute is separate: the UI sets it alongside
+    /// (deafen implies mute, like Discord) via [`Self::set_muted`].
     pub async fn set_deafened(&self, deafened: bool) {
         if let Some(call) = self.active.lock().await.as_ref() {
             call.deafened.store(deafened, Ordering::Relaxed);
-            // Deafening also mutes the mic, matching Discord's behavior.
-            call.muted.store(deafened, Ordering::Relaxed);
         }
     }
 
@@ -503,6 +542,14 @@ impl CallEngine {
             if Some(invitee.as_ref()) != self.client.user_id() {
                 return;
             }
+        }
+        // Sync replays invites sent while we were offline; don't ring for those.
+        if invite_expired(
+            MilliSecondsSinceUnixEpoch::now().get().into(),
+            ev.origin_server_ts.get().into(),
+            ev.content.lifetime.into(),
+        ) {
+            return;
         }
 
         let call_id = ev.content.call_id.to_string();
@@ -542,6 +589,9 @@ impl CallEngine {
 
     async fn on_answer(self: &Arc<Self>, ev: OriginalSyncCallAnswerEvent) {
         if Some(ev.sender.as_ref()) == self.client.user_id() {
+            // Our echo, or another of our devices picked up a call ringing here.
+            self.stop_ringing_elsewhere(ev.content.call_id.as_str(), "answered on another device")
+                .await;
             return;
         }
         let mut active = self.active.lock().await;
@@ -592,34 +642,47 @@ impl CallEngine {
         }
     }
 
-    async fn on_hangup(self: &Arc<Self>, ev: OriginalSyncCallHangupEvent) {
-        if Some(ev.sender.as_ref()) == self.client.user_id() {
+    /// The other side hung up or declined (or one of our other devices did).
+    async fn on_remote_end(&self, sender: OwnedUserId, call_id: &str, reason: &str) {
+        if Some(sender.as_ref()) == self.client.user_id() {
+            self.stop_ringing_elsewhere(call_id, "declined on another device").await;
             return;
         }
+        let Some(call) = self.take_if(call_id).await else {
+            return;
+        };
+        if let Some(pc) = &call.peer {
+            let _ = pc.close().await;
+        }
+        self.emit(MeshUpdate::CallEnded {
+            call_id: call.call_id,
+            reason: reason.to_owned(),
+        });
+    }
+
+    /// Drops an incoming call that is still only ringing here (no media yet).
+    async fn stop_ringing_elsewhere(&self, call_id: &str, reason: &str) {
         let mut active = self.active.lock().await;
-        let matches = active
+        if active
             .as_ref()
-            .is_some_and(|c| c.call_id == ev.content.call_id.as_str());
-        if !matches {
-            return;
-        }
-        if let Some(call) = active.take() {
-            if let Some(pc) = &call.peer {
-                let _ = pc.close().await;
-            }
+            .is_some_and(|c| c.call_id == call_id && c.peer.is_none())
+        {
+            *active = None;
             drop(active);
             self.emit(MeshUpdate::CallEnded {
-                call_id: call.call_id,
-                reason: "the other party hung up".to_owned(),
+                call_id: call_id.to_owned(),
+                reason: reason.to_owned(),
             });
         }
     }
 
-    /// Clears the active call if it still matches `call_id` (used by teardown).
-    async fn clear_if(&self, call_id: &str) {
+    /// Takes the active call out if it still matches `call_id`.
+    async fn take_if(&self, call_id: &str) -> Option<ActiveCall> {
         let mut active = self.active.lock().await;
         if active.as_ref().is_some_and(|c| c.call_id == call_id) {
-            *active = None;
+            active.take()
+        } else {
+            None
         }
     }
 
@@ -682,4 +745,22 @@ fn spawn_playback_reader(
 /// A short random id for call/party identifiers.
 fn new_id() -> String {
     matrix_sdk::ruma::TransactionId::new().to_string()
+}
+
+/// True once an invite sent at `sent_ms` is older than its `lifetime_ms`.
+fn invite_expired(now_ms: u64, sent_ms: u64, lifetime_ms: u64) -> bool {
+    now_ms.saturating_sub(sent_ms) > lifetime_ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invite_expired;
+
+    #[test]
+    fn invite_expiry() {
+        assert!(!invite_expired(10_000, 5_000, 60_000));
+        assert!(invite_expired(100_000, 5_000, 60_000));
+        // Sender clock ahead of ours: treat as fresh, not expired.
+        assert!(!invite_expired(5_000, 10_000, 60_000));
+    }
 }

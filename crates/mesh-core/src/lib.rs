@@ -222,10 +222,22 @@ impl MeshClient {
         matches!(SessionStore::new(data_dir).load(), Ok(Some(_)))
     }
 
-    /// Runs the sync loop forever; call this in a background task.
+    /// Runs the sync loop forever; call this in a background task. Network
+    /// errors (homeserver restart, Wi-Fi drop) are retried; it only returns
+    /// once the access token is rejected, i.e. after logout.
     pub async fn run_sync(&self) -> MeshResult<()> {
-        self.client.sync(SyncSettings::default()).await?;
-        Ok(())
+        use matrix_sdk::ruma::api::error::ErrorKind;
+        loop {
+            // `sync` resumes from the stored sync token, so retrying loses nothing.
+            let Err(err) = self.client.sync(SyncSettings::default()).await else {
+                return Ok(());
+            };
+            if matches!(err.client_api_error_kind(), Some(ErrorKind::UnknownToken { .. })) {
+                return Err(err.into());
+            }
+            tracing::warn!("sync failed, retrying in 5s: {err}");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
     }
 
     /// Joined rooms, most recently active first.
@@ -317,32 +329,43 @@ impl MeshClient {
         let mut timeline = Vec::new();
 
         for event in messages.chunk {
-            let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-                SyncMessageLikeEvent::Original(message),
-            ))) = event.raw().deserialize()
-            else {
-                continue;
-            };
-            let Some(body) = plain_body(&message.content.msgtype) else {
-                continue;
+            let (sender, body, ts) = match event.raw().deserialize() {
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+                    SyncMessageLikeEvent::Original(message),
+                ))) => {
+                    let Some(body) = plain_body(&message.content.msgtype) else {
+                        continue;
+                    };
+                    (message.sender, body.to_owned(), message.origin_server_ts)
+                }
+                // Still encrypted: we lack the key. Show it rather than silently drop it.
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(
+                    SyncMessageLikeEvent::Original(encrypted),
+                ))) => (
+                    encrypted.sender,
+                    "🔒 Unable to decrypt this message (restore keys in Settings → Secure Backup)"
+                        .to_owned(),
+                    encrypted.origin_server_ts,
+                ),
+                _ => continue,
             };
 
-            if !display_names.contains_key(&message.sender) {
+            if !display_names.contains_key(&sender) {
                 let name = room
-                    .get_member_no_sync(&message.sender)
+                    .get_member_no_sync(&sender)
                     .await
                     .ok()
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
-                    .unwrap_or_else(|| message.sender.localpart().to_owned());
-                display_names.insert(message.sender.clone(), name);
+                    .unwrap_or_else(|| sender.localpart().to_owned());
+                display_names.insert(sender.clone(), name);
             }
 
             timeline.push(TimelineMessage {
-                sender_name: display_names[&message.sender].clone(),
-                sender: message.sender,
-                body: body.to_owned(),
-                timestamp_ms: message.origin_server_ts.0.into(),
+                sender_name: display_names[&sender].clone(),
+                sender,
+                body,
+                timestamp_ms: ts.0.into(),
             });
         }
 
@@ -449,8 +472,23 @@ impl MeshClient {
         Ok(())
     }
 
-    pub fn logout_locally(&self) -> MeshResult<()> {
-        SessionStore::new(&self.data_dir).clear()
+    /// Logs out: invalidates the access token on the server (which also stops
+    /// the sync loop), then deletes the saved session and the local store so
+    /// the next login starts clean instead of tripping over this device's state.
+    pub async fn logout(&self) -> MeshResult<()> {
+        if let Err(err) = self.client.matrix_auth().logout().await {
+            tracing::warn!("server logout failed, clearing locally anyway: {err}");
+        }
+        SessionStore::new(&self.data_dir).clear()?;
+        // ponytail: on Windows the open sqlite files may refuse removal; the next
+        // login then reuses a stale store. Fix by closing the client first if it bites.
+        let store = self.data_dir.join("store");
+        if store.exists()
+            && let Err(err) = std::fs::remove_dir_all(&store)
+        {
+            tracing::warn!("could not remove store {}: {err}", store.display());
+        }
+        Ok(())
     }
 
     /// Places a 1:1 voice call to the other member of `room_id`.
@@ -516,17 +554,26 @@ impl MeshClient {
         }
     }
 
-    /// Ensures Secure Backup is on so room keys are always backed up (and the
-    /// "no backup key" warnings stop). Waits briefly for the recovery state to
-    /// settle after login. Returns the recovery key if it had to enable it
-    /// (so the UI can offer to save it), or `None` if it was already enabled.
+    /// Turns Secure Backup on when the account has none at all, so room keys
+    /// are backed up going forward. Returns the new recovery key (for the UI
+    /// to show once), or `None` when nothing was changed. An existing backup
+    /// this session can't open yet (`Incomplete`, normal right after a fresh
+    /// login) is left alone: the user restores it with their recovery key.
+    /// Never resets here — that would orphan the keys in the old backup.
     pub async fn ensure_secure_backup(&self) -> Result<Option<String>, String> {
         use matrix_sdk::encryption::recovery::RecoveryState;
         // Let initial sync populate the recovery/cross-signing state first.
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         match self.client.encryption().recovery().state() {
-            RecoveryState::Enabled => Ok(None),
-            _ => Ok(Some(self.enable_secure_backup().await?)),
+            RecoveryState::Disabled => self
+                .client
+                .encryption()
+                .recovery()
+                .enable()
+                .await
+                .map(Some)
+                .map_err(|e| e.to_string()),
+            _ => Ok(None),
         }
     }
 

@@ -109,6 +109,8 @@ struct Session {
     output_devices: Vec<String>,
     selected_input: String,
     selected_output: String,
+    /// From config.toml; shows the 🎧 Discord voice button when set.
+    discord_voice_url: Option<String>,
 }
 
 /// Sentinel shown in the device pickers for "use the system default".
@@ -147,6 +149,7 @@ impl Session {
             output_devices: Vec::new(),
             selected_input: DEFAULT_DEVICE.to_string(),
             selected_output: DEFAULT_DEVICE.to_string(),
+            discord_voice_url: theme::load_discord_voice_url(&config_path()),
         }
     }
 }
@@ -219,6 +222,7 @@ enum Message {
     CancelVerification,
     VerificationActionFinished(Result<(), String>),
     ToggleSettings,
+    OpenDiscordVoice,
     ThemeChosen(String),
     LogOut,
     PlaceCall,
@@ -488,8 +492,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 }
                 MeshUpdate::CallConnecting { call_id } => {
                     if let Some(call) = &mut session.call
-                        && call.call_id == call_id
+                        && (call.call_id == call_id || call.call_id.is_empty())
                     {
+                        // An outgoing call learns its id here.
+                        call.call_id = call_id;
                         call.state = CallUiState::Connecting;
                     }
                     // Carry the user's mic/deafen state into the new call.
@@ -497,8 +503,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     let (muted, deafened) = (session.self_muted, session.self_deafened);
                     Task::perform(
                         async move {
-                            client.set_call_muted(muted).await;
                             client.set_call_deafened(deafened).await;
+                            client.set_call_muted(muted || deafened).await;
                             Ok(())
                         },
                         Message::CallActionFinished,
@@ -703,11 +709,12 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             session.self_deafened = !session.self_deafened;
             // Deafening also mutes the mic; undeafening unmutes it.
             session.self_muted = session.self_deafened;
-            let deafened = session.self_deafened;
+            let (deafened, muted) = (session.self_deafened, session.self_muted);
             let client = session.client.clone();
             Task::perform(
                 async move {
                     client.set_call_deafened(deafened).await;
+                    client.set_call_muted(muted).await;
                     Ok(())
                 },
                 Message::CallActionFinished,
@@ -749,7 +756,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         );
                     }
                     Ok(None) => {
-                        session.backup.status = Some(BackupStatus::Enabled);
+                        session.backup.status = Some(session.client.backup_status());
                     }
                     Err(err) => tracing::warn!("auto backup enable failed: {err}"),
                 }
@@ -776,6 +783,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             {
                 session.call = None;
                 session.status = Some(format!("Call failed: {err}"));
+            }
+            Task::none()
+        }
+        Message::OpenDiscordVoice => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(url) = &session.discord_voice_url
+                && let Err(err) = open_url(url)
+            {
+                session.status = Some(format!("Could not open {url}: {err}"));
             }
             Task::none()
         }
@@ -878,11 +894,20 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::LogOut => {
-            if let Screen::LoggedIn(session) = &state.screen {
-                let _ = session.client.logout_locally();
-            }
+            let task = match &state.screen {
+                Screen::LoggedIn(session) => {
+                    let client = session.client.clone();
+                    Task::future(async move {
+                        if let Err(err) = client.logout().await {
+                            tracing::warn!("logout: {err}");
+                        }
+                    })
+                    .discard()
+                }
+                _ => Task::none(),
+            };
             state.screen = Screen::LoggedOut(LoginForm::default());
-            Task::none()
+            task
         }
     }
 }
@@ -1202,6 +1227,19 @@ fn panel_button<'a>(
         .into()
 }
 
+/// Opens `url` in the default browser.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(url).spawn().map(|_| ())
+}
+
 fn sidebar_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<'a, Message> {
     let mut room_list = column![].spacing(2);
 
@@ -1222,15 +1260,25 @@ fn sidebar_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Elemen
         }
     }
 
-    let header = row![
+    let mut header = row![
         text("Mesh").size(18).color(palette.text()),
         Space::new().width(Length::Fill),
+    ]
+    .align_y(iced::Alignment::Center);
+    if session.discord_voice_url.is_some() {
+        header = header.push(
+            button(text("🎧").size(14))
+                .on_press(Message::OpenDiscordVoice)
+                .padding(6)
+                .style(flat_button_style(palette)),
+        );
+    }
+    let header = header.push(
         button(text("⚙").size(14))
             .on_press(Message::ToggleSettings)
             .padding(6)
             .style(flat_button_style(palette)),
-    ]
-    .align_y(iced::Alignment::Center);
+    );
 
     let sidebar = column![
         header,
@@ -1689,10 +1737,11 @@ fn backup_view<'a>(backup: &'a BackupUi, palette: &'a theme::Palette) -> Element
         Some(BackupStatus::Unknown) | None => "Checking backup status…",
     };
 
-    let setup_label = if matches!(backup.status, Some(BackupStatus::Enabled)) {
-        "Reset Secure Backup"
-    } else {
+    // Anything but "Disabled" means a backup exists, and the button would replace it.
+    let setup_label = if matches!(backup.status, Some(BackupStatus::Disabled)) {
         "Set up Secure Backup"
+    } else {
+        "Reset Secure Backup (old backup becomes unreadable)"
     };
     let setup_btn: Element<'_, Message> = if backup.busy {
         button(text("Working…").size(13)).padding(8).into()

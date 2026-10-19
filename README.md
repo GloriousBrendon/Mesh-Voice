@@ -31,6 +31,12 @@ built-in presets (Catppuccin Mocha, Nord, Gruvbox Dark) and "Custom
 (theme.toml)"; the choice persists in `~/.config/mesh/config.toml`
 (`%APPDATA%\mesh\config.toml` on Windows).
 
+### Discord voice button
+
+Add `discord_voice_url = "https://…"` to `config.toml` and a 🎧 button appears
+in the sidebar that opens it in your browser — e.g. a self-hosted browser
+running Discord web, for voice alongside a text-only Discord bridge.
+
 ## Build & run
 
 ```sh
