@@ -5,15 +5,20 @@
 //! back. Mesh never talks to Discord itself, and stays Matrix-only in
 //! `mesh-core`.
 
-use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
+#[cfg(unix)]
+use {
+    futures_util::{SinkExt, StreamExt},
+    std::path::Path,
+    std::time::Duration,
+    tokio::io::{AsyncReadExt, AsyncWriteExt},
+    tokio::net::UnixStream,
+    tokio_tungstenite::tungstenite::Message as WsMessage,
+};
 
+#[cfg(unix)]
 const AGENT: &str = include_str!("agent.js");
 
 /// What Mesh hears from the engine.
@@ -29,6 +34,7 @@ pub enum Event {
 /// Commands into the hidden client. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Engine {
+    #[cfg_attr(not(unix), allow(dead_code))]
     commands: mpsc::UnboundedSender<String>,
 }
 
@@ -119,6 +125,12 @@ impl Voice {
 
 /// Keeps a connection to the engine at `socket` for as long as `events` is
 /// open, reconnecting every few seconds when the hidden client isn't there.
+/// ponytail: the engine socket is a unix socket, so this is a no-op on
+/// Windows; add a named-pipe or TCP transport if Windows needs Discord voice.
+#[cfg(not(unix))]
+pub async fn run(_socket: PathBuf, _events: mpsc::UnboundedSender<Event>) {}
+
+#[cfg(unix)]
 pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     while !events.is_closed() {
         let mut connected = false;
@@ -132,8 +144,10 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     }
 }
 
+#[cfg(unix)]
 type Result<T> = std::result::Result<T, String>;
 
+#[cfg(unix)]
 async fn session(
     socket: &Path,
     events: &mpsc::UnboundedSender<Event>,
@@ -203,6 +217,7 @@ fn binding_snapshot(text: &str) -> Option<Snapshot> {
 }
 
 /// The DevTools websocket path of the Discord tab.
+#[cfg(unix)]
 async fn discord_page(socket: &Path) -> Result<String> {
     let mut stream = UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
     stream
