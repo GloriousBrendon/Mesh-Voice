@@ -69,6 +69,10 @@ struct App {
     palette: theme::Palette,
     theme_choice: String,
     iced_theme: IcedTheme,
+    layout: theme::Layout,
+    /// Theme source files and their last-seen mtimes, polled for hot reload.
+    theme_files: Vec<PathBuf>,
+    theme_stamps: Vec<Option<std::time::SystemTime>>,
     screen: Screen,
     /// Elapsed seconds driving the animated background.
     rain_time: f32,
@@ -235,6 +239,8 @@ enum Message {
     CallActionFinished(Result<(), String>),
     /// Animation frame for the background.
     Tick,
+    /// Poll the theme files for changes.
+    ThemeCheck,
     SetupBackup,
     BackupSetupFinished(Result<String, String>),
     RecoveryKeyInput(String),
@@ -250,6 +256,7 @@ fn boot() -> (App, Task<Message>) {
     let theme_choice = theme::load_choice(&config_path());
     let palette = theme::palette_for_choice(&theme_choice, &theme_path());
     let iced_theme = palette.to_iced_theme();
+    let theme_files = theme::watched_files(&theme_choice, &theme_path());
 
     let (screen, task) = if MeshClient::has_saved_session(&data_dir()) {
         let task = Task::perform(
@@ -271,6 +278,9 @@ fn boot() -> (App, Task<Message>) {
             palette,
             theme_choice,
             iced_theme,
+            layout: theme::layout_for_config(&config_path()),
+            theme_stamps: theme::stamps(&theme_files),
+            theme_files,
             screen,
             rain_time: 0.0,
         },
@@ -885,11 +895,16 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             reload
         }
         Message::ThemeChosen(choice) => {
-            state.palette = theme::palette_for_choice(&choice, &theme_path());
-            state.iced_theme = state.palette.to_iced_theme();
-            state.theme_choice = choice.clone();
             if let Err(err) = theme::save_choice(&config_path(), &choice) {
                 tracing::warn!("failed to persist theme choice: {err}");
+            }
+            state.theme_choice = choice;
+            reload_theme(state);
+            Task::none()
+        }
+        Message::ThemeCheck => {
+            if theme::stamps(&state.theme_files) != state.theme_stamps {
+                reload_theme(state);
             }
             Task::none()
         }
@@ -912,13 +927,26 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
     }
 }
 
+/// Re-reads the palette and layout from the current theme choice's files.
+fn reload_theme(state: &mut App) {
+    state.palette = theme::palette_for_choice(&state.theme_choice, &theme_path());
+    state.iced_theme = state.palette.to_iced_theme();
+    state.layout = theme::layout_for_config(&config_path());
+    state.theme_files = theme::watched_files(&state.theme_choice, &theme_path());
+    state.theme_stamps = theme::stamps(&state.theme_files);
+}
+
 fn theme(state: &App) -> IcedTheme {
     state.iced_theme.clone()
 }
 
 fn subscription(_state: &App) -> Subscription<Message> {
-    // Drive the animated background at ~15 fps.
-    iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick)
+    Subscription::batch([
+        // Drive the animated background at ~15 fps.
+        iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick),
+        // Hot-reload the rice: an mtime poll is cheap and works everywhere.
+        iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
+    ])
 }
 
 fn view(state: &App) -> Element<'_, Message> {
@@ -1650,10 +1678,15 @@ fn settings_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Messag
     let palette = &state.palette;
     let mut choices = column![].spacing(6);
 
-    let mut entries: Vec<(String, String)> = theme::presets()
-        .into_iter()
-        .map(|(name, _)| (name.to_string(), name.to_string()))
-        .collect();
+    let mut entries = vec![(
+        "Follow my rice (colors.conf)".to_string(),
+        theme::RICE.to_string(),
+    )];
+    entries.extend(
+        theme::presets()
+            .into_iter()
+            .map(|(name, _)| (name.to_string(), name.to_string())),
+    );
     entries.push((
         "Custom (theme.toml)".to_string(),
         theme::CUSTOM.to_string(),

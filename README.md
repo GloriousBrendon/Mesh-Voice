@@ -18,18 +18,26 @@ crates/
 
 ## Theming
 
-Mesh reads a TOML palette at startup:
+Mesh wears your desktop. By default it follows your rice:
 
-- Linux: `~/.config/mesh/theme.toml`
-- Windows: `%APPDATA%\mesh\theme.toml`
+- **Colours** from `~/.config/themes/active/colors.conf` (`$bg2`, `$bg1`,
+  `$surface`, `$accent`, `$text` as `$key = rgba(rrggbbaa)`; override the path
+  with `MESH_THEME_FILE`). The other colours (bright and muted text, borders,
+  text on accent) are derived, and muted text is lightened until it passes
+  4.5:1 contrast.
+- **Gaps, border width and rounding** from `~/.config/hypr/hyprland.conf`
+  (`general { gaps_in gaps_out border_size }`, `decoration { rounding }`,
+  following `source = …` includes). Set `layout_from_hyprland = false` in
+  `config.toml` to use the defaults instead.
 
-Copy [theme.example.toml](theme.example.toml) there and edit the hex values to
-match your rice. Missing or broken file → falls back to Catppuccin Mocha.
+Both files are watched: edit them and Mesh restyles within a second.
+Missing files fall back to the defaults in [design/DESIGN.md](design/DESIGN.md).
 
-The in-app settings screen (gear icon in the sidebar) switches between the
+The settings screen (gear icon) switches between "Follow my rice", the
 built-in presets (Catppuccin Mocha, Nord, Gruvbox Dark) and "Custom
-(theme.toml)"; the choice persists in `~/.config/mesh/config.toml`
-(`%APPDATA%\mesh\config.toml` on Windows).
+(theme.toml)" — `~/.config/mesh/theme.toml` (`%APPDATA%\mesh\theme.toml` on
+Windows), see [theme.example.toml](theme.example.toml). The choice persists in
+`~/.config/mesh/config.toml` (`%APPDATA%\mesh\config.toml` on Windows).
 
 ### Discord voice button
 

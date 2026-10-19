@@ -1,60 +1,108 @@
-//! Loads a color palette from disk so the UI can match the user's rice on
-//! Linux, or a manually-picked preset on Windows, without changing any code.
+//! Loads the UI colors and layout so Mesh wears the user's desktop: the rice's
+//! `colors.conf` and `hyprland.conf` on Linux, a built-in preset or a
+//! hand-written `theme.toml` anywhere. Five base colors come from the source;
+//! the rest are derived (and contrast-checked) unless theme.toml sets them.
 
-// Presets and the per-token accessors are for the upcoming theme switcher and
-// custom widget styles; they are part of the palette's public surface.
+// Tokens the tiled shell and Rice page use; they land in the next steps.
 #![allow(dead_code)]
 
 use iced::Color;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// WCAG AA for normal text; derived text colors are pushed until they pass.
+const MIN_CONTRAST: f32 = 4.5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Palette {
+    /// `$bg2`: gaps / window background, inputs, code blocks.
     pub background: String,
+    /// `$bg1`: pane fill.
     pub surface: String,
+    /// `$surface`: selected rows, chips, active space tile.
     pub surface_alt: String,
-    pub text: String,
-    pub text_muted: String,
     pub accent: String,
-    pub accent_text: String,
-    pub danger: String,
-    pub success: String,
-    pub border: String,
+    pub text: String,
+    // Derived when omitted (always omitted when following colors.conf).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_bright: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_muted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_ctrl: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_dim: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danger: Option<String>,
 }
 
 impl Default for Palette {
-    /// Catppuccin Mocha, a sane default until the user drops in their own rice colors.
+    /// The "rice" defaults from design/DESIGN.md, used when colors.conf is missing.
     fn default() -> Self {
         Self {
-            background: "#1e1e2e".into(),
-            surface: "#181825".into(),
-            surface_alt: "#313244".into(),
-            text: "#cdd6f4".into(),
-            text_muted: "#a6adc8".into(),
-            accent: "#89b4fa".into(),
-            accent_text: "#11111b".into(),
-            danger: "#f38ba8".into(),
-            success: "#a6e3a1".into(),
-            border: "#45475a".into(),
+            background: "#080c10".into(),
+            surface: "#0f1822".into(),
+            surface_alt: "#1f252e".into(),
+            accent: "#d88f92".into(),
+            text: "#a8b0be".into(),
+            text_bright: None,
+            text_muted: None,
+            accent_text: None,
+            border: None,
+            border_ctrl: None,
+            panel_dim: None,
+            success: None,
+            warning: None,
+            danger: None,
         }
     }
 }
 
+/// A theme.toml either has the palette at top level (the original format) or
+/// under `[colors]` (the exported format, next to `[layout]` and `[extras]`).
+#[derive(Deserialize)]
+struct ThemeFile {
+    colors: Palette,
+}
+
 impl Palette {
-    pub fn load_or_default(path: &PathBuf) -> Self {
+    pub fn load_or_default(path: &Path) -> Self {
         std::fs::read_to_string(path)
             .ok()
-            .and_then(|s| toml::from_str(&s).ok())
+            .and_then(|s| {
+                toml::from_str::<ThemeFile>(&s)
+                    .map(|f| f.colors)
+                    .or_else(|_| toml::from_str::<Palette>(&s))
+                    .ok()
+            })
             .unwrap_or_default()
     }
 
-    pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Reads `$key = rgba(rrggbbaa)` lines from a rice `colors.conf`; keys it
+    /// doesn't set keep their defaults.
+    pub fn from_colors_conf(src: &str) -> Self {
+        let mut palette = Palette::default();
+        for (key, hex) in parse_colors_conf(src) {
+            let slot = match key.as_str() {
+                "bg2" => &mut palette.background,
+                "bg1" => &mut palette.surface,
+                "surface" => &mut palette.surface_alt,
+                "accent" => &mut palette.accent,
+                "text" => &mut palette.text,
+                _ => continue,
+            };
+            *slot = hex;
         }
-        std::fs::write(path, toml::to_string_pretty(self)?)?;
-        Ok(())
+        palette
     }
 
     pub fn background(&self) -> Color {
@@ -66,126 +114,86 @@ impl Palette {
     pub fn surface_alt(&self) -> Color {
         parse_hex(&self.surface_alt)
     }
-    pub fn text(&self) -> Color {
-        parse_hex(&self.text)
-    }
-    pub fn text_muted(&self) -> Color {
-        parse_hex(&self.text_muted)
-    }
     pub fn accent(&self) -> Color {
         parse_hex(&self.accent)
     }
-    pub fn accent_text(&self) -> Color {
-        parse_hex(&self.accent_text)
+    pub fn text(&self) -> Color {
+        parse_hex(&self.text)
     }
-    pub fn danger(&self) -> Color {
-        parse_hex(&self.danger)
+    /// Names, headings, active labels.
+    pub fn text_bright(&self) -> Color {
+        or_derive(&self.text_bright, || mix(self.text(), Color::WHITE, 0.7))
+    }
+    /// Secondary text; readable (≥ 4.5:1) on `surface_alt`.
+    pub fn text_muted(&self) -> Color {
+        or_derive(&self.text_muted, || {
+            let base = self.surface_alt();
+            ensure_contrast(mix(self.text(), base, 0.25), base)
+        })
+    }
+    /// Text on an accent fill: near-black or near-white tinted toward the accent.
+    pub fn accent_text(&self) -> Color {
+        or_derive(&self.accent_text, || {
+            let accent = self.accent();
+            let dark = mix(Color::BLACK, accent, 0.12);
+            let light = mix(Color::WHITE, accent, 0.12);
+            if contrast(dark, accent) >= contrast(light, accent) {
+                dark
+            } else {
+                light
+            }
+        })
+    }
+    /// Unfocused pane borders and separators.
+    pub fn border(&self) -> Color {
+        or_derive(&self.border, || mix(self.surface(), Color::WHITE, 0.08))
+    }
+    /// Input and chip borders.
+    pub fn border_ctrl(&self) -> Color {
+        or_derive(&self.border_ctrl, || mix(self.surface(), Color::WHITE, 0.12))
+    }
+    /// User panel and footer strips.
+    pub fn panel_dim(&self) -> Color {
+        or_derive(&self.panel_dim, || mix(self.background(), self.surface(), 0.5))
     }
     pub fn success(&self) -> Color {
-        parse_hex(&self.success)
+        or_derive(&self.success, || parse_hex("#8fc79a"))
     }
-    pub fn border(&self) -> Color {
-        parse_hex(&self.border)
+    pub fn warning(&self) -> Color {
+        or_derive(&self.warning, || parse_hex("#e0b36a"))
     }
-}
-
-/// Sentinel theme choice meaning "load colors from theme.toml".
-pub const CUSTOM: &str = "custom";
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Config {
-    theme: Option<String>,
-    /// Page to open for Discord voice (e.g. a self-hosted browser running
-    /// Discord web). Hand-edited; when set, the sidebar shows a 🎧 button.
-    discord_voice_url: Option<String>,
-}
-
-fn load_config(config_path: &PathBuf) -> Config {
-    std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|s| toml::from_str::<Config>(&s).ok())
-        .unwrap_or_default()
-}
-
-pub fn load_discord_voice_url(config_path: &PathBuf) -> Option<String> {
-    load_config(config_path).discord_voice_url
-}
-
-/// The persisted theme choice: a preset name, or [`CUSTOM`] (the default).
-pub fn load_choice(config_path: &PathBuf) -> String {
-    load_config(config_path)
-        .theme
-        .unwrap_or_else(|| CUSTOM.to_string())
-}
-
-pub fn save_choice(config_path: &PathBuf, choice: &str) -> anyhow::Result<()> {
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
+    pub fn danger(&self) -> Color {
+        or_derive(&self.danger, || parse_hex("#e07a7a"))
     }
-    // Keep the other (hand-edited) keys.
-    let config = Config {
-        theme: Some(choice.to_string()),
-        ..load_config(config_path)
-    };
-    std::fs::write(config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
-}
-
-/// Resolves a theme choice to a palette: [`CUSTOM`] reads theme.toml,
-/// anything else looks up the presets (falling back to the default palette).
-pub fn palette_for_choice(choice: &str, theme_toml: &PathBuf) -> Palette {
-    if choice == CUSTOM {
-        Palette::load_or_default(theme_toml)
-    } else {
-        presets()
-            .into_iter()
-            .find(|(name, _)| *name == choice)
-            .map(|(_, palette)| palette)
-            .unwrap_or_default()
+    /// Matrix network tag.
+    pub fn proto_mx(&self) -> Color {
+        parse_hex("#8fd6cc")
     }
-}
+    /// Discord network tag (different lightness from mx, so it isn't colour-only).
+    pub fn proto_dc(&self) -> Color {
+        parse_hex("#9aa6f5")
+    }
 
-/// A handful of built-in presets, mainly meant for the Windows theme switcher.
-pub fn presets() -> Vec<(&'static str, Palette)> {
-    vec![
-        ("Catppuccin Mocha", Palette::default()),
-        (
-            "Nord",
-            Palette {
-                background: "#2e3440".into(),
-                surface: "#3b4252".into(),
-                surface_alt: "#434c5e".into(),
-                text: "#eceff4".into(),
-                text_muted: "#d8dee9".into(),
-                accent: "#88c0d0".into(),
-                accent_text: "#2e3440".into(),
-                danger: "#bf616a".into(),
-                success: "#a3be8c".into(),
-                border: "#4c566a".into(),
-            },
-        ),
-        (
-            "Gruvbox Dark",
-            Palette {
-                background: "#282828".into(),
-                surface: "#3c3836".into(),
-                surface_alt: "#504945".into(),
-                text: "#ebdbb2".into(),
-                text_muted: "#bdae93".into(),
-                accent: "#d79921".into(),
-                accent_text: "#282828".into(),
-                danger: "#cc241d".into(),
-                success: "#98971a".into(),
-                border: "#665c54".into(),
-            },
-        ),
-    ]
-}
+    /// Every color, base and derived, resolved to hex, for export and the
+    /// Rice page's token table.
+    pub fn resolved(&self) -> Palette {
+        let hex = |c: Color| Some(to_hex(c));
+        Palette {
+            text_bright: hex(self.text_bright()),
+            text_muted: hex(self.text_muted()),
+            accent_text: hex(self.accent_text()),
+            border: hex(self.border()),
+            border_ctrl: hex(self.border_ctrl()),
+            panel_dim: hex(self.panel_dim()),
+            success: hex(self.success()),
+            warning: hex(self.warning()),
+            danger: hex(self.danger()),
+            ..self.clone()
+        }
+    }
 
-impl Palette {
-    /// Builds a full iced [`iced::Theme::custom`] from the rice/preset colors,
-    /// so every default widget style (buttons, inputs, scrollbars...) picks
-    /// them up automatically without per-widget style closures.
+    /// Builds a full iced [`iced::Theme::custom`] from the palette, so every
+    /// default widget style (buttons, inputs, scrollbars...) picks it up.
     pub fn to_iced_theme(&self) -> iced::Theme {
         iced::Theme::custom(
             "Mesh".to_string(),
@@ -194,23 +202,356 @@ impl Palette {
                 text: self.text(),
                 primary: self.accent(),
                 success: self.success(),
-                warning: self.accent(),
+                warning: self.warning(),
                 danger: self.danger(),
             },
         )
     }
 }
 
+/// Gaps, border and rounding, from hyprland.conf or the defaults.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Layout {
+    pub gaps_in: f32,
+    pub gaps_out: f32,
+    pub border_size: f32,
+    pub rounding: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            gaps_in: 4.0,
+            gaps_out: 8.0,
+            border_size: 2.0,
+            rounding: 10.0,
+        }
+    }
+}
+
+impl Layout {
+    /// Corner radius for buttons and inputs.
+    pub fn control_radius(&self) -> f32 {
+        self.rounding * 0.6
+    }
+
+    /// Reads `general { gaps_in gaps_out border_size }` and
+    /// `decoration { rounding }`, following `source = …` includes.
+    pub fn from_hyprland(path: &Path) -> Self {
+        let mut layout = Layout::default();
+        let mut seen = Vec::new();
+        read_hyprland(path, &mut layout, &mut seen);
+        layout
+    }
+}
+
+fn read_hyprland(path: &Path, layout: &mut Layout, seen: &mut Vec<PathBuf>) {
+    // Guards against include cycles.
+    if seen.iter().any(|p| p == path) {
+        return;
+    }
+    seen.push(path.to_path_buf());
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut sources = Vec::new();
+    apply_hyprland(&src, layout, &mut sources);
+    for source in sources {
+        read_hyprland(&source, layout, seen);
+    }
+}
+
+/// Applies one hyprland.conf's layout keys; collects its `source` includes.
+/// Both block (`general { gaps_in = 4 }`) and path (`general:gaps_in = 4`)
+/// syntax work. ponytail: globs in `source` aren't expanded.
+fn apply_hyprland(src: &str, layout: &mut Layout, sources: &mut Vec<PathBuf>) {
+    let mut blocks: Vec<String> = Vec::new();
+    for line in src.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some(name) = line.strip_suffix('{') {
+            blocks.push(name.trim().to_string());
+            continue;
+        }
+        if line == "}" {
+            blocks.pop();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if blocks.is_empty() && key == "source" {
+            sources.push(expand_home(value));
+            continue;
+        }
+        let path = blocks.iter().map(String::as_str).chain([key]).collect::<Vec<_>>().join(":");
+        // Gaps may be CSS-style ("5 10 5 10"); the first number is enough here.
+        let Some(number) = value
+            .split([' ', ','])
+            .next()
+            .and_then(|v| v.parse::<f32>().ok())
+        else {
+            continue;
+        };
+        match path.as_str() {
+            "general:gaps_in" => layout.gaps_in = number,
+            "general:gaps_out" => layout.gaps_out = number,
+            "general:border_size" => layout.border_size = number,
+            "decoration:rounding" => layout.rounding = number,
+            _ => {}
+        }
+    }
+}
+
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// `(key, "#rrggbb")` pairs from `$key = rgba(rrggbbaa)` / `rgb(rrggbb)` /
+/// `#rrggbb` lines. Alpha is dropped.
+fn parse_colors_conf(src: &str) -> Vec<(String, String)> {
+    src.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim().trim_start_matches('$').to_string();
+            let value = value.trim();
+            let hex = value
+                .strip_prefix("rgba(")
+                .or_else(|| value.strip_prefix("rgb("))
+                .and_then(|v| v.strip_suffix(')'))
+                .or_else(|| value.strip_prefix('#'))?;
+            let hex = hex.get(..6)?;
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit())
+                .then(|| (key, format!("#{}", hex.to_ascii_lowercase())))
+        })
+        .collect()
+}
+
+pub fn colors_conf_path() -> PathBuf {
+    std::env::var_os("MESH_THEME_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config/themes/active/colors.conf"))
+}
+
+pub fn hyprland_conf_path() -> PathBuf {
+    home().join(".config/hypr/hyprland.conf")
+}
+
+fn home() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Theme choice meaning "follow the rice's colors.conf" (the default).
+pub const RICE: &str = "rice";
+/// Theme choice meaning "load colors from theme.toml".
+pub const CUSTOM: &str = "custom";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Config {
+    pub theme: Option<String>,
+    /// Page to open for Discord voice (e.g. a self-hosted browser running
+    /// Discord web). Hand-edited; when set, the sidebar shows a 🎧 button.
+    pub discord_voice_url: Option<String>,
+    /// Read gaps/border/rounding from hyprland.conf (default on).
+    pub layout_from_hyprland: Option<bool>,
+}
+
+pub fn load_config(config_path: &Path) -> Config {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<Config>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Changes some keys and writes the file back, keeping the (hand-edited) rest.
+pub fn update_config(config_path: &Path, change: impl FnOnce(&mut Config)) -> anyhow::Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut config = load_config(config_path);
+    change(&mut config);
+    std::fs::write(config_path, toml::to_string_pretty(&config)?)?;
+    Ok(())
+}
+
+pub fn load_discord_voice_url(config_path: &Path) -> Option<String> {
+    load_config(config_path).discord_voice_url
+}
+
+/// The persisted theme choice: a preset name, [`RICE`] (the default) or [`CUSTOM`].
+pub fn load_choice(config_path: &Path) -> String {
+    load_config(config_path)
+        .theme
+        .unwrap_or_else(|| RICE.to_string())
+}
+
+pub fn save_choice(config_path: &Path, choice: &str) -> anyhow::Result<()> {
+    update_config(config_path, |c| c.theme = Some(choice.to_string()))
+}
+
+/// Resolves a theme choice to a palette: [`RICE`] reads colors.conf,
+/// [`CUSTOM`] reads theme.toml, anything else looks up the presets.
+pub fn palette_for_choice(choice: &str, theme_toml: &Path) -> Palette {
+    match choice {
+        RICE => std::fs::read_to_string(colors_conf_path())
+            .map(|s| Palette::from_colors_conf(&s))
+            .unwrap_or_default(),
+        CUSTOM => Palette::load_or_default(theme_toml),
+        _ => presets()
+            .into_iter()
+            .find(|(name, _)| *name == choice)
+            .map(|(_, palette)| palette)
+            .unwrap_or_default(),
+    }
+}
+
+pub fn layout_for_config(config_path: &Path) -> Layout {
+    if load_config(config_path).layout_from_hyprland.unwrap_or(true) {
+        Layout::from_hyprland(&hyprland_conf_path())
+    } else {
+        Layout::default()
+    }
+}
+
+/// The files a theme choice reads, for hot reload. hyprland.conf's includes
+/// aren't listed. ponytail: edits to a `source`d file reload only once
+/// hyprland.conf itself is touched; list includes too if that bites.
+pub fn watched_files(choice: &str, theme_toml: &Path) -> Vec<PathBuf> {
+    let mut files = vec![hyprland_conf_path()];
+    match choice {
+        RICE => files.push(colors_conf_path()),
+        CUSTOM => files.push(theme_toml.to_path_buf()),
+        _ => {}
+    }
+    files
+}
+
+/// Modification times of `files` (`None` for missing ones), compared between
+/// polls to spot a change.
+pub fn stamps(files: &[PathBuf]) -> Vec<Option<SystemTime>> {
+    files
+        .iter()
+        .map(|f| std::fs::metadata(f).and_then(|m| m.modified()).ok())
+        .collect()
+}
+
+/// Built-in presets, mainly meant for Windows where there's no rice to follow.
+pub fn presets() -> Vec<(&'static str, Palette)> {
+    let preset = |[background, surface, surface_alt, text, text_muted, accent, accent_text, danger, success, border]: [&str; 10]| Palette {
+        background: background.into(),
+        surface: surface.into(),
+        surface_alt: surface_alt.into(),
+        text: text.into(),
+        accent: accent.into(),
+        text_muted: Some(text_muted.into()),
+        accent_text: Some(accent_text.into()),
+        danger: Some(danger.into()),
+        success: Some(success.into()),
+        border: Some(border.into()),
+        ..Palette::default()
+    };
+    vec![
+        (
+            "Catppuccin Mocha",
+            preset([
+                "#1e1e2e", "#181825", "#313244", "#cdd6f4", "#a6adc8", "#89b4fa", "#11111b",
+                "#f38ba8", "#a6e3a1", "#45475a",
+            ]),
+        ),
+        (
+            "Nord",
+            preset([
+                "#2e3440", "#3b4252", "#434c5e", "#eceff4", "#d8dee9", "#88c0d0", "#2e3440",
+                "#bf616a", "#a3be8c", "#4c566a",
+            ]),
+        ),
+        (
+            "Gruvbox Dark",
+            preset([
+                "#282828", "#3c3836", "#504945", "#ebdbb2", "#bdae93", "#d79921", "#282828",
+                "#cc241d", "#98971a", "#665c54",
+            ]),
+        ),
+    ]
+}
+
+fn or_derive(value: &Option<String>, derive: impl FnOnce() -> Color) -> Color {
+    value.as_deref().map(parse_hex).unwrap_or_else(derive)
+}
+
 fn parse_hex(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-    Color::from_rgb8(r, g, b)
+    let channel = |i: usize| {
+        hex.get(i..i + 2)
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .unwrap_or(0)
+    };
+    Color::from_rgb8(channel(0), channel(2), channel(4))
+}
+
+pub fn to_hex(c: Color) -> String {
+    let [r, g, b, _] = c.into_rgba8();
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+/// Linear blend: `t = 0` is `a`, `t = 1` is `b`.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color::from_rgb(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+    )
+}
+
+/// Same color at a given alpha.
+pub fn alpha(color: Color, a: f32) -> Color {
+    Color { a, ..color }
+}
+
+fn luminance(c: Color) -> f32 {
+    let lin = |v: f32| {
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+}
+
+/// WCAG contrast ratio, 1.0 (none) to 21.0 (black on white).
+pub fn contrast(a: Color, b: Color) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Moves `fg` away from `bg` (lighter on dark backgrounds, darker on light
+/// ones) until it reaches [`MIN_CONTRAST`].
+fn ensure_contrast(mut fg: Color, bg: Color) -> Color {
+    let target = if luminance(bg) > 0.18 {
+        Color::BLACK
+    } else {
+        Color::WHITE
+    };
+    for _ in 0..40 {
+        if contrast(fg, bg) >= MIN_CONTRAST {
+            break;
+        }
+        fg = mix(fg, target, 0.05);
+    }
+    fg
 }
 
 #[cfg(test)]
-mod config_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -221,5 +562,84 @@ mod config_tests {
         assert_eq!(load_choice(&path), "Gruvbox Dark");
         assert_eq!(load_discord_voice_url(&path).as_deref(), Some("https://x"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn colors_conf_maps_rice_keys() {
+        let src = "# generated\n$bg1 = rgba(2e3440ff)\nbg2 = rgba(242933ff)\n$surface=rgb(3B4252)\n$accent = #88c0d0\n$text = rgba(zzzzzzff)\n$other = rgba(ffffffff)\n";
+        let p = Palette::from_colors_conf(src);
+        assert_eq!(p.surface, "#2e3440");
+        assert_eq!(p.background, "#242933");
+        assert_eq!(p.surface_alt, "#3b4252");
+        assert_eq!(p.accent, "#88c0d0");
+        // Unparseable value keeps the default.
+        assert_eq!(p.text, Palette::default().text);
+    }
+
+    #[test]
+    fn hyprland_reads_blocks_paths_and_sources() {
+        let src = "source = ~/inc.conf\n# general { gaps_in = 99 }\ngeneral {\n  gaps_in = 5\n  gaps_out = 20 10 20 10\n  border_size = 3 # thick\n  snap {\n    gaps_in = 77\n  }\n}\ndecoration {\n  rounding = 12\n  blur {\n    size = 4\n  }\n}\ngeneral:border_size = 1\n";
+        let mut layout = Layout::default();
+        let mut sources = Vec::new();
+        apply_hyprland(src, &mut layout, &mut sources);
+        assert_eq!(
+            layout,
+            Layout { gaps_in: 5.0, gaps_out: 20.0, border_size: 1.0, rounding: 12.0 }
+        );
+        assert_eq!(sources, vec![dirs::home_dir().unwrap_or_default().join("inc.conf")]);
+    }
+
+    #[test]
+    fn missing_hyprland_gives_defaults() {
+        assert_eq!(Layout::from_hyprland(Path::new("/nonexistent/hypr.conf")), Layout::default());
+    }
+
+    #[test]
+    fn contrast_ratio_bounds() {
+        assert!((contrast(Color::BLACK, Color::WHITE) - 21.0).abs() < 0.01);
+        assert!((contrast(Color::WHITE, Color::WHITE) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn derived_text_passes_contrast() {
+        let light = Palette {
+            background: "#eeeeee".into(),
+            surface: "#f8f8f8".into(),
+            surface_alt: "#e0e0e0".into(),
+            text: "#bbbbbb".into(),
+            ..Palette::default()
+        };
+        for p in [Palette::default(), light] {
+            assert!(contrast(p.text_muted(), p.surface_alt()) >= MIN_CONTRAST);
+            assert!(contrast(p.accent_text(), p.accent()) >= MIN_CONTRAST);
+        }
+    }
+
+    #[test]
+    fn derived_defaults_match_spec() {
+        // Close to the hand-picked values in design/DESIGN.md.
+        let p = Palette::default();
+        let near = |c: Color, hex: &str| {
+            let (a, b) = (c.into_rgba8(), parse_hex(hex).into_rgba8());
+            (0..3).all(|i| a[i].abs_diff(b[i]) <= 12)
+        };
+        assert!(near(p.border(), "#1f2a36"));
+        assert!(near(p.border_ctrl(), "#253040"));
+        assert!(near(p.panel_dim(), "#0b1219"));
+        assert!(near(p.text_bright(), "#e3e7ee"));
+        assert!(near(p.accent_text(), "#1a0d0e"));
+    }
+
+    #[test]
+    fn theme_toml_nested_or_flat() {
+        let dir = std::env::temp_dir();
+        let nested = dir.join(format!("mesh-theme-nested-{}.toml", std::process::id()));
+        std::fs::write(&nested, "source = \"rice\"\n[colors]\nbackground = \"#000000\"\nsurface = \"#111111\"\nsurface_alt = \"#222222\"\naccent = \"#ff0000\"\ntext = \"#eeeeee\"\n[layout]\ngaps_in = 4\n").unwrap();
+        assert_eq!(Palette::load_or_default(&nested).accent, "#ff0000");
+        let flat = dir.join(format!("mesh-theme-flat-{}.toml", std::process::id()));
+        std::fs::write(&flat, toml::to_string(&presets()[1].1).unwrap()).unwrap();
+        assert_eq!(Palette::load_or_default(&flat).accent, "#88c0d0");
+        let _ = std::fs::remove_file(nested);
+        let _ = std::fs::remove_file(flat);
     }
 }

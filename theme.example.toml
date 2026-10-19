@@ -2,8 +2,10 @@
 #   Linux:   ~/.config/mesh/theme.toml
 #   Windows: %APPDATA%\mesh\theme.toml
 #
-# All values are hex colors. If the file is missing or invalid,
-# Mesh falls back to Catppuccin Mocha.
+# Used when the theme choice is "Custom (theme.toml)". All values are hex
+# colors. Only background, surface, surface_alt, accent and text are required;
+# leave the others out to have Mesh derive them (contrast-checked). Keys may
+# also sit under a [colors] table. Missing or invalid file: the rice defaults.
 
 background  = "#1e1e2e"
 surface     = "#181825"
