@@ -3,10 +3,12 @@
 mod audio;
 mod call;
 mod session;
+mod spaces;
 mod verification;
 
 pub use call::CallEngine;
 pub use session::{Session, SessionStore};
+pub use spaces::{SpaceGroup, group_by_space};
 
 pub use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 
@@ -66,6 +68,12 @@ pub struct RoomSummary {
     pub is_direct: bool,
     /// Origin timestamp of the latest event, in milliseconds since the epoch.
     pub last_activity_ms: Option<u64>,
+    /// Unread messages that mention us.
+    pub mentions: u64,
+    /// An `m.space`; its rooms are in `children`.
+    pub is_space: bool,
+    /// For spaces: the rooms listed by its `m.space.child` events.
+    pub children: Vec<OwnedRoomId>,
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +253,8 @@ impl MeshClient {
         let mut summaries = Vec::new();
         for room in self.client.rooms() {
             let is_direct = room.is_direct().await.unwrap_or(false);
+            let is_space = room.is_space();
+            let children = if is_space { space_children(&room).await } else { Vec::new() };
             summaries.push(RoomSummary {
                 id: room.room_id().to_owned(),
                 name: room
@@ -255,6 +265,9 @@ impl MeshClient {
                 unread_notifications: room.num_unread_notifications(),
                 is_direct,
                 last_activity_ms: room.latest_event_timestamp().map(|ts| ts.0.into()),
+                mentions: room.num_unread_mentions(),
+                is_space,
+                children,
             });
         }
         summaries.sort_by(|a, b| {
@@ -596,4 +609,30 @@ pub fn plain_body(msgtype: &MessageType) -> Option<&str> {
         MessageType::Emote(emote) => Some(emote.body.as_str()),
         _ => None,
     }
+}
+
+/// The rooms a space lists through its `m.space.child` state events. A child
+/// event with an empty `via` is a removed child and is skipped.
+async fn space_children(room: &Room) -> Vec<OwnedRoomId> {
+    use matrix_sdk::deserialized_responses::SyncOrStrippedState;
+    use matrix_sdk::ruma::events::{SyncStateEvent, space::child::SpaceChildEventContent};
+    let events = match room.get_state_events_static::<SpaceChildEventContent>().await {
+        Ok(events) => events,
+        Err(err) => {
+            tracing::warn!("could not read children of space {}: {err}", room.room_id());
+            return Vec::new();
+        }
+    };
+    events
+        .into_iter()
+        .filter_map(|raw| match raw.deserialize().ok()? {
+            SyncOrStrippedState::Sync(SyncStateEvent::Original(ev)) => {
+                (!ev.content.via.is_empty()).then_some(ev.state_key)
+            }
+            SyncOrStrippedState::Stripped(ev) => {
+                ev.content.via.is_some_and(|via| !via.is_empty()).then_some(ev.state_key)
+            }
+            _ => None,
+        })
+        .collect()
 }

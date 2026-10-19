@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
-    RoomSummary, SasEmoji, TimelineMessage,
+    RoomSummary, SasEmoji, SpaceGroup, TimelineMessage, group_by_space,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -120,7 +120,19 @@ struct Session {
     /// The pane with the accent border.
     focused: Pane,
     show_members: bool,
+    /// Home first, then one group per space (the rail).
+    groups: Vec<SpaceGroup>,
+    /// The space shown in the channel pane; `None` is Home.
+    active_space: Option<OwnedRoomId>,
+    /// The Ctrl+K jump palette's query, while it's open.
+    jump: Option<String>,
 }
+
+/// Text input id of the jump palette, to focus it on open.
+const JUMP_INPUT: &str = "jump";
+
+/// How many matches the jump palette lists.
+const JUMP_RESULTS: usize = 8;
 
 /// The tiled shell's panes, for focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +182,9 @@ impl Session {
             discord_voice_url: theme::load_discord_voice_url(&config_path()),
             focused: Pane::Chat,
             show_members: true,
+            groups: Vec::new(),
+            active_space: None,
+            jump: None,
         }
     }
 }
@@ -259,6 +274,14 @@ enum Message {
     ThemeCheck,
     FocusPane(Pane),
     ToggleMembers,
+    SpaceSelected(Option<OwnedRoomId>),
+    /// Alt+n: the n-th space on the rail.
+    SpaceKey(usize),
+    OpenJump,
+    JumpInput(String),
+    /// Enter in the jump palette: go to the top match.
+    JumpSubmit,
+    JumpTo(OwnedRoomId),
     /// Esc: close settings (and any open dialog).
     Escape,
     SetupBackup,
@@ -419,6 +442,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::RoomsLoaded(rooms) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
+                session.groups = group_by_space(&rooms);
+                if !session.groups.iter().any(|g| g.id() == session.active_space.as_ref()) {
+                    session.active_space = None;
+                }
                 session.rooms = rooms;
             }
             Task::none()
@@ -937,9 +964,76 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::Escape => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                session.show_settings = false;
+                if session.jump.is_some() {
+                    session.jump = None;
+                } else {
+                    session.show_settings = false;
+                }
             }
             Task::none()
+        }
+        Message::SpaceSelected(space) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.active_space = space;
+                session.focused = Pane::Channels;
+            }
+            Task::none()
+        }
+        Message::SpaceKey(n) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(group) = session.groups.get(n)
+            {
+                session.active_space = group.id().cloned();
+                session.focused = Pane::Channels;
+            }
+            Task::none()
+        }
+        Message::OpenJump => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.jump = Some(String::new());
+                return iced::widget::operation::focus(iced::widget::Id::new(JUMP_INPUT));
+            }
+            Task::none()
+        }
+        Message::JumpInput(query) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.jump = Some(query);
+            }
+            Task::none()
+        }
+        Message::JumpSubmit => {
+            let Screen::LoggedIn(session) = &state.screen else {
+                return Task::none();
+            };
+            match jump_matches(session).first() {
+                Some(room) => {
+                    let id = room.id.clone();
+                    update(state, Message::JumpTo(id))
+                }
+                None => Task::none(),
+            }
+        }
+        Message::JumpTo(room_id) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.jump = None;
+            if session.groups.iter().any(|g| g.id() == Some(&room_id)) {
+                session.active_space = Some(room_id);
+                session.focused = Pane::Channels;
+                return Task::none();
+            }
+            // Stay in the current space if the room is in it; otherwise the first one listing it.
+            let in_group = |g: &SpaceGroup| g.rooms.iter().any(|r| r.id == room_id);
+            if !session
+                .groups
+                .iter()
+                .any(|g| g.id() == session.active_space.as_ref() && in_group(g))
+                && let Some(group) = session.groups.iter().find(|g| in_group(g))
+            {
+                session.active_space = group.id().cloned();
+            }
+            update(state, Message::RoomSelected(room_id))
         }
         Message::ThemeCheck => {
             if theme::stamps(&state.theme_files) != state.theme_stamps {
@@ -987,17 +1081,35 @@ fn subscription(_state: &App) -> Subscription<Message> {
         iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
         // Global shortcuts work even while an input has focus.
         iced::event::listen_with(|event, _status, _window| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => shortcut(key),
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                shortcut(key, modifiers)
+            }
             _ => None,
         }),
     ])
 }
 
-fn shortcut(key: keyboard::Key) -> Option<Message> {
-    match key {
+fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    match key.as_ref() {
         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+        keyboard::Key::Character("k") if modifiers.control() => Some(Message::OpenJump),
+        keyboard::Key::Character(c) if modifiers.alt() => match c.parse::<usize>() {
+            Ok(n @ 1..=9) => Some(Message::SpaceKey(n)),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// Rooms and spaces whose name contains the jump query, most recent first.
+fn jump_matches(session: &Session) -> Vec<&RoomSummary> {
+    let query = session.jump.as_deref().unwrap_or_default().to_lowercase();
+    session
+        .rooms
+        .iter()
+        .filter(|r| r.name.to_lowercase().contains(&query))
+        .take(JUMP_RESULTS)
+        .collect()
 }
 
 fn view(state: &App) -> Element<'_, Message> {
@@ -1090,12 +1202,85 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         {
             panes = panes.push(tile(session, Pane::Members, member_pane(session, p), 236.0, p, l));
         }
-        column![top_bar(session, p, l), panes]
+        let shell = column![top_bar(session, p, l), panes]
             .spacing(l.gaps_out)
-            .padding(l.gaps_out)
-            .into()
+            .padding(l.gaps_out);
+        if session.jump.is_some() {
+            stack![shell, jump_palette(session, p, l)].into()
+        } else {
+            shell.into()
+        }
     })
     .into()
+}
+
+/// The Ctrl+K palette: type to filter rooms and spaces, Enter or click to jump.
+fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let query = session.jump.as_deref().unwrap_or_default();
+    let mut list = column![
+        text_input("jump to a room or space…", query)
+            .id(iced::widget::Id::new(JUMP_INPUT))
+            .on_input(Message::JumpInput)
+            .on_submit(Message::JumpSubmit)
+            .padding(10)
+            .size(14),
+    ]
+    .spacing(2);
+    let matches = jump_matches(session);
+    for (i, room) in matches.iter().enumerate() {
+        let (icon, label) = if room.is_space {
+            ("◆", room.name.clone())
+        } else {
+            (if room.is_direct { "@" } else { "#" }, room.name.clone())
+        };
+        let mut line = row![
+            ui::mono(icon, 13.0, p.text_muted()),
+            ui::sans(label, 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        if i == 0 {
+            line = line.push(ui::mono("Enter", 11.0, p.text_muted()));
+        }
+        list = list.push(ui::row_button(line, Message::JumpTo(room.id.clone()), i == 0, p, l));
+    }
+    if matches.is_empty() {
+        list = list.push(container(ui::mono("no match", 12.0, p.text_muted())).padding(8));
+    }
+    let scrim = theme::alpha(p.background(), 0.6);
+    mouse_area(
+        container(iced::widget::opaque(
+            ui::pane(list.padding(10), true, p, l, false).max_width(560),
+        ))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .padding(iced::Padding { top: 96.0, ..iced::Padding::ZERO })
+        .style(move |_| container::Style {
+            background: Some(scrim.into()),
+            ..container::Style::default()
+        }),
+    )
+    .on_press(Message::Escape)
+    .into()
+}
+
+fn active_group(session: &Session) -> Option<&SpaceGroup> {
+    session
+        .groups
+        .iter()
+        .find(|g| g.id() == session.active_space.as_ref())
+}
+
+/// Two-letter tile label: initials of the first two words, or the first two letters.
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let letters: String = if words.len() >= 2 {
+        words.iter().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).collect()
+    } else {
+        name.chars().filter(|c| c.is_alphanumeric()).take(2).collect()
+    };
+    letters.to_uppercase()
 }
 
 /// One focusable pane of the tiled shell; `width` 0 fills the rest.
@@ -1140,9 +1325,17 @@ fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> E
     ]
     .spacing(8);
 
-    let mut crumb = row![ui::mono("home", 12.0, p.text_muted())]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
+    let mut crumb = row![].spacing(6).align_y(iced::Alignment::Center);
+    if let Some(index) = session.groups.iter().position(|g| g.id() == session.active_space.as_ref())
+        && index > 0
+    {
+        crumb = crumb.push(ui::chip(index.to_string(), p));
+    }
+    crumb = crumb.push(ui::mono(
+        active_group(session).map_or("Home", |g| g.name()).to_lowercase(),
+        12.0,
+        p.text_muted(),
+    ));
     if let Some(room) = selected_room(session) {
         crumb = crumb
             .push(ui::mono("/", 12.0, p.text_muted()))
@@ -1159,8 +1352,30 @@ fn top_bar<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> E
         ));
     }
 
+    let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
+    let search = button(
+        row![
+            ui::mono("search or jump — rooms, spaces", 12.0, p.text_muted()).width(Length::Fill),
+            ui::outline_chip(ui::mono("Ctrl K", 11.0, p.text_muted()), p),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .on_press(Message::OpenJump)
+    .padding([4, 10])
+    .width(Length::Fill)
+    .style(move |_, _| button::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(radius).color(edge).width(1),
+        ..button::Style::default()
+    });
+
     ui::pane(
-        row![wordmark, crumb, Space::new().width(Length::Fill), chips]
+        row![
+            wordmark,
+            crumb,
+            container(container(search).max_width(460)).width(Length::Fill).center_x(Length::Fill),
+            chips,
+        ]
             .spacing(12)
             .align_y(iced::Alignment::Center)
             .padding([6, 10]),
@@ -1193,19 +1408,73 @@ fn connection_chip<'a>(
 }
 
 /// The space rail: Home, then (later) one tile per space, then "+".
-fn rail_view<'a>(_session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
-    let home = rail_tile(text("⌂").size(20).color(p.text_bright()).into(), true, None, p, l);
+fn rail_view<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let home = rail_tile(
+        text("⌂").size(20).color(p.text_bright()).into(),
+        session.active_space.is_none(),
+        Some(Message::SpaceSelected(None)),
+        p,
+        l,
+    );
+    let mut tiles = column![].spacing(8).align_x(iced::Alignment::Center);
+    for (index, group) in session.groups.iter().enumerate().skip(1) {
+        let active = group.id() == session.active_space.as_ref();
+        let fg = if active { p.text_bright() } else { p.text() };
+        let mut tile: Element<'_, Message> = rail_tile(
+            ui::mono_bold(initials(group.name()), 13.0, fg).into(),
+            active,
+            Some(Message::SpaceSelected(group.id().cloned())),
+            p,
+            l,
+        );
+        let mentions = group.mentions();
+        if mentions > 0 {
+            let (fill, ring) = (p.danger(), p.surface());
+            let badge = container(ui::mono_bold(mentions.to_string(), 10.0, p.background()))
+                .padding([1, 5])
+                .style(move |_| container::Style {
+                    background: Some(fill.into()),
+                    border: iced::border::rounded(9).color(ring).width(2),
+                    ..container::Style::default()
+                });
+            tile = stack![
+                tile,
+                container(badge)
+                    .width(52)
+                    .height(50)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::End),
+            ]
+            .into();
+        }
+        let key = if index <= 9 { index.to_string() } else { String::new() };
+        tiles = tiles.push(
+            iced::widget::tooltip(
+                column![
+                    tile,
+                    ui::mono(key, 10.0, if active { p.text_bright() } else { p.text_muted() }),
+                ]
+                .spacing(2)
+                .align_x(iced::Alignment::Center),
+                container(text(group.name().to_string()).size(12).color(p.text())).padding([4, 8]),
+                iced::widget::tooltip::Position::Right,
+            ),
+        );
+    }
     let add = ui::not_yet(
         rail_tile(text("+").size(18).color(p.text_muted()).into(), false, None, p, l),
         "Joining or creating a space isn't supported yet.",
         p,
     );
-    column![home, ui::swatch(p.border(), 28.0, 2.0, 1.0), add]
-        .spacing(8)
-        .padding([10, 0])
-        .width(Length::Fill)
-        .align_x(iced::Alignment::Center)
-        .into()
+    scrollable(
+        column![home, ui::swatch(p.border(), 28.0, 2.0, 1.0), tiles, add]
+            .spacing(8)
+            .padding([10, 0])
+            .width(Length::Fill)
+            .align_x(iced::Alignment::Center),
+    )
+    .height(Length::Fill)
+    .into()
 }
 
 /// A 44×44 rail tile; the active one gets a `surface_alt` fill and an accent ring.
@@ -1243,8 +1512,10 @@ fn rail_tile<'a>(
 }
 
 fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let group = active_group(session);
     let mut title = row![
-        ui::sans("Home", 15.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
+        ui::sans(group.map_or("Home", |g| g.name()), 15.0, Weight::Semibold, p.text_bright())
+            .width(Length::Fill),
     ]
     .align_y(iced::Alignment::Center);
     if session.discord_voice_url.is_some() {
@@ -1256,18 +1527,28 @@ fn channel_pane<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
             ),
         );
     }
-    let header = column![title, ui::mono("friends & direct messages", 11.0, p.text_muted())]
+    let subtitle = match group.filter(|g| g.space.is_some()) {
+        Some(g) => format!("{} channels", g.rooms.len()),
+        None => "friends & direct messages".to_string(),
+    };
+    let header = column![title, ui::mono(subtitle, 11.0, p.text_muted())]
         .spacing(4)
         .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
 
     let mut list = column![].spacing(2).padding([10, 8]);
-    let (directs, rooms): (Vec<_>, Vec<_>) = session.rooms.iter().partition(|r| r.is_direct);
-    for (label, group) in [("Direct messages", directs), ("Rooms", rooms)] {
-        if group.is_empty() {
+    let rooms = group.map(|g| g.rooms.as_slice()).unwrap_or_default();
+    let sections: [(&str, Vec<&RoomSummary>); 2] = if group.is_some_and(|g| g.space.is_some()) {
+        [("Text", rooms.iter().collect()), ("", Vec::new())]
+    } else {
+        let (directs, others) = rooms.iter().partition(|r| r.is_direct);
+        [("Direct messages", directs), ("Rooms", others)]
+    };
+    for (label, rooms) in sections {
+        if rooms.is_empty() {
             continue;
         }
         list = list.push(ui::section(label, p));
-        for room in group {
+        for room in rooms {
             let selected = session.selected_room.as_ref() == Some(&room.id);
             list = list.push(channel_row(room, selected, p, l));
         }

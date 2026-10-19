@@ -85,6 +85,10 @@ Working today:
   (avatar, MXID, mic, deafen, settings) sits under the channel list. The member
   pane toggles from the chat header and hides on narrow windows. `Esc` closes
   settings. IBM Plex Sans and JetBrains Mono are bundled.
+- Spaces: rooms are grouped by their `m.space`. The rail shows Home (DMs and
+  rooms outside any space) and one tile per space with its mention count;
+  `Alt+1..9` switches space. `Ctrl+K` opens a jump palette over all rooms and
+  spaces (type, then Enter or click).
 - Animated "digital rain" background (an iced canvas), drawn in the palette's
   colors so it still follows your rice/theme. Side panels are slightly
   translucent so it glows faintly behind them.
