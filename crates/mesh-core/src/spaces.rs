@@ -91,6 +91,8 @@ mod tests {
                 .map(|c| OwnedRoomId::try_from(format!("!{c}:x.org")).unwrap())
                 .collect(),
             network: if name == "beta" { Network::Discord } else { Network::Matrix },
+            bridged: None,
+            avatar: None,
         }
     }
 

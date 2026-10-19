@@ -13,7 +13,7 @@ use iced::widget::{
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
     BackupStatus, MeshClient, MemberInfo, MeshUpdate, MyProfile, OwnedRoomId, OwnedUserId,
-    MessageKind, Network, OwnedEventId, PendingContact, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
+    MediaRef, MessageKind, Network, OwnedEventId, PendingContact, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
     group_by_space,
 };
 use std::collections::HashMap;
@@ -141,6 +141,8 @@ struct Session {
     images: HashMap<String, Option<iced::widget::image::Handle>>,
     /// The add-friend dialog, while it's open.
     add_friend: Option<AddFriend>,
+    /// Avatar thumbnails by media key; `None` while loading.
+    avatars: HashMap<String, Option<iced::widget::image::Handle>>,
 }
 
 /// Text input id of the jump palette, to focus it on open.
@@ -222,6 +224,7 @@ impl Session {
             typing: HashMap::new(),
             images: HashMap::new(),
             add_friend: None,
+            avatars: HashMap::new(),
         }
     }
 }
@@ -320,6 +323,7 @@ enum Message {
     JumpSubmit,
     JumpTo(OwnedRoomId),
     ImageLoaded(String, Result<Vec<u8>, String>),
+    AvatarLoaded(String, Result<Vec<u8>, String>),
     /// Click on a reaction pill: add ours, or take it back (`mine`).
     ToggleReaction {
         event_id: OwnedEventId,
@@ -430,6 +434,29 @@ fn load_members(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message> 
         },
         |(room_id, members)| Message::MembersLoaded(room_id, members),
     )
+}
+
+/// Starts thumbnail downloads for avatars that aren't cached or loading.
+fn load_avatars(session: &mut Session, media: impl IntoIterator<Item = MediaRef>) -> Task<Message> {
+    let mut tasks = Vec::new();
+    for media in media {
+        let key = media.key();
+        if session.avatars.contains_key(&key) {
+            continue;
+        }
+        session.avatars.insert(key.clone(), None);
+        let client = session.client.clone();
+        tasks.push(Task::perform(
+            async move { client.avatar_thumbnail(&media).await.map_err(|e| e.to_string()) },
+            move |result| Message::AvatarLoaded(key.clone(), result),
+        ));
+    }
+    Task::batch(tasks)
+}
+
+/// A downloaded avatar, if there is one.
+fn picture<'a>(session: &'a Session, media: Option<&MediaRef>) -> Option<&'a iced::widget::image::Handle> {
+    session.avatars.get(&media?.key())?.as_ref()
 }
 
 /// Starts downloads for the timeline's images that aren't cached or loading.
@@ -547,9 +574,12 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.active_space = None;
                 }
                 session.rooms = rooms;
+                let avatars: Vec<MediaRef> = session.rooms.iter().filter_map(|r| r.avatar.clone()).collect();
+                let avatars = load_avatars(session, avatars);
                 if let Some(reload) = reload {
-                    return reload;
+                    return Task::batch([reload, avatars]);
                 }
+                return avatars;
             }
             Task::none()
         }
@@ -580,11 +610,29 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 match result {
                     Ok(timeline) => {
                         session.timeline = timeline;
+                        let avatars: Vec<MediaRef> =
+                            session.timeline.iter().filter_map(|m| m.sender_avatar.clone()).collect();
+                        let avatars = load_avatars(session, avatars);
                         if !plain {
-                            return load_images(session);
+                            return Task::batch([avatars, load_images(session)]);
                         }
+                        return avatars;
                     }
                     Err(err) => session.status = Some(format!("Failed to load messages: {err}")),
+                }
+            }
+            Task::none()
+        }
+        Message::AvatarLoaded(key, result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                match result {
+                    Ok(bytes) => {
+                        session
+                            .avatars
+                            .insert(key, Some(iced::widget::image::Handle::from_bytes(bytes)));
+                    }
+                    // Keep the `None` so it isn't retried every refresh; initials show instead.
+                    Err(err) => tracing::debug!("avatar download failed: {err}"),
                 }
             }
             Task::none()
@@ -944,13 +992,17 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen
                 && session.selected_room.as_ref() == Some(&room_id)
             {
+                let task = load_avatars(session, members.iter().filter_map(|m| m.avatar.clone()));
                 session.members = members;
+                return task;
             }
             Task::none()
         }
         Message::ProfileLoaded(profile) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
+                let task = load_avatars(session, profile.avatar.clone());
                 session.my_profile = Some(profile);
+                return task;
             }
             Task::none()
         }
@@ -1819,9 +1871,11 @@ fn top_bar<'a>(
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
     let search = button(
         row![
+            ui::icon(ui::Icon::Search, 14.0, p.text_muted()),
             ui::mono("search or jump — rooms, spaces", 12.0, p.text_muted()).width(Length::Fill),
             ui::outline_chip(ui::mono("Ctrl K", 11.0, p.text_muted()), p),
         ]
+        .spacing(8)
         .align_y(iced::Alignment::Center),
     )
     .on_press(Message::OpenJump)
@@ -1840,7 +1894,12 @@ fn top_bar<'a>(
             container(container(search).max_width(460)).width(Length::Fill).center_x(Length::Fill),
             chips,
             ui::primary_button(
-                ui::sans("+ add friend", 13.0, Weight::Semibold, p.accent_text()),
+                row![
+                    ui::icon(ui::Icon::UserPlus, 15.0, p.accent_text()),
+                    ui::sans("add friend", 13.0, Weight::Semibold, p.accent_text()),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
                 Some(Message::OpenAddFriend),
                 p,
                 l,
@@ -1885,7 +1944,7 @@ fn rail_view<'a>(
     tags: bool,
 ) -> Element<'a, Message> {
     let home = rail_tile(
-        text("⌂").size(20).color(p.text_bright()).into(),
+        ui::icon(ui::Icon::Home, 20.0, p.text_bright()),
         session.active_space.is_none(),
         Some(Message::SpaceSelected(None)),
         p,
@@ -1895,8 +1954,22 @@ fn rail_view<'a>(
     for (index, group) in session.groups.iter().enumerate().skip(1) {
         let active = group.id() == session.active_space.as_ref();
         let fg = if active { p.text_bright() } else { p.text() };
+        // The space's own picture (a Discord server icon, say), else its network's logo.
+        let face: Element<'_, Message> =
+            match picture(session, group.space.as_ref().and_then(|s| s.avatar.as_ref())) {
+                Some(handle) => iced::widget::image(handle.clone())
+                    .width(40)
+                    .height(40)
+                    .border_radius((l.rounding - 2.0).max(0.0))
+                    .content_fit(iced::ContentFit::Cover)
+                    .into(),
+                None => match group.network() {
+                    Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { p.proto_dc() } else { fg }),
+                    Network::Matrix => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
+                },
+            };
         let mut tile: Element<'_, Message> = rail_tile(
-            ui::mono_bold(initials(group.name()), 13.0, fg).into(),
+            face,
             active,
             Some(Message::SpaceSelected(group.id().cloned())),
             p,
@@ -1943,7 +2016,7 @@ fn rail_view<'a>(
         );
     }
     let add = ui::not_yet(
-        rail_tile(text("+").size(18).color(p.text_muted()).into(), false, None, p, l),
+        rail_tile(ui::icon(ui::Icon::Plus, 18.0, p.text_muted()), false, None, p, l),
         "Joining or creating a space isn't supported yet.",
         p,
     );
@@ -2002,7 +2075,7 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
     if session.discord_voice.is_some() {
         title = title.push(
             iced::widget::tooltip(
-                ui::icon_button("🎧", Some(Message::OpenDiscordVoice), false, p, l),
+                ui::icon_button(ui::Icon::Headphones, Some(Message::OpenDiscordVoice), false, p, l),
                 container(text("Open Discord voice").size(12).color(p.text())).padding([4, 8]),
                 iced::widget::tooltip::Position::Bottom,
             ),
@@ -2040,7 +2113,7 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         list = list.push(ui::section(label, p));
         for room in rooms {
             let selected = session.selected_room.as_ref() == Some(&room.id);
-            list = list.push(channel_row(room, selected, p, l));
+            list = list.push(channel_row(room, &session.avatars, selected, p, l));
         }
     }
 
@@ -2061,6 +2134,7 @@ fn channel_pane<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
 /// bright, semibold, with a count chip.
 fn channel_row<'a>(
     room: &'a RoomSummary,
+    avatars: &'a HashMap<String, Option<iced::widget::image::Handle>>,
     selected: bool,
     p: &theme::Palette,
     l: &theme::Layout,
@@ -2070,7 +2144,10 @@ fn channel_row<'a>(
     let bar = if selected { p.accent() } else { iced::Color::TRANSPARENT };
     let mut label = row![
         ui::swatch(bar, 2.0, 18.0, 1.0),
-        ui::mono(if room.is_direct { "@" } else { "#" }, 13.0, p.text_muted()),
+        match room.avatar.as_ref().and_then(|a| avatars.get(&a.key())).and_then(Option::as_ref) {
+            Some(handle) => ui::avatar(&room.name, Some(handle), 20.0, p.surface_alt(), p, None),
+            None => ui::icon(if room.is_direct { ui::Icon::At } else { ui::Icon::Hash }, 14.0, p.text_muted()),
+        },
         ui::sans(&room.name, 14.0, if unread { Weight::Semibold } else { Weight::Normal }, color)
             .width(Length::Fill),
     ]
@@ -2101,20 +2178,26 @@ fn user_panel<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -
 
     let mut controls = row![
         ui::icon_button(
-            if session.self_muted { "🔇" } else { "🎙" },
+            if session.self_muted { ui::Icon::MicOff } else { ui::Icon::Mic },
             Some(Message::ToggleMute),
             session.self_muted,
             p,
             l,
         ),
-        ui::icon_button("🎧", Some(Message::ToggleDeafen), session.self_deafened, p, l),
+        ui::icon_button(
+            if session.self_deafened { ui::Icon::HeadphoneOff } else { ui::Icon::Headphones },
+            Some(Message::ToggleDeafen),
+            session.self_deafened,
+            p,
+            l,
+        ),
     ]
     .spacing(2);
     if session.call.is_some() {
-        controls = controls.push(ui::icon_button("📵", Some(Message::HangUp), true, p, l));
+        controls = controls.push(ui::icon_button(ui::Icon::PhoneOff, Some(Message::HangUp), true, p, l));
     }
     controls = controls.push(ui::icon_button(
-        "⚙",
+        ui::Icon::Settings,
         Some(Message::ToggleSettings),
         session.show_settings,
         p,
@@ -2125,7 +2208,14 @@ fn user_panel<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -
     let radius = (l.rounding - l.border_size).max(0.0);
     container(
         row![
-            ui::avatar(&name, 34.0, p.accent(), p, Some((p.success(), fill))),
+            ui::avatar(
+                &name,
+                picture(session, session.my_profile.as_ref().and_then(|me| me.avatar.as_ref())),
+                34.0,
+                p.accent(),
+                p,
+                Some((p.success(), fill)),
+            ),
             // Clipped so a long MXID can't run under the buttons.
             container(
                 column![ui::sans(name, 13.0, Weight::Semibold, p.text_bright()), sub.wrapping(text::Wrapping::None)]
@@ -2159,18 +2249,18 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
             .and_then(|t| t.lines().next())
             .unwrap_or_default();
         let mut header = row![
-            ui::mono(if room.is_direct { "@" } else { "#" }, 18.0, p.text_muted()),
+            ui::icon(if room.is_direct { ui::Icon::At } else { ui::Icon::Hash }, 18.0, p.text_muted()),
             ui::sans(&room.name, 15.0, Weight::Semibold, p.text_bright()),
             text(topic).size(13).color(p.text_muted()).width(Length::Fill),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
         if session.call.is_none() {
-            header = header.push(ui::icon_button("📞", Some(Message::PlaceCall), false, p, l));
+            header = header.push(ui::icon_button(ui::Icon::Phone, Some(Message::PlaceCall), false, p, l));
         }
         let members_color = if session.show_members { p.text_bright() } else { p.text_muted() };
         header = header.push(
-            button(text("👥").size(15).color(members_color))
+            button(ui::icon(ui::Icon::Users, 17.0, members_color))
                 .on_press(Message::ToggleMembers)
                 .padding(6)
                 .style(flat_button_style(p)),
@@ -2247,12 +2337,12 @@ fn composer<'a>(
         });
     let field = row![
         ui::not_yet(
-            ui::icon_button("📎", None, false, p, l),
+            ui::icon_button(ui::Icon::Paperclip, None, false, p, l),
             "Attachments aren't supported yet.",
             p,
         ),
         input,
-        ui::primary_button(text("➤").size(14), Some(Message::SendMessage), p, l),
+        ui::primary_button(ui::icon(ui::Icon::Send, 16.0, p.accent_text()), Some(Message::SendMessage), p, l),
     ]
     .spacing(10)
     .align_y(iced::Alignment::Center);
@@ -2285,7 +2375,7 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Elem
         list = list.push(
             container(
                 row![
-                    ui::avatar(&member.display_name, 32.0, fill, p, None),
+                    ui::avatar(&member.display_name, picture(session, member.avatar.as_ref()), 32.0, fill, p, None),
                     ui::sans(&member.display_name, 13.0, Weight::Medium, p.text_bright())
                         .width(Length::Fill),
                     ui::mono(if tags { member.network.tag() } else { "" }, 10.0, net),
@@ -2317,14 +2407,16 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
         }
     }
 
-    let title = format!("📞  {}  —  {}", call.peer, call.state.label());
+    let title = format!("{}  —  {}", call.peer, call.state.label());
     let surface = palette.surface_alt();
     let border_color = palette.border();
     container(
         row![
+            ui::icon(ui::Icon::Phone, 17.0, palette.accent()),
             text(title).size(15).color(palette.text_bright()).width(Length::Fill),
             controls,
         ]
+        .spacing(10)
         .align_y(iced::Alignment::Center),
     )
     .padding(12)
@@ -2466,7 +2558,14 @@ fn timeline_view<'a>(
                     }
                     Element::from(
                         row![
-                            ui::avatar(&message.sender_name, 38.0, fill, p, None),
+                            ui::avatar(
+                                &message.sender_name,
+                                picture(session, message.sender_avatar.as_ref()),
+                                38.0,
+                                fill,
+                                p,
+                                None,
+                            ),
                             column![
                                 header.push(ui::mono(time_label, 11.0, p.text_muted())),
                                 content,
@@ -3763,7 +3862,7 @@ fn add_friend_view<'a>(
             ]
             .spacing(4)
             .width(Length::Fill),
-            ui::icon_button("✕", Some(Message::Escape), false, p, l),
+            ui::icon_button(ui::Icon::Close, Some(Message::Escape), false, p, l),
         ],
         modes,
         column![
@@ -3795,7 +3894,7 @@ fn add_friend_view<'a>(
         col = col.push(
             container(
                 row![
-                    ui::avatar(&name, 40.0, color, p, None),
+                    ui::avatar(&name, None, 40.0, color, p, None),
                     column![
                         ui::sans(name, 14.0, Weight::Semibold, p.text_bright()),
                         ui::mono(route, 12.0, p.text_muted()),
@@ -3838,7 +3937,7 @@ fn add_friend_view<'a>(
     for contact in &dialog.pending {
         let color = net_color(contact.network, p);
         let mut line = row![
-            ui::avatar(contact.user_id.localpart(), 32.0, color, p, None),
+            ui::avatar(contact.user_id.localpart(), None, 32.0, color, p, None),
             column![
                 ui::mono(contact.user_id.to_string(), 13.0, p.text_bright()),
                 text(if contact.incoming { "wants to connect" } else { "invite sent" })

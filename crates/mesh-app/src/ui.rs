@@ -2,7 +2,7 @@
 //! [`Palette`], sizes from the [`Layout`]; nothing here hardcodes either.
 
 use iced::font::Weight;
-use iced::widget::{Space, Text, button, container, stack, text, tooltip};
+use iced::widget::{Space, Text, button, container, stack, svg, text, tooltip};
 use iced::{Alignment, Color, Element, Font, Length, border};
 
 use crate::Message;
@@ -19,6 +19,67 @@ pub const FONTS: [&[u8]; 5] = [
     include_bytes!("../fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../fonts/JetBrainsMono-Bold.ttf"),
 ];
+
+/// The bundled icons: Lucide (ISC) for UI, Simple Icons (CC0) for networks.
+#[derive(Debug, Clone, Copy)]
+pub enum Icon {
+    Mic,
+    MicOff,
+    Headphones,
+    HeadphoneOff,
+    Phone,
+    PhoneOff,
+    Settings,
+    Users,
+    Paperclip,
+    Send,
+    Home,
+    Plus,
+    Hash,
+    At,
+    Voice,
+    Close,
+    Search,
+    UserPlus,
+    Matrix,
+    Discord,
+}
+
+impl Icon {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Icon::Mic => include_bytes!("../icons/mic.svg"),
+            Icon::MicOff => include_bytes!("../icons/mic-off.svg"),
+            Icon::Headphones => include_bytes!("../icons/headphones.svg"),
+            Icon::HeadphoneOff => include_bytes!("../icons/headphone-off.svg"),
+            Icon::Phone => include_bytes!("../icons/phone.svg"),
+            Icon::PhoneOff => include_bytes!("../icons/phone-off.svg"),
+            Icon::Settings => include_bytes!("../icons/settings.svg"),
+            Icon::Users => include_bytes!("../icons/users.svg"),
+            Icon::Paperclip => include_bytes!("../icons/paperclip.svg"),
+            Icon::Send => include_bytes!("../icons/send-horizontal.svg"),
+            Icon::Home => include_bytes!("../icons/house.svg"),
+            Icon::Plus => include_bytes!("../icons/plus.svg"),
+            Icon::Hash => include_bytes!("../icons/hash.svg"),
+            Icon::At => include_bytes!("../icons/at-sign.svg"),
+            Icon::Voice => include_bytes!("../icons/volume-2.svg"),
+            Icon::Close => include_bytes!("../icons/x.svg"),
+            Icon::Search => include_bytes!("../icons/search.svg"),
+            Icon::UserPlus => include_bytes!("../icons/user-plus.svg"),
+            Icon::Matrix => include_bytes!("../icons/brand-matrix.svg"),
+            Icon::Discord => include_bytes!("../icons/brand-discord.svg"),
+        }
+    }
+}
+
+/// An icon at `size` px, tinted `color`.
+pub fn icon<'a>(which: Icon, size: f32, color: Color) -> Element<'a, Message> {
+    svg(svg::Handle::from_memory(which.bytes()))
+        .width(size)
+        .height(size)
+        .style(move |_, _| svg::Style { color: Some(color) })
+        .into()
+}
 
 pub fn weight(font: Font, weight: Weight) -> Font {
     Font { weight, ..font }
@@ -133,7 +194,7 @@ pub fn outline_chip<'a>(content: impl Into<Element<'a, Message>>, p: &Palette) -
 /// A borderless icon button. `active` = toggled on (muted, deafened...),
 /// drawn in `danger` on a dark red fill.
 pub fn icon_button<'a>(
-    icon: &'a str,
+    which: Icon,
     msg: Option<Message>,
     active: bool,
     p: &Palette,
@@ -144,7 +205,7 @@ pub fn icon_button<'a>(
     let hover = p.surface_alt();
     let radius = l.control_radius();
     button(
-        container(text(icon).size(15).color(color))
+        container(icon(which, 17.0, color))
             .center_x(Length::Fixed(20.0))
             .center_y(Length::Fixed(20.0)),
     )
@@ -240,6 +301,7 @@ pub fn not_yet<'a>(
 /// `status` adds a presence dot at the bottom-right, ringed in `ring`.
 pub fn avatar<'a>(
     name: &str,
+    picture: Option<&iced::widget::image::Handle>,
     size: f32,
     fill: Color,
     p: &Palette,
@@ -251,16 +313,25 @@ pub fn avatar<'a>(
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string());
     let fg = p.background();
-    let disc = container(mono_bold(initial, size * 0.4, fg))
-        .center_x(Length::Fixed(size))
-        .center_y(Length::Fixed(size))
-        .style(move |_| container::Style {
-            background: Some(fill.into()),
-            border: border::rounded(size / 2.0),
-            ..container::Style::default()
-        });
+    let disc: Element<'a, Message> = match picture {
+        Some(handle) => iced::widget::image(handle.clone())
+            .width(size)
+            .height(size)
+            .border_radius(size / 2.0)
+            .content_fit(iced::ContentFit::Cover)
+            .into(),
+        None => container(mono_bold(initial, size * 0.4, fg))
+            .center_x(Length::Fixed(size))
+            .center_y(Length::Fixed(size))
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: border::rounded(size / 2.0),
+                ..container::Style::default()
+            })
+            .into(),
+    };
     let Some((dot, ring)) = status else {
-        return disc.into();
+        return disc;
     };
     let dot = container(Space::new()).width(10).height(10).style(move |_| container::Style {
         background: Some(dot.into()),

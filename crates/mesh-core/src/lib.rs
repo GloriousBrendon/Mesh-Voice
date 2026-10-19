@@ -9,7 +9,7 @@ mod spaces;
 mod timeline;
 mod verification;
 
-pub use bridge::{Network, user_network};
+pub use bridge::{BridgedIds, Network, user_network};
 pub use call::CallEngine;
 pub use contacts::PendingContact;
 pub use session::{Session, SessionStore};
@@ -80,6 +80,10 @@ pub struct RoomSummary {
     pub children: Vec<OwnedRoomId>,
     /// Discord if a bridge says this room is a Discord portal.
     pub network: Network,
+    /// The bridge's ids for this room, when it's a Discord portal.
+    pub bridged: Option<bridge::BridgedIds>,
+    /// The room's picture; for a DM without one, the other person's.
+    pub avatar: Option<MediaRef>,
 }
 
 /// One emoji of a SAS short-auth string, e.g. ("🐶", "Dog").
@@ -97,6 +101,7 @@ pub struct MemberInfo {
     /// True for the logged-in user.
     pub is_me: bool,
     pub network: Network,
+    pub avatar: Option<MediaRef>,
 }
 
 /// The logged-in user's own identity, for the user panel.
@@ -104,6 +109,7 @@ pub struct MemberInfo {
 pub struct MyProfile {
     pub user_id: OwnedUserId,
     pub display_name: String,
+    pub avatar: Option<MediaRef>,
 }
 
 /// State of Secure Backup (server-side room-key backup + recovery) for the
@@ -258,6 +264,7 @@ impl MeshClient {
             let is_direct = room.is_direct().await.unwrap_or(false);
             let is_space = room.is_space();
             let children = if is_space { space_children(&room).await } else { Vec::new() };
+            let bridged = bridge::bridged_ids(&room).await;
             summaries.push(RoomSummary {
                 id: room.room_id().to_owned(),
                 name: room
@@ -272,7 +279,13 @@ impl MeshClient {
                 is_space,
                 is_invite: room.state() == matrix_sdk::RoomState::Invited,
                 children,
-                network: bridge::room_network(&room).await,
+                network: if bridged.is_some() || bridge::made_by_bridge(&room) {
+                    Network::Discord
+                } else {
+                    Network::Matrix
+                },
+                bridged,
+                avatar: room_avatar(&room).await,
             });
         }
         summaries.sort_by(|a, b| {
@@ -302,6 +315,7 @@ impl MeshClient {
                     .unwrap_or_else(|| m.user_id().localpart().to_owned()),
                 is_me: Some(m.user_id()) == me,
                 network: user_network(m.user_id()),
+                avatar: m.avatar_url().map(|u| MediaRef::plain(u.to_owned())),
                 user_id: m.user_id().to_owned(),
             })
             .collect();
@@ -324,9 +338,18 @@ impl MeshClient {
             Ok(Some(name)) if !name.is_empty() => name,
             _ => user_id.localpart().to_owned(),
         };
+        let avatar = self
+            .client
+            .account()
+            .get_avatar_url()
+            .await
+            .ok()
+            .flatten()
+            .map(MediaRef::plain);
         MyProfile {
             user_id,
             display_name,
+            avatar,
         }
     }
 
@@ -464,6 +487,16 @@ impl MeshClient {
                 .map_err(matrix_sdk::Error::from)?;
         }
         Ok(())
+    }
+
+    /// A small square thumbnail of an avatar (cached in the local store).
+    pub async fn avatar_thumbnail(&self, media: &MediaRef) -> MeshResult<Vec<u8>> {
+        use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
+        let request = MediaRequestParameters {
+            source: media.0.clone(),
+            format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(96u32.into(), 96u32.into())),
+        };
+        Ok(self.client.media().get_media_content(&request, true).await?)
     }
 
     /// Downloads (and decrypts, for encrypted rooms) a piece of media. Cached
@@ -624,4 +657,14 @@ async fn space_children(room: &Room) -> Vec<OwnedRoomId> {
             _ => None,
         })
         .collect()
+}
+
+/// A room's picture; a DM without one borrows the other person's.
+async fn room_avatar(room: &Room) -> Option<MediaRef> {
+    if let Some(url) = room.avatar_url() {
+        return Some(MediaRef::plain(url));
+    }
+    let target = room.direct_targets().into_iter().find_map(|t| t.into_user_id())?;
+    let member = room.get_member_no_sync(&target).await.ok().flatten()?;
+    member.avatar_url().map(|u| MediaRef::plain(u.to_owned()))
 }

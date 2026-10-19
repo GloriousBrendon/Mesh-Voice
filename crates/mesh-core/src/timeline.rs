@@ -23,6 +23,7 @@ pub struct TimelineMessage {
     pub event_id: Option<OwnedEventId>,
     pub sender: OwnedUserId,
     pub sender_name: String,
+    pub sender_avatar: Option<MediaRef>,
     /// Discord for bridge ghosts.
     pub sender_network: Network,
     /// The text; an image's filename; a system line's description.
@@ -59,6 +60,12 @@ pub struct ImageInfo {
 #[derive(Debug, Clone)]
 pub struct MediaRef(pub(crate) MediaSource);
 
+impl MediaRef {
+    pub(crate) fn plain(url: matrix_sdk::ruma::OwnedMxcUri) -> Self {
+        MediaRef(MediaSource::Plain(url))
+    }
+}
+
 impl PartialEq for MediaRef {
     fn eq(&self, other: &Self) -> bool {
         self.key() == other.key()
@@ -86,7 +93,7 @@ pub struct Reaction {
 
 /// Builds the timeline from a newest-first `chunk`; returns it oldest-first.
 pub(crate) async fn build(room: &Room, chunk: Vec<TimelineEvent>, me: Option<&UserId>) -> Vec<TimelineMessage> {
-    let mut names: HashMap<OwnedUserId, String> = HashMap::new();
+    let mut names: HashMap<OwnedUserId, (String, Option<MediaRef>)> = HashMap::new();
     let mut timeline = Vec::new();
     // target event → (key, sender, reaction event)
     let mut reactions: HashMap<OwnedEventId, Vec<(String, OwnedUserId, OwnedEventId)>> = HashMap::new();
@@ -129,11 +136,12 @@ pub(crate) async fn build(room: &Room, chunk: Vec<TimelineEvent>, me: Option<&Us
 
         let sender = event.sender().to_owned();
         if !names.contains_key(&sender) {
-            names.insert(sender.clone(), display_name(room, &sender).await);
+            names.insert(sender.clone(), name_and_avatar(room, &sender).await);
         }
         timeline.push(TimelineMessage {
             event_id: Some(event.event_id().to_owned()),
-            sender_name: names[&sender].clone(),
+            sender_name: names[&sender].0.clone(),
+            sender_avatar: names[&sender].1.clone(),
             sender_network: user_network(&sender),
             sender,
             body,
@@ -179,6 +187,16 @@ fn fold_reactions(list: Vec<(String, OwnedUserId, OwnedEventId)>, me: Option<&Us
         pill.count += 1;
     }
     pills.into_iter().map(|(pill, _)| pill).collect()
+}
+
+async fn name_and_avatar(room: &Room, user: &UserId) -> (String, Option<MediaRef>) {
+    let member = room.get_member_no_sync(user).await.ok().flatten();
+    let name = member
+        .as_ref()
+        .and_then(|m| m.display_name().map(str::to_owned))
+        .unwrap_or_else(|| user.localpart().to_owned());
+    let avatar = member.and_then(|m| m.avatar_url().map(|u| MediaRef::plain(u.to_owned())));
+    (name, avatar)
 }
 
 async fn display_name(room: &Room, user: &UserId) -> String {

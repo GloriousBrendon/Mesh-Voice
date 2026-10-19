@@ -36,30 +36,57 @@ pub fn user_network(user_id: &UserId) -> Network {
     }
 }
 
-/// A room is bridged to Discord if it has an `m.bridge` (or the older
-/// `uk.half-shot.bridge`) state event whose `protocol.id` is `discord`.
-pub async fn room_network(room: &Room) -> Network {
+/// What mautrix-discord's bridge state says about a portal room.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BridgedIds {
+    /// The Discord channel (or DM channel) id.
+    pub channel_id: String,
+    /// The Discord server (guild) id; `None` for DMs.
+    pub guild_id: Option<String>,
+}
+
+/// A room is a Discord portal if it has an `m.bridge` (or the older
+/// `uk.half-shot.bridge`) state event for the Discord protocol.
+pub async fn bridged_ids(room: &Room) -> Option<BridgedIds> {
     for event_type in ["m.bridge", "uk.half-shot.bridge"] {
         let Ok(events) = room.get_state_events(StateEventType::from(event_type)).await else {
             continue;
         };
-        let discord = events.iter().any(|raw| {
+        for raw in &events {
             let json = match raw {
                 RawAnySyncOrStrippedState::Sync(raw) => raw.json(),
                 RawAnySyncOrStrippedState::Stripped(raw) => raw.json(),
             };
-            serde_json::from_str::<serde_json::Value>(json.get())
-                .is_ok_and(|event| is_discord_bridge(&event))
-        });
-        if discord {
-            return Network::Discord;
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(json.get())
+                && let Some(ids) = discord_bridge_ids(&event)
+            {
+                return Some(ids);
+            }
         }
     }
-    Network::Matrix
+    None
 }
 
-fn is_discord_bridge(event: &serde_json::Value) -> bool {
-    event["content"]["protocol"]["id"].as_str() == Some("discord")
+/// Rooms the bridge made itself (its "Discord" and "Direct Messages" spaces)
+/// carry no bridge state; their creator, the bridge bot (`@discordbot:…` by
+/// default), gives them away.
+pub fn made_by_bridge(room: &Room) -> bool {
+    room.creators()
+        .unwrap_or_default()
+        .iter()
+        .any(|creator| creator.localpart().starts_with("discord"))
+}
+
+/// mautrix-discord says `protocol.id = "discordgo"`; other bridges `"discord"`.
+fn discord_bridge_ids(event: &serde_json::Value) -> Option<BridgedIds> {
+    let content = &event["content"];
+    if !matches!(content["protocol"]["id"].as_str(), Some("discord" | "discordgo")) {
+        return None;
+    }
+    Some(BridgedIds {
+        channel_id: content["channel"]["id"].as_str().unwrap_or_default().to_owned(),
+        guild_id: content["network"]["id"].as_str().map(str::to_owned),
+    })
 }
 
 #[cfg(test)]
@@ -78,13 +105,23 @@ mod tests {
 
     #[test]
     fn bridge_event_protocol() {
-        let discord = serde_json::json!({
+        let portal = serde_json::json!({
             "type": "m.bridge",
-            "content": { "bridgebot": "@discordbot:strange.lab", "protocol": { "id": "discord" } }
+            "content": {
+                "bridgebot": "@discordbot:strange.lab",
+                "protocol": { "id": "discordgo" },
+                "channel": { "id": "111" },
+                "network": { "id": "222" }
+            }
         });
+        let dm = serde_json::json!({ "content": { "protocol": { "id": "discord" }, "channel": { "id": "333" } } });
         let other = serde_json::json!({ "content": { "protocol": { "id": "telegram" } } });
-        assert!(is_discord_bridge(&discord));
-        assert!(!is_discord_bridge(&other));
-        assert!(!is_discord_bridge(&serde_json::json!({})));
+        assert_eq!(
+            discord_bridge_ids(&portal),
+            Some(BridgedIds { channel_id: "111".into(), guild_id: Some("222".into()) })
+        );
+        assert_eq!(discord_bridge_ids(&dm).and_then(|ids| ids.guild_id), None);
+        assert!(discord_bridge_ids(&other).is_none());
+        assert!(discord_bridge_ids(&serde_json::json!({})).is_none());
     }
 }
