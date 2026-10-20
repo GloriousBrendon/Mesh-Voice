@@ -481,6 +481,31 @@ impl MeshClient {
         Ok(())
     }
 
+    /// Uploads `data` and sends it to `room_id` as an attachment (image, file,
+    /// …), the kind chosen by `content_type`. The SDK encrypts it in encrypted
+    /// rooms. `caption`, if any, is sent as the attachment's body.
+    pub async fn send_attachment(
+        &self,
+        room_id: &OwnedRoomId,
+        filename: &str,
+        content_type: &str,
+        data: Vec<u8>,
+        caption: Option<&str>,
+    ) -> MeshResult<()> {
+        use matrix_sdk::attachment::AttachmentConfig;
+        let Some(room) = self.client.get_room(room_id) else {
+            return Ok(());
+        };
+        let mime = content_type.parse::<mime::Mime>().unwrap_or(mime::APPLICATION_OCTET_STREAM);
+        use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
+        let config = match caption.filter(|c| !c.is_empty()) {
+            Some(caption) => AttachmentConfig::new().caption(Some(TextMessageEventContent::plain(caption))),
+            None => AttachmentConfig::new(),
+        };
+        room.send_attachment(filename, &mime, data, config).await?;
+        Ok(())
+    }
+
     /// Reacts to `event_id` with `key` (an emoji, usually).
     pub async fn react(&self, room_id: &OwnedRoomId, event_id: &OwnedEventId, key: &str) -> MeshResult<()> {
         use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotation};

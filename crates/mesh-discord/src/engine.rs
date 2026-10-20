@@ -135,6 +135,19 @@ pub(crate) fn media(payload: &str) -> Option<(String, std::result::Result<Vec<u8
     Some((media["url"].as_str()?.to_owned(), bytes))
 }
 
+/// A `sendFile` result: the chat/channel id and whether it sent (or why not).
+/// The agent reports `{chat_id|channel_id, ok, error}`.
+pub(crate) fn sent(payload: &str) -> Option<(String, std::result::Result<(), String>)> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let id = v["chat_id"].as_str().or_else(|| v["channel_id"].as_str())?.to_owned();
+    let result = if v["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(v["error"].as_str().unwrap_or("send failed").to_owned())
+    };
+    Some((id, result))
+}
+
 /// Whether something is listening at the engine address (cheap; for deciding
 /// whether to start the engine).
 pub fn is_running(socket: &Path) -> bool {

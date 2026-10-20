@@ -41,7 +41,7 @@
       "VoiceStateStore", "SpeakingStore", "MediaEngineStore", "SelectedChannelStore", "RTCConnectionStore"];
     // Optional: voice keeps working if Discord renames these.
     const extra = ["MessageStore", "ReadStateStore"];
-    let channel, audio, call, invite, messages;
+    let channel, audio, call, invite, messages, uploads;
     for (const c of candidates(req)) {
       try {
         if (typeof c.getName === "function") {
@@ -53,11 +53,12 @@
         if (!call && typeof c.call === "function" && typeof c.ring === "function") call = c;
         if (!invite && typeof c.acceptInvite === "function" && typeof c.resolveInvite === "function") invite = c;
         if (!messages && typeof c.sendMessage === "function" && typeof c.fetchMessages === "function") messages = c;
+        if (!uploads && typeof c.addFiles === "function" && typeof c.clearAll === "function") uploads = c;
       } catch {}
     }
     const missing = wanted.filter((n) => !stores[n]);
     if (missing.length || !channel || !audio || !call) return null;
-    return { s: stores, channel, audio, call, invite, messages, dispatcher: stores.VoiceStateStore._dispatcher };
+    return { s: stores, channel, audio, call, invite, messages, uploads, dispatcher: stores.VoiceStateStore._dispatcher };
   };
 
   const user = (id) => {
@@ -248,6 +249,21 @@
     },
     send: (channelId, content) =>
       found.messages.sendMessage(channelId, { content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, true, {}),
+    // Sends a file (base64) to a channel through Discord's own upload drawer:
+    // addFiles uploads it, then it sends with the optional caption as content.
+    sendFile: async (channelId, filename, mimetype, base64, caption) => {
+      const report = (ok, error) => window.meshSent(JSON.stringify({ channel_id: channelId, ok, error: error || null }));
+      try {
+        if (!found.uploads) throw new Error("Discord isn't ready for uploads");
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+        const file = new File([bytes], filename, { type: mimetype });
+        found.uploads.addFiles({ channelId, draftType: 0, files: [{ file, platform: 1, isThumbnail: false, origin: 0 }], showLargeMessageDialog: false });
+        if (caption) found.messages.sendMessage(channelId, { content: caption, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, true, {});
+        report(true);
+      } catch (e) {
+        report(false, String((e && e.message) || e));
+      }
+    },
     // Downloads a Discord picture through the page (so through its network,
     // the VPN on Linux) and hands the bytes to Mesh as base64.
     fetchMedia: async (url) => {

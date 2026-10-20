@@ -22,6 +22,8 @@ pub enum Event {
     Notify(Notify),
     /// A picture asked for with `Engine::fetch_media`: its bytes, or why not.
     Media { url: String, bytes: Result<Vec<u8>, String> },
+    /// How an `Engine::send_file` went.
+    Sent { chat_id: String, result: Result<(), String> },
     /// Lost the tab (closed, not logged in yet); reconnects on its own.
     Disconnected,
 }
@@ -44,6 +46,14 @@ impl Engine {
     /// Sends through WhatsApp Web's own send action.
     pub fn send_message(&self, chat_id: &str, text: &str) {
         self.call("send", &[chat_id, text]);
+    }
+    /// Sends a file (image as a photo, else a document) with an optional
+    /// caption, through WhatsApp Web's own attach flow; answers with
+    /// `Event::Sent`. `data` is the raw bytes (base64-encoded for the page).
+    pub fn send_file(&self, chat_id: &str, filename: &str, content_type: &str, data: &[u8], caption: &str) {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        self.call("sendFile", &[chat_id, filename, content_type, &b64, caption]);
     }
     /// A profile picture URL, or [`image_url`] for a message's photo
     /// (decrypted and shrunk in the page); answers with `Event::Media`.
@@ -127,7 +137,7 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     let site = engine::Site {
         host: "web.whatsapp.com",
         agent: AGENT,
-        bindings: &["waEmit", "waMessages", "waNotify", "waMedia"],
+        bindings: &["waEmit", "waMessages", "waNotify", "waMedia", "waSent"],
         kickoff: "window.__mesh && window.__mesh.ready() && window.waEmit(window.__mesh.snapshot())",
     };
     let (tx, mut raw) = mpsc::unbounded_channel();
@@ -153,6 +163,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "waMessages" => serde_json::from_str(payload).ok().map(Event::Messages),
         "waNotify" => serde_json::from_str(payload).ok().map(Event::Notify),
         "waMedia" => engine::media(payload).map(|(url, bytes)| Event::Media { url, bytes }),
+        "waSent" => engine::sent(payload).map(|(chat_id, result)| Event::Sent { chat_id, result }),
         _ => None,
     }
 }

@@ -162,6 +162,10 @@ struct Session {
     home_filter: Option<Network>,
     /// The emoji picker is open under the composer.
     emoji_open: bool,
+    /// A file chosen in the composer, waiting to send (with the draft as caption).
+    pending_attachment: Option<Attachment>,
+    /// A file send is in flight (so the send button waits).
+    sending_attachment: bool,
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
     web_chat: Option<WebChat>,
@@ -268,6 +272,8 @@ impl Session {
             folders_open: [true, true, true],
             home_filter: None,
             emoji_open: false,
+            pending_attachment: None,
+            sending_attachment: false,
             web_chat: None,
             jump: None,
             typing: HashMap::new(),
@@ -277,6 +283,35 @@ impl Session {
             avatars: HashMap::new(),
         }
     }
+}
+
+/// A file chosen in the composer, ready to send.
+#[derive(Debug, Clone)]
+struct Attachment {
+    filename: String,
+    mime: String,
+    data: Vec<u8>,
+}
+
+/// A best-effort MIME type from a filename's extension (images and the common
+/// ones), else a generic binary type. ponytail: small built-in map; the
+/// backends re-sniff as needed.
+fn mime_guess_from(filename: &str) -> String {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
 }
 
 /// A chat from a hidden web client (a Discord channel or DM, a WhatsApp
@@ -538,6 +573,13 @@ enum Message {
     DraftChanged(String),
     ToggleEmoji,
     InsertEmoji(&'static str),
+    /// Open the native file picker for an attachment.
+    PickAttachment,
+    /// The picker finished (None if cancelled or unreadable).
+    AttachmentPicked(Option<Attachment>),
+    ClearAttachment,
+    /// A web client's file send finished.
+    AttachmentSent(Result<(), String>),
     SendMessage,
     MessageSent(Result<(), String>),
     AcceptVerification,
@@ -1111,6 +1153,41 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::PickAttachment => Task::perform(
+            async {
+                let file = rfd::AsyncFileDialog::new().pick_file().await?;
+                let data = file.read().await;
+                let filename = file.file_name();
+                let mime = mime_guess_from(&filename);
+                Some(Attachment { filename, mime, data })
+            },
+            Message::AttachmentPicked,
+        ),
+        Message::AttachmentPicked(attachment) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.pending_attachment = attachment;
+            }
+            Task::none()
+        }
+        Message::ClearAttachment => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.pending_attachment = None;
+            }
+            Task::none()
+        }
+        Message::AttachmentSent(result) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.sending_attachment = false;
+                match result {
+                    Ok(()) => {
+                        session.pending_attachment = None;
+                        session.message_draft.clear();
+                    }
+                    Err(err) => session.status = Some(format!("Couldn't send the file: {err}")),
+                }
+            }
+            Task::none()
+        }
         Message::InsertEmoji(emoji) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.message_draft.push_str(emoji);
@@ -1122,6 +1199,51 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
+            // A chosen file sends with the draft as its caption (caption may
+            // be empty). Routed to the chat's own backend.
+            if let Some(attachment) = session.pending_attachment.clone() {
+                if session.sending_attachment {
+                    return Task::none();
+                }
+                let caption = session.message_draft.clone();
+                match &session.web_chat {
+                    Some(chat) if chat.network == Network::WhatsApp => match &state.whatsapp {
+                        Some(engine) => {
+                            engine.send_file(&chat.id, &attachment.filename, &attachment.mime, &attachment.data, &caption);
+                            session.sending_attachment = true;
+                        }
+                        None => session.status = Some("WhatsApp isn't running, so this can't be sent.".to_string()),
+                    },
+                    Some(chat) if chat.network == Network::Discord => {
+                        session.status = Some("Sending files to Discord isn't ready yet — only WhatsApp and Matrix.".to_string());
+                        let _ = chat;
+                    }
+                    _ => {
+                        let Some(room_id) = session.selected_room.clone() else {
+                            session.status = Some("Pick a chat first.".to_string());
+                            return Task::none();
+                        };
+                        session.sending_attachment = true;
+                        let client = session.client.clone();
+                        return Task::perform(
+                            async move {
+                                client
+                                    .send_attachment(
+                                        &room_id,
+                                        &attachment.filename,
+                                        &attachment.mime,
+                                        attachment.data,
+                                        Some(&caption),
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            },
+                            Message::AttachmentSent,
+                        );
+                    }
+                }
+                return Task::none();
+            }
             if session.message_draft.trim().is_empty() {
                 return Task::none();
             }
@@ -1398,6 +1520,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         notify(n.title, n.body);
                     }
                 }
+                whatsapp::Event::Sent { result, .. } => return update(state, Message::AttachmentSent(result)),
                 whatsapp::Event::Disconnected => {
                     state.whatsapp = None;
                     state.whatsapp_state = None;
@@ -3459,11 +3582,7 @@ fn composer<'a>(
             ..button::Style::default()
         });
     let field = row![
-        ui::not_yet(
-            ui::icon_button(ui::Icon::Paperclip, None, false, p, l),
-            "Attachments aren't supported yet.",
-            p,
-        ),
+        ui::icon_button(ui::Icon::Paperclip, Some(Message::PickAttachment), false, p, l),
         emoji_toggle,
         input,
         ui::primary_button(ui::icon(ui::Icon::Send, 16.0, p.accent_text()), Some(Message::SendMessage), p, l),
@@ -3475,6 +3594,26 @@ fn composer<'a>(
     let mut outer = column![];
     if session.emoji_open {
         outer = outer.push(emoji_picker(p, l));
+    }
+    if let Some(att) = &session.pending_attachment {
+        let label = if session.sending_attachment {
+            format!("sending {} …", att.filename)
+        } else {
+            format!("📎 {} · {}", att.filename, human_size(att.data.len() as u64))
+        };
+        let mut chip = row![ui::mono(label, 12.0, p.text_bright())]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if !session.sending_attachment {
+            chip = chip.push(ui::icon_button(ui::Icon::Close, Some(Message::ClearAttachment), false, p, l));
+        }
+        outer = outer.push(
+            container(chip).padding([6, 10]).style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(radius).color(edge).width(1),
+                ..container::Style::default()
+            }),
+        );
     }
     outer.push(
         container(field)

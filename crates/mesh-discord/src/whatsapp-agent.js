@@ -5,7 +5,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 2;
+  const version = 3;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -26,6 +26,9 @@
       Pics: (req("WAWebProfilePicThumbCollection") || {}).ProfilePicThumbCollection,
       send,
       downloads: (req("WAWebDownloadManager") || {}).downloadManager,
+      attachColl: req("WAWebAttachMediaCollection"),
+      fileType: (req("WAWebFileUtils") || {}).FILETYPE,
+      pickerOrigin: (req("WAWebWamEnumMediaPickerOriginType") || {}).MEDIA_PICKER_ORIGIN_TYPE,
     };
   };
 
@@ -174,6 +177,29 @@
     send: (chatId, text) => {
       const chat = wa.Chat.get(chatId);
       if (chat) return wa.send.sendTextMsgToChat(chat, text);
+    },
+    // Sends a file (base64) to a chat through WhatsApp Web's own attach flow:
+    // images go as photos, everything else as a document. `caption` rides along.
+    sendFile: async (chatId, filename, mimetype, base64, caption) => {
+      const report = (ok, error) => window.waSent(JSON.stringify({ chat_id: chatId, ok, error: error || null }));
+      try {
+        const chat = wa.Chat.get(chatId);
+        if (!chat || !wa.attachColl) throw new Error("WhatsApp isn't ready for attachments");
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+        const file = new File([bytes], filename, { type: mimetype });
+        const type = /^image\//.test(mimetype) ? wa.fileType.IMAGE : /^video\//.test(mimetype) ? wa.fileType.VIDEO : wa.fileType.DOCUMENT;
+        const coll = new wa.attachColl({ chatParticipantCount: chat.getParticipantCount ? chat.getParticipantCount() : 1 });
+        await coll.processAttachmentsForChat([{ file, type, filename, mimetype }], wa.pickerOrigin.GALLERY, chat);
+        const medias = coll.getValidMedias();
+        for (const m of medias) {
+          // Caption rides in the media's own field (ignored if the build differs).
+          if (caption) try { m.caption = caption; } catch {}
+          await m.sendToChat({ chat, options: { type: m.type, caption: caption || undefined } });
+        }
+        report(true);
+      } catch (e) {
+        report(false, String((e && e.message) || e));
+      }
     },
     // "wa-msg:<message id>" decrypts that message's image; anything else is a
     // URL (profile pictures) fetched through the page. Either way Mesh gets
