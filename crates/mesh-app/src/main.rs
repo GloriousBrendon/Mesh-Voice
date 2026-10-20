@@ -90,6 +90,8 @@ struct App {
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
     discord_state: Option<mesh_discord::Snapshot>,
+    /// Whether Mesh's window has focus (no notifications for the chat in view).
+    window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
     theme_files: Vec<PathBuf>,
     theme_stamps: Vec<Option<std::time::SystemTime>>,
@@ -409,6 +411,7 @@ enum Message {
     StartDiscord,
     /// Show a Discord text channel or DM in the chat pane.
     DiscordChannelSelected(DiscordChannel),
+    WindowFocused(bool),
     OpenJoinServer,
     JoinServerLink(String),
     /// Accept the pasted invite through the hidden Discord client.
@@ -488,6 +491,7 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             discord: None,
             discord_state: None,
+            window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
             screen,
@@ -891,7 +895,17 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.typing.insert(room_id, names);
                     Task::none()
                 }
+                MeshUpdate::Notify { room_id, title, body } => {
+                    if !(state.window_focused && session.selected_room.as_ref() == Some(&room_id)) {
+                        notify(title, body);
+                    }
+                    Task::none()
+                }
             }
+        }
+        Message::WindowFocused(focused) => {
+            state.window_focused = focused;
+            Task::none()
         }
         Message::DraftChanged(value) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
@@ -1095,6 +1109,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         && session.discord_channel.as_ref().is_some_and(|c| c.id == messages.channel_id)
                     {
                         session.timeline = discord_timeline(messages);
+                    }
+                }
+                mesh_discord::Event::Notify(n) => {
+                    let open = match &state.screen {
+                        Screen::LoggedIn(session) => session.discord_channel.as_ref().is_some_and(|c| c.id == n.channel_id),
+                        _ => false,
+                    };
+                    if !(state.window_focused && open) {
+                        notify(n.title, n.body);
                     }
                 }
                 mesh_discord::Event::Invite(result) => {
@@ -1800,9 +1823,23 @@ fn subscription(state: &App) -> Subscription<Message> {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 shortcut(key, modifiers)
             }
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocused(true)),
+            iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowFocused(false)),
             _ => None,
         }),
     ])
+}
+
+/// A desktop notification, shown off the UI thread (the D-Bus / WinRT call
+/// can block for a moment). ponytail: on Windows it shows under PowerShell's
+/// name; give the Start Menu shortcut an AppUserModelID and pass it to
+/// `app_id` for "Mesh".
+fn notify(title: String, body: String) {
+    std::thread::spawn(move || {
+        if let Err(err) = notify_rust::Notification::new().appname("Mesh").summary(&title).body(&body).show() {
+            tracing::warn!("notification failed: {err}");
+        }
+    });
 }
 
 /// Where Mesh finds the hidden Discord client: the config, else the

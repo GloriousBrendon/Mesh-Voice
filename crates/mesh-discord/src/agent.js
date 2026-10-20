@@ -3,7 +3,7 @@
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 5;
+  const version = 6;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -188,6 +188,19 @@
   const messageEvents = ["MESSAGE_CREATE", "MESSAGE_UPDATE", "MESSAGE_DELETE", "MESSAGE_DELETE_BULK",
     "LOAD_MESSAGES_SUCCESS", "MESSAGE_SEND_FAILED"];
 
+  // Tells Mesh about new DMs and mentions of us (never our own messages), for
+  // a desktop notification.
+  const notify = ({ message: m }) => {
+    const me = found.s.UserStore.getCurrentUser();
+    if (!m || !m.author || !me || m.author.id === me.id) return;
+    const ch = found.s.ChannelStore.getChannel(m.channel_id);
+    if (!ch) return;
+    if (ch.guild_id && !(m.mentions || []).some((u) => u.id === me.id)) return;
+    const where = ch.guild_id ? ` in #${ch.name}` : ch.name ? ` in ${ch.name}` : "";
+    const title = (m.author.global_name || m.author.username) + where;
+    window.meshNotify(JSON.stringify({ channel_id: m.channel_id, title, body: m.content || "sent an attachment" }));
+  };
+
   window.__mesh = {
     version,
     ready: () => !!found,
@@ -246,6 +259,7 @@
     if (!found) return setTimeout(boot, 1000);
     for (const e of events) found.dispatcher.subscribe(e, emit);
     for (const e of messageEvents) found.dispatcher.subscribe(e, emitMessages);
+    found.dispatcher.subscribe("MESSAGE_CREATE", notify);
     emit();
   };
   boot();

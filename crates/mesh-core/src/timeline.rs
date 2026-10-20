@@ -279,6 +279,46 @@ pub(crate) fn register_typing_handler(client: &Client, tx: mpsc::UnboundedSender
     });
 }
 
+/// Forwards messages the account's push rules say should notify as
+/// [`MeshUpdate::Notify`]. Invites (stripped events) and our own messages
+/// are skipped.
+pub(crate) async fn register_notification_handler(client: &Client, tx: mpsc::UnboundedSender<MeshUpdate>) {
+    use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedTimelineEvent;
+    use matrix_sdk::sync::Notification;
+    client
+        .register_notification_handler(move |notification: Notification, room: Room, client: Client| {
+            let tx = tx.clone();
+            async move {
+                if !notification.actions.iter().any(|a| a.should_notify()) {
+                    return;
+                }
+                let RawAnySyncOrStrippedTimelineEvent::Sync(raw) = &notification.event else { return };
+                let Ok(event) = raw.deserialize() else { return };
+                if Some(event.sender()) == client.user_id() {
+                    return;
+                }
+                let body = match &event {
+                    AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+                        SyncMessageLikeEvent::Original(message),
+                    )) => message.content.body().to_owned(),
+                    AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_)) => {
+                        "Encrypted message".to_owned()
+                    }
+                    _ => return,
+                };
+                let sender = display_name(&room, event.sender()).await;
+                let room_name = room.cached_display_name().map(|n| n.to_string()).unwrap_or_default();
+                let title = if room.is_direct().await.unwrap_or(false) || room_name == sender {
+                    sender
+                } else {
+                    format!("{sender} in {room_name}")
+                };
+                let _ = tx.send(MeshUpdate::Notify { room_id: room.room_id().to_owned(), title, body });
+            }
+        })
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

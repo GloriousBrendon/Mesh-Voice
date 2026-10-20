@@ -26,6 +26,8 @@ pub enum Event {
     /// The open channel's latest messages (after `Engine::open_channel`, and
     /// again whenever they change).
     Messages(Messages),
+    /// A new DM, or a mention of us, worth a desktop notification.
+    Notify(Notify),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -111,6 +113,14 @@ pub struct Dm {
     pub last_ms: u64,
     pub unread: bool,
     pub mentions: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Notify {
+    pub channel_id: String,
+    /// "B345T", or "B345T in #general".
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,6 +252,7 @@ async fn session(
         send("Runtime.addBinding", serde_json::json!({ "name": "meshEmit" })),
         send("Runtime.addBinding", serde_json::json!({ "name": "meshInvite" })),
         send("Runtime.addBinding", serde_json::json!({ "name": "meshMessages" })),
+        send("Runtime.addBinding", serde_json::json!({ "name": "meshNotify" })),
         send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": AGENT })),
         send("Runtime.evaluate", serde_json::json!({ "expression": AGENT })),
         send(
@@ -295,6 +306,7 @@ fn binding_event(text: &str) -> Option<Event> {
         "meshEmit" => serde_json::from_str(payload).ok().map(Event::Snapshot),
         "meshInvite" => serde_json::from_str(payload).ok().map(Event::Invite),
         "meshMessages" => serde_json::from_str(payload).ok().map(Event::Messages),
+        "meshNotify" => serde_json::from_str(payload).ok().map(Event::Notify),
         _ => None,
     }
 }
@@ -419,6 +431,11 @@ mod tests {
         assert_eq!(m.channel_id, "5");
         assert_eq!(m.messages[0].author, "B345T");
         assert_eq!(m.messages[0].attachments[0].filename, "a.png");
+
+        let payload = r#"{"channel_id":"5","title":"B345T","body":"hi"}"#;
+        let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshNotify", "payload": payload } });
+        let Some(Event::Notify(n)) = binding_event(&msg.to_string()) else { panic!("no notify") };
+        assert_eq!((n.channel_id.as_str(), n.title.as_str()), ("5", "B345T"));
     }
 
     #[test]

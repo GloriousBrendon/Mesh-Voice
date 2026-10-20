@@ -38,6 +38,7 @@ async fn main() {
                 }
                 return;
             }
+            mesh_discord::Event::Notify(n) => println!("notify: {}: {}", n.title, n.body),
             mesh_discord::Event::Disconnected => println!("disconnected"),
         }
     }

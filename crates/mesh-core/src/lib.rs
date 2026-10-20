@@ -174,6 +174,14 @@ pub enum MeshUpdate {
         room_id: OwnedRoomId,
         names: Vec<String>,
     },
+    /// The account's push rules say this message should notify (a DM, a
+    /// mention, a keyword...); never one of ours.
+    Notify {
+        room_id: OwnedRoomId,
+        /// "Alice", or "Alice in #room".
+        title: String,
+        body: String,
+    },
 }
 
 impl MeshClient {
@@ -377,6 +385,8 @@ impl MeshClient {
 
         verification::register_handlers(&self.client, tx.clone());
         timeline::register_typing_handler(&self.client, tx.clone());
+        let (client, notify) = (self.client.clone(), tx.clone());
+        tokio::spawn(async move { timeline::register_notification_handler(&client, notify).await });
         self.call.set_update_sender(tx.clone());
         self.call.register_handlers();
 
