@@ -150,6 +150,9 @@ struct Session {
     folders_open: [bool; 2],
     /// Home's network chip; `None` is All.
     home_filter: Option<Network>,
+    /// The Discord text channel or DM shown in the chat pane (through the
+    /// hidden client) instead of `selected_room`.
+    discord_channel: Option<DiscordChannel>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
     /// Who's typing, per room.
@@ -242,6 +245,7 @@ impl Session {
             active_guild: None,
             folders_open: [true, true],
             home_filter: None,
+            discord_channel: None,
             jump: None,
             typing: HashMap::new(),
             images: HashMap::new(),
@@ -250,6 +254,43 @@ impl Session {
             avatars: HashMap::new(),
         }
     }
+}
+
+/// A Discord text channel or DM, as the chat pane needs it.
+#[derive(Debug, Clone, PartialEq)]
+struct DiscordChannel {
+    id: String,
+    name: String,
+    dm: bool,
+}
+
+/// Discord messages as timeline rows, so the Matrix timeline view draws them.
+/// ponytail: authors get a made-up `@discord_<id>:discord.com` user id,
+/// attachments are links and there are no reactions; give Discord its own
+/// message type when those matter.
+fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
+    messages
+        .messages
+        .into_iter()
+        .filter_map(|m| {
+            let sender = OwnedUserId::try_from(format!("@discord_{}:discord.com", m.author_id)).ok()?;
+            let mut body = if m.system { format!("{} {}", m.author, m.content) } else { m.content };
+            for a in &m.attachments {
+                body.push_str(&format!("\n{}: {}", a.filename, a.url));
+            }
+            Some(TimelineMessage {
+                event_id: None,
+                sender,
+                sender_name: m.author,
+                sender_avatar: None,
+                sender_network: Network::Discord,
+                body: body.trim().to_string(),
+                kind: if m.system { MessageKind::System } else { MessageKind::Text },
+                reactions: Vec::new(),
+                timestamp_ms: m.timestamp_ms,
+            })
+        })
+        .collect()
 }
 
 /// UI-side view of the single active voice call.
@@ -366,6 +407,8 @@ enum Message {
     HomeFilter(Option<Network>),
     /// Start the hidden Discord client with `discord_engine_command`.
     StartDiscord,
+    /// Show a Discord text channel or DM in the chat pane.
+    DiscordChannelSelected(DiscordChannel),
     OpenJoinServer,
     JoinServerLink(String),
     /// Accept the pasted invite through the hidden Discord client.
@@ -638,6 +681,11 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             session.selected_room = Some(room_id.clone());
+            if session.discord_channel.take().is_some()
+                && let Some(engine) = &state.discord
+            {
+                engine.close_channel();
+            }
             session.focused = Pane::Chat;
             session.timeline.clear();
             session.members.clear();
@@ -855,12 +903,21 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
-            let Some(room_id) = session.selected_room.clone() else {
-                return Task::none();
-            };
             if session.message_draft.trim().is_empty() {
                 return Task::none();
             }
+            // A Discord channel sends through the hidden client; its echo
+            // comes back as Event::Messages.
+            if let Some(channel) = &session.discord_channel {
+                match &state.discord {
+                    Some(engine) => engine.send_message(&channel.id, &std::mem::take(&mut session.message_draft)),
+                    None => session.status = Some("Discord isn't running, so this can't be sent.".to_string()),
+                }
+                return Task::none();
+            }
+            let Some(room_id) = session.selected_room.clone() else {
+                return Task::none();
+            };
             let client = session.client.clone();
             let body = std::mem::take(&mut session.message_draft);
             Task::perform(
@@ -1020,11 +1077,25 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::Discord(event) => {
             match event {
-                mesh_discord::Event::Connected(engine) => state.discord = Some(engine),
+                mesh_discord::Event::Connected(engine) => {
+                    if let Screen::LoggedIn(session) = &state.screen
+                        && let Some(channel) = &session.discord_channel
+                    {
+                        engine.open_channel(&channel.id);
+                    }
+                    state.discord = Some(engine);
+                }
                 mesh_discord::Event::Snapshot(snapshot) => state.discord_state = Some(snapshot),
                 mesh_discord::Event::Disconnected => {
                     state.discord = None;
                     state.discord_state = None;
+                }
+                mesh_discord::Event::Messages(messages) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && session.discord_channel.as_ref().is_some_and(|c| c.id == messages.channel_id)
+                    {
+                        session.timeline = discord_timeline(messages);
+                    }
                 }
                 mesh_discord::Event::Invite(result) => {
                     if let Screen::LoggedIn(session) = &mut state.screen
@@ -1392,6 +1463,22 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.home_filter = filter;
             }
+            Task::none()
+        }
+        Message::DiscordChannelSelected(channel) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            match &state.discord {
+                Some(engine) => engine.open_channel(&channel.id),
+                None => session.status = Some("Discord isn't running.".to_string()),
+            }
+            session.selected_room = None;
+            session.discord_channel = Some(channel);
+            session.focused = Pane::Chat;
+            session.timeline.clear();
+            session.members.clear();
+            session.show_settings = false;
             Task::none()
         }
         Message::StartDiscord => {
@@ -2452,14 +2539,35 @@ fn channel_pane<'a>(
             .partition(|r| r.is_direct);
         [("Direct messages", directs), ("Rooms", others)]
     };
+    // With the hidden client running, Discord DMs come from it (no bridge in
+    // the way) and the bridged copies of them are left out.
+    let discord_dms = match discord {
+        Some(d) if home && session.home_filter != Some(Network::Matrix) => d.dms.as_slice(),
+        _ => &[],
+    };
     for (label, rooms) in sections {
-        if rooms.is_empty() {
+        let dm_section = home && label == "Direct messages";
+        let mut rows: Vec<(u64, Element<'a, Message>)> = rooms
+            .into_iter()
+            .filter(|r| !(dm_section && discord.is_some() && r.bridged.as_ref().is_some_and(|b| b.guild_id.is_none())))
+            .map(|room| {
+                let selected = session.selected_room.as_ref() == Some(&room.id);
+                (room.last_activity_ms.unwrap_or(0), channel_row(room, &session.avatars, selected, p, l))
+            })
+            .collect();
+        if dm_section {
+            rows.extend(discord_dms.iter().map(|dm| {
+                let open = DiscordChannel { id: dm.id.clone(), name: dm.name.clone(), dm: true };
+                (dm.last_ms, discord_channel_row(session, open, dm.unread, dm.mentions, p, l))
+            }));
+            rows.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
+        }
+        if rows.is_empty() {
             continue;
         }
         list = list.push(ui::section(label, p));
-        for room in rooms {
-            let selected = session.selected_room.as_ref() == Some(&room.id);
-            list = list.push(channel_row(room, &session.avatars, selected, p, l));
+        for (_, row) in rows {
+            list = list.push(row);
         }
     }
 
@@ -2567,30 +2675,8 @@ fn guild_pane<'a>(
             list = list.push(ui::section(name, p));
         }
         for channel in guild.text_channels.iter().filter(|c| c.category.as_deref() == category) {
-            let bridged = session
-                .rooms
-                .iter()
-                .find(|r| r.bridged.as_ref().is_some_and(|b| b.channel_id == channel.id));
-            list = list.push(match bridged {
-                Some(room) => {
-                    let selected = session.selected_room.as_ref() == Some(&room.id);
-                    channel_row(room, &session.avatars, selected, p, l)
-                }
-                None => ui::not_yet(
-                    container(
-                        row![
-                            ui::swatch(iced::Color::TRANSPARENT, 2.0, 18.0, 1.0),
-                            ui::icon(ui::Icon::Hash, 14.0, p.text_muted()),
-                            ui::sans(&channel.name, 14.0, Weight::Normal, p.text_muted()),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
-                    )
-                    .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 }),
-                    "Not bridged. Reading Discord text right in Mesh comes next.",
-                    p,
-                ),
-            });
+            let open = DiscordChannel { id: channel.id.clone(), name: channel.name.clone(), dm: false };
+            list = list.push(discord_channel_row(session, open, false, 0, p, l));
         }
         for channel in guild.voice_channels.iter().filter(|c| c.category.as_deref() == category) {
             list = list.push(voice_channel(channel, current, p, l));
@@ -2617,6 +2703,38 @@ fn voice_member<'a>(member: &'a mesh_discord::Member, size: f32, p: &theme::Pale
         line = line.push(ui::icon(ui::Icon::MicOff, 13.0, p.danger()));
     }
     line.into()
+}
+
+/// A Discord text channel or DM row (from the hidden client), drawn like
+/// `channel_row`; click to read it in the chat pane.
+fn discord_channel_row<'a>(
+    session: &Session,
+    channel: DiscordChannel,
+    unread: bool,
+    mentions: u64,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let selected = session.discord_channel.as_ref().is_some_and(|c| c.id == channel.id);
+    let color = if selected || unread { p.text_bright() } else { p.text() };
+    let bar = if selected { p.accent() } else { iced::Color::TRANSPARENT };
+    let mut label = row![
+        ui::swatch(bar, 2.0, 18.0, 1.0),
+        ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 14.0, p.text_muted()),
+        ui::sans(channel.name.clone(), 14.0, if unread { Weight::Semibold } else { Weight::Normal }, color)
+            .width(Length::Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if mentions > 0 {
+        label = label.push(ui::chip(mentions.to_string(), p));
+    }
+    if channel.dm {
+        label = label.push(ui::mono("dc", 10.0, p.proto_dc()));
+    }
+    ui::row_button(label, Message::DiscordChannelSelected(channel), selected, p, l)
+        .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 })
+        .into()
 }
 
 /// A channel row. Active: `surface_alt` fill and an accent bar; unread:
@@ -2745,7 +2863,24 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let (p, l) = (&state.palette, &state.layout);
     let room = selected_room(session);
     let mut col = column![];
-    if let Some(room) = room {
+    if let Some(channel) = &session.discord_channel {
+        let mut header = row![
+            ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 18.0, p.text_muted()),
+            ui::sans(&channel.name, 15.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
+            ui::mono("dc", 11.0, p.proto_dc()),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        if channel.dm {
+            let in_call = state.discord_state.as_ref().and_then(|d| d.voice.channel_id.as_deref()) == Some(channel.id.as_str());
+            header = header.push(if in_call {
+                ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l)
+            } else {
+                ui::icon_button(ui::Icon::Phone, Some(Message::DiscordJoin(channel.id.clone())), false, p, l)
+            });
+        }
+        col = col.push(container(header).padding([10, 16])).push(ui::hline(p));
+    } else if let Some(room) = room {
         let topic = room
             .topic
             .as_deref()
@@ -2796,6 +2931,28 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
     }
 
+    // Timeline, status line and composer: the same for a room or a Discord channel.
+    let me = session.my_profile.as_ref().map(|me| &me.user_id);
+    let body = |mut col: iced::widget::Column<'a, Message>, placeholder: String, typing_in: Option<&OwnedRoomId>| {
+        col = col.push(
+            scrollable(
+                container(timeline_view(session, me, state.density, &state.extras, p))
+                    .padding(iced::Padding { top: 16.0, right: 16.0, bottom: 8.0, left: 16.0 }),
+            )
+            .height(Length::Fill)
+            .anchor_bottom(),
+        );
+        if let Some(status) = &session.status {
+            col = col.push(container(text(status.clone()).size(13).color(p.danger())).padding([0, 16]));
+        }
+        col.push(composer(session, placeholder, typing_in, p, l))
+    };
+
+    if let Some(channel) = &session.discord_channel {
+        let placeholder = format!("message {}{}  —  sends with your Discord account", if channel.dm { "" } else { "#" }, channel.name);
+        return body(col, placeholder, None).into();
+    }
+
     let Some(room) = room else {
         return col
             .push(
@@ -2817,32 +2974,22 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
             .into();
     }
 
-    let me = session.my_profile.as_ref().map(|me| &me.user_id);
-    col = col.push(
-        scrollable(
-            container(timeline_view(session, me, state.density, &state.extras, p))
-                .padding(iced::Padding { top: 16.0, right: 16.0, bottom: 8.0, left: 16.0 }),
-        )
-        .height(Length::Fill)
-        .anchor_bottom(),
-    );
-    if let Some(status) = &session.status {
-        col = col.push(container(text(status.clone()).size(13).color(p.danger())).padding([0, 16]));
-    }
-    col.push(composer(session, room, p, l)).into()
-}
-
-fn composer<'a>(
-    session: &'a Session,
-    room: &RoomSummary,
-    p: &theme::Palette,
-    l: &theme::Layout,
-) -> Element<'a, Message> {
-    let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
     let placeholder = match room.network {
         Network::Discord => format!("message {}  —  sends to discord via bridge", room_label(room)),
         Network::Matrix => format!("message {}", room_label(room)),
     };
+    body(col, placeholder, Some(&room.id)).into()
+}
+
+/// The message box; `typing_in` is the Matrix room whose typing line shows under it.
+fn composer<'a>(
+    session: &'a Session,
+    placeholder: String,
+    typing_in: Option<&OwnedRoomId>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
     let input = text_input(&placeholder, &session.message_draft)
         .on_input(Message::DraftChanged)
         .on_submit(Message::SendMessage)
@@ -2878,7 +3025,7 @@ fn composer<'a>(
                 ..container::Style::default()
             }),
         row![
-            typing_line(session.typing.get(&room.id).map(Vec::as_slice).unwrap_or_default(), p),
+            typing_line(typing_in.and_then(|id| session.typing.get(id)).map(Vec::as_slice).unwrap_or_default(), p),
             Space::new().width(Length::Fill),
             ui::mono("Enter send · markdown on", 11.0, p.text_muted()),
         ],

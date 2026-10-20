@@ -3,7 +3,7 @@
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 3;
+  const version = 5;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -39,23 +39,25 @@
     const stores = {};
     const wanted = ["UserStore", "GuildStore", "GuildChannelStore", "GuildMemberStore", "ChannelStore",
       "VoiceStateStore", "SpeakingStore", "MediaEngineStore", "SelectedChannelStore", "RTCConnectionStore"];
-    let channel, audio, call, invite;
+    // Optional: voice keeps working if Discord renames these.
+    const extra = ["MessageStore", "ReadStateStore"];
+    let channel, audio, call, invite, messages;
     for (const c of candidates(req)) {
       try {
         if (typeof c.getName === "function") {
           const name = c.getName();
-          if (wanted.includes(name)) stores[name] = c;
+          if (wanted.includes(name) || extra.includes(name)) stores[name] = c;
         }
         if (!channel && typeof c.selectVoiceChannel === "function" && typeof c.disconnect === "function") channel = c;
         if (!audio && typeof c.toggleSelfMute === "function" && typeof c.toggleSelfDeaf === "function") audio = c;
         if (!call && typeof c.call === "function" && typeof c.ring === "function") call = c;
         if (!invite && typeof c.acceptInvite === "function" && typeof c.resolveInvite === "function") invite = c;
+        if (!messages && typeof c.sendMessage === "function" && typeof c.fetchMessages === "function") messages = c;
       } catch {}
     }
     const missing = wanted.filter((n) => !stores[n]);
     if (missing.length || !channel || !audio || !call) return null;
-    // Optional: voice keeps working if Discord renames the invite actions.
-    return { s: stores, channel, audio, call, invite, dispatcher: stores.VoiceStateStore._dispatcher };
+    return { s: stores, channel, audio, call, invite, messages, dispatcher: stores.VoiceStateStore._dispatcher };
   };
 
   const user = (id) => {
@@ -108,9 +110,23 @@
         })),
       };
     });
+    const reads = s.ReadStateStore;
+    const dms = s.ChannelStore.getSortedPrivateChannels().map((ch) => {
+      const recipients = (ch.recipients || []).map(user);
+      return {
+        id: ch.id,
+        name: ch.name || recipients.map((r) => r.name).join(", ") || "Direct message",
+        recipient_id: recipients.length === 1 ? recipients[0].id : null,
+        // A snowflake id carries its time: ms since Discord's 2015 epoch, << 22.
+        last_ms: ch.lastMessageId ? Number(BigInt(ch.lastMessageId) >> 22n) + 1420070400000 : 0,
+        unread: !!(reads && reads.hasUnread(ch.id)),
+        mentions: (reads && reads.getMentionCount(ch.id)) || 0,
+      };
+    });
     const me = s.UserStore.getCurrentUser();
     return {
       me: me ? user(me.id) : null,
+      dms,
       voice: {
         channel_id: current,
         guild_id: (currentChannel && currentChannel.guild_id) || null,
@@ -133,9 +149,44 @@
     }, 120);
   };
 
+  // The channel Mesh shows, whose messages stream through `meshMessages`.
+  let open = null;
+  let pendingMessages = null;
+  const emitMessages = () => {
+    if (!open || pendingMessages) return;
+    pendingMessages = setTimeout(() => {
+      pendingMessages = null;
+      try {
+        const collection = found.s.MessageStore.getMessages(open);
+        const list = collection.toArray ? collection.toArray() : collection._array || [];
+        window.meshMessages(JSON.stringify({ channel_id: open, messages: list.map(message) }));
+      } catch (e) { console.warn("mesh messages", e); }
+    }, 80);
+  };
+  // Discord message types Mesh draws as a plain message; the rest are system lines.
+  const TEXT = [0, 19, 20, 21];
+  const SYSTEM = { 1: "added someone", 2: "removed someone", 3: "started a call", 6: "pinned a message", 7: "joined the server" };
+  const message = (m) => {
+    const author = user(m.author.id);
+    const text = TEXT.includes(m.type);
+    return {
+      id: m.id,
+      author_id: m.author.id,
+      author: m.nick || author.name,
+      content: text ? m.content : SYSTEM[m.type] || "did something Mesh can't show yet",
+      system: !text,
+      timestamp_ms: m.timestamp ? m.timestamp.valueOf() : 0,
+      attachments: (m.attachments || []).map((a) => ({ filename: a.filename, url: a.url })),
+    };
+  };
+
   const events = ["VOICE_STATE_UPDATES", "SPEAKING", "VOICE_CHANNEL_SELECT", "AUDIO_TOGGLE_SELF_MUTE",
     "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "GUILD_CREATE", "GUILD_DELETE",
-    "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE"];
+    "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE",
+    // DM order and unread state.
+    "MESSAGE_CREATE", "MESSAGE_ACK"];
+  const messageEvents = ["MESSAGE_CREATE", "MESSAGE_UPDATE", "MESSAGE_DELETE", "MESSAGE_DELETE_BULK",
+    "LOAD_MESSAGES_SUCCESS", "MESSAGE_SEND_FAILED"];
 
   window.__mesh = {
     version,
@@ -154,6 +205,16 @@
     leave: () => found.channel.disconnect(),
     toggleMute: () => found.audio.toggleSelfMute(),
     toggleDeaf: () => found.audio.toggleSelfDeaf(),
+    // Shows a text channel or DM in Mesh: loads its latest messages and
+    // streams them (and every change) back; `null` stops.
+    open: (channelId) => {
+      open = channelId;
+      if (!channelId || !found.messages) return;
+      found.messages.fetchMessages({ channelId, limit: 50 });
+      emitMessages();
+    },
+    send: (channelId, content) =>
+      found.messages.sendMessage(channelId, { content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, true, {}),
     // Joins a server from a discord.gg / discord.com/invite link or a bare
     // code. Discord's own client asks for a captcha in its window if it wants
     // one; "waiting" tells Mesh to bring that window up.
@@ -184,6 +245,7 @@
     found = find();
     if (!found) return setTimeout(boot, 1000);
     for (const e of events) found.dispatcher.subscribe(e, emit);
+    for (const e of messageEvents) found.dispatcher.subscribe(e, emitMessages);
     emit();
   };
   boot();

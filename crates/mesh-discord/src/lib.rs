@@ -23,6 +23,9 @@ pub enum Event {
     Snapshot(Snapshot),
     /// How an `Engine::accept_invite` is going.
     Invite(Invite),
+    /// The open channel's latest messages (after `Engine::open_channel`, and
+    /// again whenever they change).
+    Messages(Messages),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -50,6 +53,19 @@ impl Engine {
     /// Joins a server from an invite link or code; answers with `Event::Invite`.
     pub fn accept_invite(&self, link: &str) {
         self.call("acceptInvite", &[link]);
+    }
+    /// Shows a text channel or DM in Mesh: its messages stream back as
+    /// `Event::Messages` until another channel is opened or it's closed.
+    pub fn open_channel(&self, channel_id: &str) {
+        self.call("open", &[channel_id]);
+    }
+    pub fn close_channel(&self) {
+        self.call("open", &[]);
+    }
+    /// Sends through Discord's own client (which handles captchas, slowmode
+    /// and the rest itself).
+    pub fn send_message(&self, channel_id: &str, content: &str) {
+        self.call("send", &[channel_id, content]);
     }
 
     fn call(&self, function: &str, args: &[&str]) {
@@ -79,6 +95,47 @@ pub struct Snapshot {
     pub me: Option<User>,
     pub voice: Voice,
     pub guilds: Vec<Guild>,
+    /// DMs and group DMs, most recent first.
+    #[serde(default)]
+    pub dms: Vec<Dm>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Dm {
+    pub id: String,
+    pub name: String,
+    /// The other person, for a one-to-one DM.
+    pub recipient_id: Option<String>,
+    /// When the last message was sent (ms since the epoch), for sorting.
+    #[serde(default)]
+    pub last_ms: u64,
+    pub unread: bool,
+    pub mentions: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Messages {
+    pub channel_id: String,
+    /// Oldest first.
+    pub messages: Vec<DiscordMessage>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiscordMessage {
+    pub id: String,
+    pub author_id: String,
+    pub author: String,
+    /// The text, or for a system message what happened ("started a call").
+    pub content: String,
+    pub system: bool,
+    pub timestamp_ms: u64,
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Attachment {
+    pub filename: String,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -184,6 +241,7 @@ async fn session(
     for msg in [
         send("Runtime.addBinding", serde_json::json!({ "name": "meshEmit" })),
         send("Runtime.addBinding", serde_json::json!({ "name": "meshInvite" })),
+        send("Runtime.addBinding", serde_json::json!({ "name": "meshMessages" })),
         send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": AGENT })),
         send("Runtime.evaluate", serde_json::json!({ "expression": AGENT })),
         send(
@@ -236,6 +294,7 @@ fn binding_event(text: &str) -> Option<Event> {
     match msg["params"]["name"].as_str()? {
         "meshEmit" => serde_json::from_str(payload).ok().map(Event::Snapshot),
         "meshInvite" => serde_json::from_str(payload).ok().map(Event::Invite),
+        "meshMessages" => serde_json::from_str(payload).ok().map(Event::Messages),
         _ => None,
     }
 }
@@ -350,6 +409,16 @@ mod tests {
         assert_eq!(snapshot.voice.channel_id.as_deref(), Some("9"));
         assert!(snapshot.voice.members[0].speaking);
         assert!(binding_event(r#"{"id":3,"result":{}}"#).is_none());
+    }
+
+    #[test]
+    fn parses_messages() {
+        let payload = r#"{"channel_id":"5","messages":[{"id":"1","author_id":"2","author":"B345T","content":"hi","system":false,"timestamp_ms":1760889619720,"attachments":[{"filename":"a.png","url":"https://cdn/a.png"}]}]}"#;
+        let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshMessages", "payload": payload } });
+        let Some(Event::Messages(m)) = binding_event(&msg.to_string()) else { panic!("no messages") };
+        assert_eq!(m.channel_id, "5");
+        assert_eq!(m.messages[0].author, "B345T");
+        assert_eq!(m.messages[0].attachments[0].filename, "a.png");
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! Connects to the running engine and prints the first snapshot, or accepts
-//! an invite and prints how it went.
-//! `cargo run -p mesh-discord --example probe [socket path | host:port] [invite]`
+//! Connects to the running engine and prints the first snapshot; or accepts
+//! an invite and prints how it went; or (`read:<channel id>`) prints a
+//! channel's latest messages.
+//! `cargo run -p mesh-discord --example probe [socket path | host:port] [invite | read:<id>]`
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
@@ -14,8 +15,10 @@ async fn main() {
         match event {
             mesh_discord::Event::Connected(engine) => {
                 println!("connected");
-                if let Some(invite) = &invite {
-                    engine.accept_invite(invite);
+                match invite.as_deref().map(|a| a.strip_prefix("read:")) {
+                    Some(Some(channel)) => engine.open_channel(channel),
+                    Some(None) => engine.accept_invite(invite.as_deref().unwrap_or_default()),
+                    None => {}
                 }
             }
             mesh_discord::Event::Snapshot(s) if invite.is_none() => {
@@ -28,6 +31,12 @@ async fn main() {
                 if result != mesh_discord::Invite::Waiting {
                     return;
                 }
+            }
+            mesh_discord::Event::Messages(m) => {
+                for msg in &m.messages {
+                    println!("{} {}: {}", msg.timestamp_ms, msg.author, msg.content);
+                }
+                return;
             }
             mesh_discord::Event::Disconnected => println!("disconnected"),
         }
