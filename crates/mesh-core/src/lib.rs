@@ -187,7 +187,7 @@ impl MeshClient {
         std::fs::create_dir_all(&data_dir)?;
 
         let client = Client::builder()
-            .homeserver_url(homeserver_url)
+            .server_name_or_homeserver_url(homeserver_url.trim())
             .sqlite_store(data_dir.join("store"), None)
             .build()
             .await?;
@@ -201,7 +201,7 @@ impl MeshClient {
 
         if let Some(session) = client.matrix_auth().session() {
             let mut session = Session::from(session);
-            session.homeserver = homeserver_url.to_string();
+            session.homeserver = client.homeserver().to_string();
             SessionStore::new(&data_dir).save(&session)?;
         }
 
