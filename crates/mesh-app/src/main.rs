@@ -157,6 +157,8 @@ struct Session {
     folders_open: [bool; 2],
     /// Home's network chip; `None` is All.
     home_filter: Option<Network>,
+    /// The emoji picker is open under the composer.
+    emoji_open: bool,
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
     web_chat: Option<WebChat>,
@@ -176,6 +178,15 @@ struct Session {
 
 /// Text input id of the jump palette, to focus it on open.
 const JUMP_INPUT: &str = "jump";
+
+/// Text input id of the message composer, to refocus after picking an emoji.
+const COMPOSER_INPUT: &str = "composer";
+
+/// A small curated set for the composer's emoji picker; expand if it's missed.
+const EMOJI: &[&str] = &[
+    "😀", "😂", "🙂", "😉", "😍", "😘", "😎", "🤔", "😅", "😭", "😡", "🥳", "😴", "🙄", "😇", "🤗",
+    "👍", "👎", "👏", "🙏", "💪", "👌", "🤝", "🫶", "❤️", "🔥", "✨", "🎉", "💯", "😢", "😱", "🤷",
+];
 
 /// How many matches the jump palette lists.
 const JUMP_RESULTS: usize = 8;
@@ -252,6 +263,7 @@ impl Session {
             active_guild: None,
             folders_open: [true, true],
             home_filter: None,
+            emoji_open: false,
             web_chat: None,
             jump: None,
             typing: HashMap::new(),
@@ -520,6 +532,8 @@ enum Message {
     TimelineLoaded(OwnedRoomId, Result<Vec<TimelineMessage>, String>),
     Update(MeshUpdate),
     DraftChanged(String),
+    ToggleEmoji,
+    InsertEmoji(&'static str),
     SendMessage,
     MessageSent(Result<(), String>),
     AcceptVerification,
@@ -1084,6 +1098,19 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 session.message_draft = value;
             }
             Task::none()
+        }
+        Message::ToggleEmoji => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.emoji_open = !session.emoji_open;
+            }
+            Task::none()
+        }
+        Message::InsertEmoji(emoji) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.message_draft.push_str(emoji);
+            }
+            // Keep the picker open for several in a row; back to typing.
+            iced::widget::operation::focus(iced::widget::Id::new(COMPOSER_INPUT))
         }
         Message::SendMessage => {
             let Screen::LoggedIn(session) = &mut state.screen else {
@@ -1673,6 +1700,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.join_server = None;
                 } else if session.jump.is_some() {
                     session.jump = None;
+                } else if session.emoji_open {
+                    session.emoji_open = false;
                 } else {
                     session.show_settings = false;
                 }
@@ -3316,11 +3345,12 @@ fn composer<'a>(
     session: &'a Session,
     placeholder: String,
     typing_in: Option<&OwnedRoomId>,
-    p: &theme::Palette,
+    p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
     let input = text_input(&placeholder, &session.message_draft)
+        .id(iced::widget::Id::new(COMPOSER_INPUT))
         .on_input(Message::DraftChanged)
         .on_submit(Message::SendMessage)
         .padding(0)
@@ -3333,12 +3363,25 @@ fn composer<'a>(
             value: bright,
             selection,
         });
+    // The emoji button is itself an emoji, so it also shows whether this
+    // platform renders them.
+    let emoji_fill = if session.emoji_open { p.surface_alt() } else { iced::Color::TRANSPARENT };
+    let toggle_radius = l.control_radius();
+    let emoji_toggle = button(text("🙂").size(17))
+        .on_press(Message::ToggleEmoji)
+        .padding(6)
+        .style(move |_, _| button::Style {
+            background: Some(emoji_fill.into()),
+            border: iced::border::rounded(toggle_radius),
+            ..button::Style::default()
+        });
     let field = row![
         ui::not_yet(
             ui::icon_button(ui::Icon::Paperclip, None, false, p, l),
             "Attachments aren't supported yet.",
             p,
         ),
+        emoji_toggle,
         input,
         ui::primary_button(ui::icon(ui::Icon::Send, 16.0, p.accent_text()), Some(Message::SendMessage), p, l),
     ]
@@ -3346,7 +3389,11 @@ fn composer<'a>(
     .align_y(iced::Alignment::Center);
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius() + 2.0);
-    column![
+    let mut outer = column![];
+    if session.emoji_open {
+        outer = outer.push(emoji_picker(p, l));
+    }
+    outer.push(
         container(field)
             .padding([6, 8])
             .style(move |_| container::Style {
@@ -3354,15 +3401,45 @@ fn composer<'a>(
                 border: iced::border::rounded(radius).color(edge).width(1),
                 ..container::Style::default()
             }),
+    )
+    .push(
         row![
             typing_line(typing_in.and_then(|id| session.typing.get(id)).map(Vec::as_slice).unwrap_or_default(), p),
             Space::new().width(Length::Fill),
             ui::mono("Enter send · markdown on", 11.0, p.text_muted()),
         ],
-    ]
+    )
     .spacing(6)
     .padding(iced::Padding { top: 8.0, right: 16.0, bottom: 14.0, left: 16.0 })
     .into()
+}
+
+/// The emoji picker shown under the composer: a grid of [`EMOJI`]; clicking
+/// one appends it to the draft and keeps the picker open.
+fn emoji_picker<'a>(p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    const PER_ROW: usize = 8;
+    let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius() + 2.0);
+    let mut grid = column![].spacing(2);
+    for chunk in EMOJI.chunks(PER_ROW) {
+        let mut line = row![].spacing(2);
+        for emoji in chunk {
+            line = line.push(
+                button(text(*emoji).size(20))
+                    .on_press(Message::InsertEmoji(emoji))
+                    .padding(4)
+                    .style(flat_button_style(p)),
+            );
+        }
+        grid = grid.push(line);
+    }
+    container(grid)
+        .padding(6)
+        .style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(radius).color(edge).width(1),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Element<'a, Message> {
