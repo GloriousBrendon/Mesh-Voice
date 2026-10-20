@@ -18,6 +18,7 @@ use mesh_core::{
     MediaRef, MessageKind, Network, OwnedEventId, PendingContact, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
     group_by_space,
 };
+use mesh_discord::whatsapp;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +91,10 @@ struct App {
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
     discord_state: Option<mesh_discord::Snapshot>,
+    /// WhatsApp Web in the same engine browser: a handle while connected, and
+    /// its chat list.
+    whatsapp: Option<whatsapp::Engine>,
+    whatsapp_state: Option<whatsapp::Snapshot>,
     /// Whether Mesh's window has focus (no notifications for the chat in view).
     window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
@@ -154,7 +159,7 @@ struct Session {
     home_filter: Option<Network>,
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
-    discord_channel: Option<DiscordChannel>,
+    web_chat: Option<WebChat>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
     /// Who's typing, per room.
@@ -247,7 +252,7 @@ impl Session {
             active_guild: None,
             folders_open: [true, true],
             home_filter: None,
-            discord_channel: None,
+            web_chat: None,
             jump: None,
             typing: HashMap::new(),
             images: HashMap::new(),
@@ -258,12 +263,99 @@ impl Session {
     }
 }
 
-/// A Discord text channel or DM, as the chat pane needs it.
+/// A chat from a hidden web client (a Discord channel or DM, a WhatsApp
+/// chat), as the chat pane needs it.
 #[derive(Debug, Clone, PartialEq)]
-struct DiscordChannel {
+struct WebChat {
+    network: Network,
     id: String,
     name: String,
+    /// One-to-one (a Discord DM, a WhatsApp chat with one person): @ icon, call button.
     dm: bool,
+}
+
+/// The hidden web clients, for sending a web chat's actions to its own.
+/// Built from `App`'s fields, so it can sit beside a `&mut` session.
+struct Clients<'a> {
+    discord: Option<&'a mesh_discord::Engine>,
+    whatsapp: Option<&'a whatsapp::Engine>,
+}
+
+impl Clients<'_> {
+    /// Streams the chat's messages into the timeline; false if its client
+    /// isn't running.
+    fn open(&self, chat: &WebChat) -> bool {
+        match chat.network {
+            Network::Discord => self.discord.map(|e| e.open_channel(&chat.id)).is_some(),
+            Network::WhatsApp => self.whatsapp.map(|e| e.open_chat(&chat.id)).is_some(),
+            Network::Matrix => false,
+        }
+    }
+    fn close(&self, chat: &WebChat) {
+        match chat.network {
+            Network::Discord => self.discord.map(mesh_discord::Engine::close_channel),
+            Network::WhatsApp => self.whatsapp.map(whatsapp::Engine::close_chat),
+            Network::Matrix => None,
+        };
+    }
+    fn send(&self, chat: &WebChat, text: &str) -> bool {
+        match chat.network {
+            Network::Discord => self.discord.map(|e| e.send_message(&chat.id, text)).is_some(),
+            Network::WhatsApp => self.whatsapp.map(|e| e.send_message(&chat.id, text)).is_some(),
+            Network::Matrix => false,
+        }
+    }
+    /// WhatsApp's media (message photos, its profile picture CDN) goes
+    /// through its own tab; everything else through Discord's.
+    fn fetch_media(&self, url: &str) {
+        if url.starts_with("wa-msg:") || url.contains(".whatsapp.net/") {
+            self.whatsapp.map(|e| e.fetch_media(url));
+        } else {
+            self.discord.map(|e| e.fetch_media(url));
+        }
+    }
+}
+
+/// WhatsApp messages as timeline rows, like `discord_timeline` (photos are
+/// decrypted in WhatsApp's tab, fetched by `load_web_media`). ponytail: made-up
+/// `@wa_<number>:whatsapp.net` user ids; voice notes, video and documents
+/// show as labels.
+fn whatsapp_timeline(messages: whatsapp::Messages) -> Vec<TimelineMessage> {
+    let mut timeline = Vec::new();
+    for m in messages.messages {
+        let number: String = m.author_id.split(['@', ':']).next().unwrap_or_default().chars().filter(char::is_ascii_alphanumeric).collect();
+        let Ok(sender) = OwnedUserId::try_from(format!("@wa_{number}:whatsapp.net")) else {
+            continue;
+        };
+        let row = |body: String, kind| TimelineMessage {
+            event_id: None,
+            sender: sender.clone(),
+            sender_name: m.author.clone(),
+            sender_avatar: m.avatar.clone().map(MediaRef::web),
+            sender_network: Network::WhatsApp,
+            body,
+            kind,
+            reactions: Vec::new(),
+            timestamp_ms: m.timestamp_ms,
+        };
+        if m.system {
+            timeline.push(row(format!("{} {}", m.author, m.content), MessageKind::System));
+            continue;
+        }
+        if let Some(image) = &m.image {
+            let info = mesh_core::ImageInfo {
+                media: MediaRef::web(whatsapp::image_url(&m.id)),
+                width: image.width,
+                height: image.height,
+                size: None,
+            };
+            timeline.push(row("photo".to_string(), MessageKind::Image(info)));
+        }
+        if !m.content.is_empty() {
+            timeline.push(row(m.content.clone(), MessageKind::Text));
+        }
+    }
+    timeline
 }
 
 /// Discord messages as timeline rows, so the Matrix timeline view draws them:
@@ -307,6 +399,21 @@ fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
     timeline
 }
 
+/// A picture a hidden client fetched: into whichever cache is waiting for it.
+fn web_media_loaded(state: &mut App, url: String, bytes: Result<Vec<u8>, String>) -> Task<Message> {
+    let Screen::LoggedIn(session) = &state.screen else {
+        return Task::none();
+    };
+    let pending = |map: &HashMap<String, Option<iced::widget::image::Handle>>| matches!(map.get(&url), Some(None));
+    if pending(&session.avatars) {
+        update(state, Message::AvatarLoaded(url, bytes))
+    } else if pending(&session.images) {
+        update(state, Message::ImageLoaded(url, bytes))
+    } else {
+        Task::none()
+    }
+}
+
 /// Asks the hidden Discord client for the snapshot's pictures (server icons,
 /// DM and voice avatars) that aren't cached or loading.
 fn load_snapshot_media(session: &mut Session, snapshot: &mesh_discord::Snapshot, engine: &mesh_discord::Engine) {
@@ -332,20 +439,20 @@ fn web_picture<'a>(session: &'a Session, url: Option<&str>) -> Option<&'a iced::
 
 /// Asks the hidden Discord client for the timeline's web avatars and images
 /// that aren't cached or loading; they arrive as `Event::Media`.
-fn load_web_media(session: &mut Session, engine: &mesh_discord::Engine) {
+fn load_web_media(session: &mut Session, clients: &Clients) {
     for message in &session.timeline {
         if let Some(url) = message.sender_avatar.as_ref().and_then(MediaRef::web_url)
             && !session.avatars.contains_key(url)
         {
             session.avatars.insert(url.to_string(), None);
-            engine.fetch_media(url);
+            clients.fetch_media(url);
         }
         if let MessageKind::Image(info) = &message.kind
             && let Some(url) = info.media.web_url()
             && !session.images.contains_key(url)
         {
             session.images.insert(url.to_string(), None);
-            engine.fetch_media(url);
+            clients.fetch_media(url);
         }
     }
 }
@@ -454,6 +561,7 @@ enum Message {
     ReactionDone(Result<(), String>),
     OpenSettings(SettingsPage),
     Discord(mesh_discord::Event),
+    WhatsApp(whatsapp::Event),
     /// Join a Discord voice channel, or call a Discord DM.
     DiscordJoin(String),
     DiscordLeave,
@@ -465,7 +573,7 @@ enum Message {
     /// Start the hidden Discord client with `discord_engine_command`.
     StartDiscord,
     /// Show a Discord text channel or DM in the chat pane.
-    DiscordChannelSelected(DiscordChannel),
+    WebChatSelected(WebChat),
     WindowFocused(bool),
     OpenJoinServer,
     JoinServerLink(String),
@@ -546,6 +654,8 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             discord: None,
             discord_state: None,
+            whatsapp: None,
+            whatsapp_state: None,
             window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
@@ -747,10 +857,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             session.selected_room = Some(room_id.clone());
-            if session.discord_channel.take().is_some()
-                && let Some(engine) = &state.discord
-            {
-                engine.close_channel();
+            if let Some(chat) = session.web_chat.take() {
+                Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }.close(&chat);
             }
             session.focused = Pane::Chat;
             session.timeline.clear();
@@ -982,12 +1090,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if session.message_draft.trim().is_empty() {
                 return Task::none();
             }
-            // A Discord channel sends through the hidden client; its echo
-            // comes back as Event::Messages.
-            if let Some(channel) = &session.discord_channel {
-                match &state.discord {
-                    Some(engine) => engine.send_message(&channel.id, &std::mem::take(&mut session.message_draft)),
-                    None => session.status = Some("Discord isn't running, so this can't be sent.".to_string()),
+            // A web chat sends through its hidden client; the echo comes back
+            // with its messages.
+            if let Some(chat) = &session.web_chat {
+                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &session.message_draft) {
+                    session.message_draft.clear();
+                } else {
+                    session.status = Some("That chat's client isn't running, so this can't be sent.".to_string());
                 }
                 return Task::none();
             }
@@ -1155,9 +1264,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             match event {
                 mesh_discord::Event::Connected(engine) => {
                     if let Screen::LoggedIn(session) = &state.screen
-                        && let Some(channel) = &session.discord_channel
+                        && let Some(chat) = session.web_chat.as_ref().filter(|c| c.network == Network::Discord)
                     {
-                        engine.open_channel(&channel.id);
+                        engine.open_channel(&chat.id);
                     }
                     state.discord = Some(engine);
                 }
@@ -1175,30 +1284,16 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 }
                 mesh_discord::Event::Messages(messages) => {
                     if let Screen::LoggedIn(session) = &mut state.screen
-                        && session.discord_channel.as_ref().is_some_and(|c| c.id == messages.channel_id)
+                        && session.web_chat.as_ref().is_some_and(|c| c.id == messages.channel_id)
                     {
                         session.timeline = discord_timeline(messages);
-                        if let Some(engine) = &state.discord {
-                            load_web_media(session, engine);
-                        }
+                        load_web_media(session, &Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() });
                     }
                 }
-                mesh_discord::Event::Media { url, bytes } => {
-                    let Screen::LoggedIn(session) = &state.screen else {
-                        return Task::none();
-                    };
-                    let pending = |map: &HashMap<String, Option<iced::widget::image::Handle>>| matches!(map.get(&url), Some(None));
-                    return if pending(&session.avatars) {
-                        update(state, Message::AvatarLoaded(url, bytes))
-                    } else if pending(&session.images) {
-                        update(state, Message::ImageLoaded(url, bytes))
-                    } else {
-                        Task::none()
-                    };
-                }
+                mesh_discord::Event::Media { url, bytes } => return web_media_loaded(state, url, bytes),
                 mesh_discord::Event::Notify(n) => {
                     let open = match &state.screen {
-                        Screen::LoggedIn(session) => session.discord_channel.as_ref().is_some_and(|c| c.id == n.channel_id),
+                        Screen::LoggedIn(session) => session.web_chat.as_ref().is_some_and(|c| c.id == n.channel_id),
                         _ => false,
                     };
                     if !(state.window_focused && open) {
@@ -1223,6 +1318,54 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             Invite::Failed { error } => (format!("✗ {error}"), true),
                         });
                     }
+                }
+            }
+            Task::none()
+        }
+        Message::WhatsApp(event) => {
+            match event {
+                whatsapp::Event::Connected(engine) => {
+                    if let Screen::LoggedIn(session) = &state.screen
+                        && let Some(chat) = session.web_chat.as_ref().filter(|c| c.network == Network::WhatsApp)
+                    {
+                        engine.open_chat(&chat.id);
+                    }
+                    state.whatsapp = Some(engine);
+                }
+                whatsapp::Event::Snapshot(snapshot) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && let Some(engine) = &state.whatsapp
+                    {
+                        for url in snapshot.chats.iter().filter_map(|c| c.avatar.as_ref()) {
+                            if !session.avatars.contains_key(url) {
+                                session.avatars.insert(url.clone(), None);
+                                engine.fetch_media(url);
+                            }
+                        }
+                    }
+                    state.whatsapp_state = Some(snapshot);
+                }
+                whatsapp::Event::Messages(messages) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && session.web_chat.as_ref().is_some_and(|c| c.network == Network::WhatsApp && c.id == messages.chat_id)
+                    {
+                        session.timeline = whatsapp_timeline(messages);
+                        load_web_media(session, &Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() });
+                    }
+                }
+                whatsapp::Event::Media { url, bytes } => return web_media_loaded(state, url, bytes),
+                whatsapp::Event::Notify(n) => {
+                    let open = match &state.screen {
+                        Screen::LoggedIn(session) => session.web_chat.as_ref().is_some_and(|c| c.id == n.chat_id),
+                        _ => false,
+                    };
+                    if !(state.window_focused && open) {
+                        notify(n.title, n.body);
+                    }
+                }
+                whatsapp::Event::Disconnected => {
+                    state.whatsapp = None;
+                    state.whatsapp_state = None;
                 }
             }
             Task::none()
@@ -1573,16 +1716,20 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::DiscordChannelSelected(channel) => {
+        Message::WebChatSelected(channel) => {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
-            match &state.discord {
-                Some(engine) => engine.open_channel(&channel.id),
-                None => session.status = Some("Discord isn't running.".to_string()),
+            let clients = Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() };
+            if let Some(previous) = session.web_chat.as_ref().filter(|c| c.network != channel.network) {
+                clients.close(previous);
+            }
+            if !clients.open(&channel) {
+                let name = if channel.network == Network::WhatsApp { "WhatsApp" } else { "Discord" };
+                session.status = Some(format!("{name} isn't running."));
             }
             session.selected_room = None;
-            session.discord_channel = Some(channel);
+            session.web_chat = Some(channel);
             session.focused = Pane::Chat;
             session.timeline.clear();
             session.members.clear();
@@ -1895,6 +2042,10 @@ fn subscription(state: &App) -> Subscription<Message> {
             Some(socket) => Subscription::run_with(socket.clone(), discord_events),
             None => Subscription::none(),
         },
+        match &state.discord_socket {
+            Some(socket) => Subscription::run_with(socket.clone(), whatsapp_events),
+            None => Subscription::none(),
+        },
         // Drive the animated background at ~15 fps (only while it's on).
         if state.extras.digital_rain {
             iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick)
@@ -1952,6 +2103,21 @@ fn discord_events(socket: &PathBuf) -> impl iced::futures::Stream<Item = Message
         tokio::spawn(mesh_discord::run(socket, tx));
         while let Some(event) = rx.recv().await {
             if output.send(Message::Discord(event)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// Streams WhatsApp Web's events from the same engine (reconnecting by itself).
+fn whatsapp_events(socket: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let socket = socket.clone();
+    iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        use iced::futures::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(whatsapp::run(socket, tx));
+        while let Some(event) = rx.recv().await {
+            if output.send(Message::WhatsApp(event)).await.is_err() {
                 break;
             }
         }
@@ -2065,7 +2231,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             let rail = rail_view(session, state.discord_state.as_ref(), state.discord_command.is_some(), p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
-                tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), p, l), 248.0, p, l, x),
+                tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), state.whatsapp_state.as_ref(), p, l), 248.0, p, l, x),
                 tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l, x),
             ]
             .spacing(l.gaps_out)
@@ -2149,6 +2315,8 @@ fn net_color(network: Network, p: &theme::Palette) -> iced::Color {
     match network {
         Network::Matrix => p.proto_mx(),
         Network::Discord => p.proto_dc(),
+        // The palette has no WhatsApp token; its green reads as WhatsApp.
+        Network::WhatsApp => p.success(),
     }
 }
 
@@ -2480,6 +2648,7 @@ fn rail_folder<'a>(
     let (icon, color) = match network {
         Network::Discord => (ui::Icon::Discord, p.proto_dc()),
         Network::Matrix => (ui::Icon::Matrix, p.proto_mx()),
+        Network::WhatsApp => (ui::Icon::Phone, p.success()),
     };
     let head = column![
         rail_tile(ui::icon(icon, 22.0, color), false, Some(Message::ToggleFolder(network)), p, l),
@@ -2525,7 +2694,7 @@ fn space_tile<'a>(
                 .into(),
             None => match group.network() {
                 Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { p.proto_dc() } else { fg }),
-                Network::Matrix => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
+                Network::Matrix | Network::WhatsApp => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
             },
         };
     let mut tile: Element<'_, Message> = rail_tile(
@@ -2612,6 +2781,7 @@ fn rail_tile<'a>(
 fn channel_pane<'a>(
     session: &'a Session,
     discord: Option<&'a mesh_discord::Snapshot>,
+    whatsapp: Option<&'a whatsapp::Snapshot>,
     p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
@@ -2650,7 +2820,7 @@ fn channel_pane<'a>(
     let home = !group.is_some_and(|g| g.space.is_some());
     if home {
         let mut chips = row![].spacing(4);
-        for (label, filter) in [("all", None), ("matrix", Some(Network::Matrix)), ("discord", Some(Network::Discord))] {
+        for (label, filter) in [("all", None), ("matrix", Some(Network::Matrix)), ("discord", Some(Network::Discord)), ("whatsapp", Some(Network::WhatsApp))] {
             chips = chips.push(segment(label, session.home_filter == filter, Message::HomeFilter(filter), p, l));
         }
         header = header.push(chips);
@@ -2671,8 +2841,14 @@ fn channel_pane<'a>(
     };
     // With the hidden client running, Discord DMs come from it (no bridge in
     // the way) and the bridged copies of them are left out.
+    let shows = |network| home && session.home_filter.is_none_or(|n| n == network);
     let discord_dms = match discord {
-        Some(d) if home && session.home_filter != Some(Network::Matrix) => d.dms.as_slice(),
+        Some(d) if shows(Network::Discord) => d.dms.as_slice(),
+        _ => &[],
+    };
+    // WhatsApp chats (groups too) sit with the DMs: they're conversations.
+    let whatsapp_chats = match whatsapp {
+        Some(w) if shows(Network::WhatsApp) => w.chats.as_slice(),
         _ => &[],
     };
     for (label, rooms) in sections {
@@ -2687,8 +2863,12 @@ fn channel_pane<'a>(
             .collect();
         if dm_section {
             rows.extend(discord_dms.iter().map(|dm| {
-                let open = DiscordChannel { id: dm.id.clone(), name: dm.name.clone(), dm: true };
-                (dm.last_ms, discord_channel_row(session, open, dm.avatar.as_deref(), dm.unread, dm.mentions, p, l))
+                let open = WebChat { network: Network::Discord, id: dm.id.clone(), name: dm.name.clone(), dm: true };
+                (dm.last_ms, web_chat_row(session, open, dm.avatar.as_deref(), dm.unread, dm.mentions, p, l))
+            }));
+            rows.extend(whatsapp_chats.iter().map(|chat| {
+                let open = WebChat { network: Network::WhatsApp, id: chat.id.clone(), name: chat.name.clone(), dm: !chat.group };
+                (chat.last_ms, web_chat_row(session, open, chat.avatar.as_deref(), chat.unread > 0, chat.unread, p, l))
             }));
             rows.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
         }
@@ -2807,8 +2987,8 @@ fn guild_pane<'a>(
             list = list.push(ui::section(name, p));
         }
         for channel in guild.text_channels.iter().filter(|c| c.category.as_deref() == category) {
-            let open = DiscordChannel { id: channel.id.clone(), name: channel.name.clone(), dm: false };
-            list = list.push(discord_channel_row(session, open, None, false, 0, p, l));
+            let open = WebChat { network: Network::Discord, id: channel.id.clone(), name: channel.name.clone(), dm: false };
+            list = list.push(web_chat_row(session, open, None, false, 0, p, l));
         }
         for channel in guild.voice_channels.iter().filter(|c| c.category.as_deref() == category) {
             list = list.push(voice_channel(session, channel, current, p, l));
@@ -2844,16 +3024,16 @@ fn voice_member<'a>(
 
 /// A Discord text channel or DM row (from the hidden client), drawn like
 /// `channel_row`; click to read it in the chat pane.
-fn discord_channel_row<'a>(
+fn web_chat_row<'a>(
     session: &Session,
-    channel: DiscordChannel,
+    channel: WebChat,
     picture: Option<&str>,
     unread: bool,
-    mentions: u64,
+    count: u64,
     p: &theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
-    let selected = session.discord_channel.as_ref().is_some_and(|c| c.id == channel.id);
+    let selected = session.web_chat.as_ref().is_some_and(|c| c.id == channel.id);
     let color = if selected || unread { p.text_bright() } else { p.text() };
     let bar = if selected { p.accent() } else { iced::Color::TRANSPARENT };
     let face = match web_picture(session, picture) {
@@ -2868,13 +3048,14 @@ fn discord_channel_row<'a>(
     ]
     .spacing(8)
     .align_y(iced::Alignment::Center);
-    if mentions > 0 {
-        label = label.push(ui::chip(mentions.to_string(), p));
+    if count > 0 {
+        label = label.push(ui::chip(count.to_string(), p));
     }
-    if channel.dm {
-        label = label.push(ui::mono("dc", 10.0, p.proto_dc()));
+    // Server channels need no tag; DMs and chats say where they're from.
+    if channel.dm || channel.network != Network::Discord {
+        label = label.push(ui::mono(channel.network.tag(), 10.0, net_color(channel.network, p)));
     }
-    ui::row_button(label, Message::DiscordChannelSelected(channel), selected, p, l)
+    ui::row_button(label, Message::WebChatSelected(channel), selected, p, l)
         .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 })
         .into()
 }
@@ -3005,15 +3186,16 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let (p, l) = (&state.palette, &state.layout);
     let room = selected_room(session);
     let mut col = column![];
-    if let Some(channel) = &session.discord_channel {
+    if let Some(channel) = &session.web_chat {
         let mut header = row![
             ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 18.0, p.text_muted()),
             ui::sans(&channel.name, 15.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
-            ui::mono("dc", 11.0, p.proto_dc()),
+            ui::mono(channel.network.tag(), 11.0, net_color(channel.network, p)),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
-        if channel.dm {
+        // ponytail: WhatsApp calls aren't wired yet (design/WHATSAPP-NATIVE.md).
+        if channel.dm && channel.network == Network::Discord {
             let in_call = state.discord_state.as_ref().and_then(|d| d.voice.channel_id.as_deref()) == Some(channel.id.as_str());
             header = header.push(if in_call {
                 ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l)
@@ -3090,8 +3272,12 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         col.push(composer(session, placeholder, typing_in, p, l))
     };
 
-    if let Some(channel) = &session.discord_channel {
-        let placeholder = format!("message {}{}  —  sends with your Discord account", if channel.dm { "" } else { "#" }, channel.name);
+    if let Some(channel) = &session.web_chat {
+        let (hash, account) = match channel.network {
+            Network::WhatsApp => ("", "WhatsApp"),
+            _ => (if channel.dm { "" } else { "#" }, "Discord"),
+        };
+        let placeholder = format!("message {hash}{}  —  sends with your {account} account", channel.name);
         return body(col, placeholder, None).into();
     }
 
@@ -3118,7 +3304,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
 
     let placeholder = match room.network {
         Network::Discord => format!("message {}  —  sends to discord via bridge", room_label(room)),
-        Network::Matrix => format!("message {}", room_label(room)),
+        Network::Matrix | Network::WhatsApp => format!("message {}", room_label(room)),
     };
     body(col, placeholder, Some(&room.id)).into()
 }
@@ -3412,6 +3598,7 @@ fn timeline_view<'a>(
                 if day_changed || previous_sender != Some(&message.sender) {
                     let tag = match message.sender_network {
                         Network::Discord => "dc".to_string(),
+                        Network::WhatsApp => "wa".to_string(),
                         Network::Matrix => format!("mx · {}", message.sender.server_name()),
                     };
                     let fill = if is_me { p.accent() } else { net };

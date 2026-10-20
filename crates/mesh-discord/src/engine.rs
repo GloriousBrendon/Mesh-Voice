@@ -1,0 +1,248 @@
+//! The engine browser, platform-neutral: finds a site's tab over the Chrome
+//! DevTools Protocol (unix socket or host:port), installs that site's agent
+//! (again on every reload), and relays the agent's binding calls out and
+//! commands in. Each site (Discord, WhatsApp) maps these to its own events.
+
+use futures_util::{SinkExt, StreamExt};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+/// A web client the engine drives.
+pub(crate) struct Site {
+    /// Picks its tab: the first page whose URL contains this.
+    pub host: &'static str,
+    /// Installed as `window.__mesh`.
+    pub agent: &'static str,
+    /// The `window.<name>(payload)` functions the agent reports through.
+    pub bindings: &'static [&'static str],
+    /// Evaluated once the agent is in, to push the current state.
+    pub kickoff: &'static str,
+}
+
+pub(crate) enum Command {
+    /// A JavaScript expression to evaluate in the page.
+    Eval(String),
+    /// Restore and focus the tab's window (for a captcha, say).
+    BringToFront,
+}
+
+pub(crate) enum Raw {
+    Connected(mpsc::UnboundedSender<Command>),
+    Binding { name: String, payload: String },
+    Disconnected,
+}
+
+/// `window.__mesh.<function>(args…)` with JSON-quoted string arguments.
+pub(crate) fn call(function: &str, args: &[&str]) -> Command {
+    let args: Vec<String> = args.iter().map(|a| serde_json::to_string(a).unwrap_or_default()).collect();
+    Command::Eval(format!("window.__mesh && window.__mesh.{function}({})", args.join(",")))
+}
+
+/// Keeps a connection to `site` at `socket` for as long as `raw` is open,
+/// reconnecting every few seconds when the tab isn't there. `socket` is a
+/// unix socket path, or `host:port` for a browser started with
+/// `--remote-debugging-port`.
+pub(crate) async fn run(socket: PathBuf, site: Site, raw: mpsc::UnboundedSender<Raw>) {
+    while !raw.is_closed() {
+        let mut connected = false;
+        if let Err(err) = session(&socket, &site, &raw, &mut connected).await {
+            tracing::debug!("engine ({}): {err}", site.host);
+        }
+        if connected {
+            let _ = raw.send(Raw::Disconnected);
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+type Result<T> = std::result::Result<T, String>;
+
+async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, connected: &mut bool) -> Result<()> {
+    let page = page(socket, site.host).await?;
+    let stream = connect(socket).await?;
+    let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://localhost{page}"), stream)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut id = 0u64;
+    let mut send = |method: &str, params: serde_json::Value| {
+        id += 1;
+        WsMessage::text(serde_json::json!({ "id": id, "method": method, "params": params }).to_string())
+    };
+    // Bindings are how the page reports; the new-document script reinstalls
+    // the agent whenever the site reloads.
+    let mut setup: Vec<WsMessage> =
+        site.bindings.iter().map(|name| send("Runtime.addBinding", serde_json::json!({ "name": name }))).collect();
+    setup.push(send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": site.agent })));
+    setup.push(send("Runtime.evaluate", serde_json::json!({ "expression": site.agent })));
+    setup.push(send("Runtime.evaluate", serde_json::json!({ "expression": site.kickoff })));
+    for msg in setup {
+        ws.send(msg).await.map_err(|e| e.to_string())?;
+    }
+
+    let (commands, mut command_rx) = mpsc::unbounded_channel();
+    raw.send(Raw::Connected(commands)).map_err(|_| "Mesh went away".to_string())?;
+    *connected = true;
+
+    let mut commands_open = true;
+    loop {
+        tokio::select! {
+            incoming = ws.next() => {
+                let Some(incoming) = incoming else { return Err("engine closed".into()) };
+                let WsMessage::Text(text) = incoming.map_err(|e| e.to_string())? else { continue };
+                if let Some((name, payload)) = binding(&text) {
+                    raw.send(Raw::Binding { name, payload }).map_err(|_| "Mesh went away".to_string())?;
+                }
+            }
+            // Handles may all be dropped (nobody acting); keep streaming state.
+            command = command_rx.recv(), if commands_open => {
+                let msg = match command {
+                    Some(Command::Eval(expression)) => send("Runtime.evaluate", serde_json::json!({ "expression": expression })),
+                    // Restores the window even when it's minimized.
+                    Some(Command::BringToFront) => send("Page.bringToFront", serde_json::json!({})),
+                    None => {
+                        commands_open = false;
+                        continue;
+                    }
+                };
+                ws.send(msg).await.map_err(|e| e.to_string())?;
+            }
+        }
+    }
+}
+
+/// A binding call's (name, payload), if `text` is one.
+fn binding(text: &str) -> Option<(String, String)> {
+    let msg: serde_json::Value = serde_json::from_str(text).ok()?;
+    if msg["method"] != "Runtime.bindingCalled" {
+        return None;
+    }
+    Some((msg["params"]["name"].as_str()?.to_owned(), msg["params"]["payload"].as_str()?.to_owned()))
+}
+
+/// A `fetchMedia` answer: the URL, and the bytes (base64 in the payload) or
+/// why not.
+pub(crate) fn media(payload: &str) -> Option<(String, std::result::Result<Vec<u8>, String>)> {
+    use base64::Engine as _;
+    let media: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let bytes = match media["data"].as_str() {
+        Some(data) => base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string()),
+        None => Err(media["error"].as_str().unwrap_or("no data").to_owned()),
+    };
+    Some((media["url"].as_str()?.to_owned(), bytes))
+}
+
+/// Whether something is listening at the engine address (cheap; for deciding
+/// whether to start the engine).
+pub fn is_running(socket: &Path) -> bool {
+    match tcp_address(socket) {
+        Some(addr) => std::net::ToSocketAddrs::to_socket_addrs(addr)
+            .ok()
+            .and_then(|mut a| a.next())
+            .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok()),
+        None => socket.exists(),
+    }
+}
+
+/// `host:port` if the engine address is one rather than a socket path.
+fn tcp_address(socket: &Path) -> Option<&str> {
+    let s = socket.to_str()?;
+    let (host, port) = s.rsplit_once(':')?;
+    let path_like = host.is_empty() || s.contains(['/', '\\']);
+    (!path_like && port.parse::<u16>().is_ok()).then_some(s)
+}
+
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+async fn connect(socket: &Path) -> Result<Box<dyn Io>> {
+    if let Some(addr) = tcp_address(socket) {
+        let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        return Ok(Box::new(stream));
+    }
+    #[cfg(unix)]
+    {
+        let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
+        Ok(Box::new(stream))
+    }
+    #[cfg(not(unix))]
+    Err(format!("{} isn't host:port", socket.display()))
+}
+
+/// The DevTools websocket path of the tab whose URL contains `host`.
+async fn page(socket: &Path, host: &str) -> Result<String> {
+    let mut stream = connect(socket).await?;
+    stream
+        .write_all(b"GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    // DevTools keeps the connection open, so read exactly Content-Length.
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .map_err(|_| "DevTools didn't answer".to_string())?
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&response);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_owned()))
+                .and_then(|v| v.parse::<usize>().ok());
+            if length.is_some_and(|len| body.len() >= len) {
+                break;
+            }
+        }
+    }
+    let response = String::from_utf8_lossy(&response);
+    let body = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or_default();
+    page_path(body, host).ok_or_else(|| format!("no {host} tab open"))
+}
+
+fn page_path(json: &str, host: &str) -> Option<String> {
+    let targets: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    let page = targets
+        .iter()
+        .find(|t| t["type"] == "page" && t["url"].as_str().is_some_and(|u| u.contains(host)))?;
+    let url = page["webSocketDebuggerUrl"].as_str()?;
+    // ws://localhost/devtools/page/<id> → /devtools/page/<id>
+    Some(url.split_once("://")?.1.split_once('/').map(|(_, p)| format!("/{p}"))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_sites_tab() {
+        let json = r#"[{"type":"service_worker","url":"https://discord.com/sw.js","webSocketDebuggerUrl":"ws://localhost/devtools/x"},
+                       {"type":"page","url":"https://discord.com/channels/@me","webSocketDebuggerUrl":"ws://localhost/devtools/page/ABC"},
+                       {"type":"page","url":"https://web.whatsapp.com/","webSocketDebuggerUrl":"ws://localhost/devtools/page/WA"}]"#;
+        assert_eq!(page_path(json, "discord.com").as_deref(), Some("/devtools/page/ABC"));
+        assert_eq!(page_path(json, "web.whatsapp.com").as_deref(), Some("/devtools/page/WA"));
+        assert_eq!(page_path("[]", "discord.com"), None);
+    }
+
+    #[test]
+    fn tells_tcp_from_socket_paths() {
+        assert_eq!(tcp_address(Path::new("127.0.0.1:9222")), Some("127.0.0.1:9222"));
+        assert_eq!(tcp_address(Path::new("localhost:9222")), Some("localhost:9222"));
+        assert_eq!(tcp_address(Path::new("/run/user/1000/discord-engine.sock")), None);
+        assert_eq!(tcp_address(Path::new(r"C:\Users\me\engine.sock")), None);
+    }
+
+    #[test]
+    fn reads_binding_calls() {
+        let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshEmit", "payload": "{}" } });
+        assert_eq!(binding(&msg.to_string()), Some(("meshEmit".into(), "{}".into())));
+        assert_eq!(binding(r#"{"id":3,"result":{}}"#), None);
+    }
+}

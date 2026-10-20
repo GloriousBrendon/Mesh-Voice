@@ -13,14 +13,17 @@ pub enum Network {
     Matrix,
     /// Bridged in from Discord.
     Discord,
+    /// WhatsApp, through the engine's WhatsApp Web tab (never a Matrix room).
+    WhatsApp,
 }
 
 impl Network {
-    /// The short tag the UI shows: `mx` or `dc`.
+    /// The short tag the UI shows: `mx`, `dc` or `wa`.
     pub fn tag(self) -> &'static str {
         match self {
             Network::Matrix => "mx",
             Network::Discord => "dc",
+            Network::WhatsApp => "wa",
         }
     }
 }

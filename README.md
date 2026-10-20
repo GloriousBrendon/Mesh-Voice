@@ -66,15 +66,20 @@ VPN) is set up outside Mesh; see design/DISCORD-NATIVE.md.
 
 On Windows the engine is Edge with DevTools on `127.0.0.1:9222` (the default
 there; `discord_engine_socket` also takes any `host:port`). Put this in
-`%APPDATA%\mesh\config.toml`, start Mesh, and log into Discord once in the
-window that opens; minimize it after that:
+`%APPDATA%\mesh\config.toml`, start Mesh, log into Discord once in the window
+that opens and link WhatsApp in its second tab (WhatsApp → Linked devices);
+minimize it after that, but don't close the tabs:
 
 ```toml
-discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\mesh\discord-engine --app=https://discord.com/channels/@me --no-first-run --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows'
+discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\mesh\discord-engine --app=https://discord.com/channels/@me --no-first-run --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows https://web.whatsapp.com/'
 ```
 
-Any local program can use that port to drive the Discord session in it, so
-only run it on a PC you trust.
+WhatsApp chats then show on Home (the `whatsapp` chip filters to them), open
+in the chat pane, send, show photos and notify; see design/WHATSAPP-NATIVE.md.
+WhatsApp calls aren't wired yet.
+
+Any local program can use that port to drive the Discord and WhatsApp
+sessions in it, so only run it on a PC you trust.
 
 ## Build & run
 
