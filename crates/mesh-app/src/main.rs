@@ -153,8 +153,11 @@ struct Session {
     /// The Discord server (from the hidden client) shown in the channel pane
     /// instead of a space.
     active_guild: Option<String>,
+    /// Showing the WhatsApp groups list (its own pane, off the rail) instead
+    /// of Home/a space/a guild.
+    active_wa_groups: bool,
     /// Which rail folders are expanded: [Discord, Matrix].
-    folders_open: [bool; 2],
+    folders_open: [bool; 3],
     /// Home's network chip; `None` is All.
     home_filter: Option<Network>,
     /// The emoji picker is open under the composer.
@@ -261,7 +264,8 @@ impl Session {
             groups: Vec::new(),
             active_space: None,
             active_guild: None,
-            folders_open: [true, true],
+            active_wa_groups: false,
+            folders_open: [true, true, true],
             home_filter: None,
             emoji_open: false,
             web_chat: None,
@@ -585,6 +589,8 @@ enum Message {
     GuildSelected(String),
     /// Expand or collapse a rail folder.
     ToggleFolder(Network),
+    /// Show the WhatsApp groups list.
+    ShowWhatsAppGroups,
     HomeFilter(Option<Network>),
     /// Start the hidden Discord client with `discord_engine_command`.
     StartDiscord,
@@ -1712,6 +1718,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.active_space = space;
                 session.active_guild = None;
+                session.active_wa_groups = false;
                 session.focused = Pane::Channels;
             }
             Task::none()
@@ -1722,6 +1729,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             {
                 session.active_space = group.id().cloned();
                 session.active_guild = None;
+                session.active_wa_groups = false;
                 session.focused = Pane::Channels;
             }
             Task::none()
@@ -1730,14 +1738,24 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.active_space = None;
                 session.active_guild = Some(guild);
+                session.active_wa_groups = false;
                 session.focused = Pane::Channels;
             }
             Task::none()
         }
         Message::ToggleFolder(network) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                let open = &mut session.folders_open[(network == Network::Matrix) as usize];
+                let open = &mut session.folders_open[folder_index(network)];
                 *open = !*open;
+            }
+            Task::none()
+        }
+        Message::ShowWhatsAppGroups => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.active_space = None;
+                session.active_guild = None;
+                session.active_wa_groups = true;
+                session.focused = Pane::Channels;
             }
             Task::none()
         }
@@ -1807,6 +1825,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             };
             session.jump = None;
             session.active_guild = None;
+            session.active_wa_groups = false;
             if session.groups.iter().any(|g| g.id() == Some(&room_id)) {
                 session.active_space = Some(room_id);
                 session.focused = Pane::Channels;
@@ -1952,6 +1971,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.add_friend = None;
                     session.active_space = None;
                     session.active_guild = None;
+                    session.active_wa_groups = false;
                     let client = session.client.clone();
                     Task::batch([
                         Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
@@ -2259,7 +2279,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         let panes: Element<'_, Message> = if session.show_settings {
             settings_shell(session, state, wide)
         } else {
-            let rail = rail_view(session, state.discord_state.as_ref(), state.discord_command.is_some(), p, l, x.show_network_tags);
+            let rail = rail_view(session, state.discord_state.as_ref(), state.whatsapp_state.as_ref(), state.discord_command.is_some(), p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
                 tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), state.whatsapp_state.as_ref(), p, l), 248.0, p, l, x),
@@ -2274,7 +2294,11 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             panes.into()
         };
         let engine = state.discord_socket.as_ref().map(|_| state.discord.is_some());
-        let guild = active_guild(session, state.discord_state.as_ref()).map(|g| g.name.as_str());
+        let guild = if session.active_wa_groups {
+            Some("WhatsApp groups")
+        } else {
+            active_guild(session, state.discord_state.as_ref()).map(|g| g.name.as_str())
+        };
         let shell = column![top_bar(session, guild, engine, p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
@@ -2587,6 +2611,7 @@ fn connection_chip<'a>(
 fn rail_view<'a>(
     session: &'a Session,
     discord: Option<&'a mesh_discord::Snapshot>,
+    whatsapp: Option<&'a whatsapp::Snapshot>,
     can_start_discord: bool,
     p: &theme::Palette,
     l: &theme::Layout,
@@ -2594,7 +2619,7 @@ fn rail_view<'a>(
 ) -> Element<'a, Message> {
     let home = rail_tile(
         ui::icon(ui::Icon::Home, 20.0, p.text_bright()),
-        session.active_space.is_none() && session.active_guild.is_none(),
+        session.active_space.is_none() && session.active_guild.is_none() && !session.active_wa_groups,
         Some(Message::SpaceSelected(None)),
         p,
         l,
@@ -2644,10 +2669,29 @@ fn rail_view<'a>(
             mx.push(space_tile(session, index, group, p, l, tags));
         }
     }
+    // WhatsApp: one "Groups" tile holding the group chats, so Home stays 1:1.
+    let wa_groups: Vec<&whatsapp::Chat> = whatsapp.map(|w| w.chats.iter().filter(|c| c.group).collect()).unwrap_or_default();
+    let mut wa: Vec<Element<'a, Message>> = Vec::new();
+    if !wa_groups.is_empty() {
+        let unread: u64 = wa_groups.iter().map(|c| c.unread).sum();
+        let tile = rail_badge(
+            rail_tile(ui::icon(ui::Icon::Users, 20.0, if session.active_wa_groups { p.text_bright() } else { p.text() }), session.active_wa_groups, Some(Message::ShowWhatsAppGroups), p, l),
+            unread,
+            p,
+        );
+        wa.push(
+            iced::widget::tooltip(
+                column![tile, ui::mono("groups", 10.0, p.text_muted())].spacing(2).align_x(iced::Alignment::Center),
+                container(text("WhatsApp groups").size(12).color(p.text())).padding([4, 8]),
+                iced::widget::tooltip::Position::Right,
+            )
+            .into(),
+        );
+    }
     let mut folders = column![].spacing(8).align_x(iced::Alignment::Center);
-    for (network, tiles) in [(Network::Discord, dc), (Network::Matrix, mx)] {
+    for (network, tiles) in [(Network::Discord, dc), (Network::Matrix, mx), (Network::WhatsApp, wa)] {
         if !tiles.is_empty() {
-            let open = session.folders_open[(network == Network::Matrix) as usize];
+            let open = session.folders_open[folder_index(network)];
             folders = folders.push(rail_folder(network, open, tiles, p, l));
         }
     }
@@ -2665,6 +2709,35 @@ fn rail_view<'a>(
     )
     .height(Length::Fill)
     .into()
+}
+
+/// Overlays a `danger` count badge on a rail tile's bottom-right (nothing if 0).
+fn rail_badge<'a>(tile: Element<'a, Message>, count: u64, p: &theme::Palette) -> Element<'a, Message> {
+    if count == 0 {
+        return tile;
+    }
+    let (fill, ring) = (p.danger(), p.surface());
+    let badge = container(ui::mono_bold(count.to_string(), 10.0, p.background()))
+        .padding([1, 5])
+        .style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(9).color(ring).width(2),
+            ..container::Style::default()
+        });
+    stack![
+        tile,
+        container(badge).width(52).height(50).align_x(iced::Alignment::End).align_y(iced::Alignment::End),
+    ]
+    .into()
+}
+
+/// Rail folder order: Discord, Matrix, WhatsApp.
+fn folder_index(network: Network) -> usize {
+    match network {
+        Network::Discord => 0,
+        Network::Matrix => 1,
+        Network::WhatsApp => 2,
+    }
 }
 
 /// A network's folder: its logo and ▾/▸ toggle it; open, its tiles follow on
@@ -2728,33 +2801,14 @@ fn space_tile<'a>(
                 Network::Matrix | Network::WhatsApp => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
             },
         };
-    let mut tile: Element<'_, Message> = rail_tile(
+    let tile: Element<'_, Message> = rail_tile(
         face,
         active,
         Some(Message::SpaceSelected(group.id().cloned())),
         p,
         l,
     );
-    let mentions = group.mentions();
-    if mentions > 0 {
-        let (fill, ring) = (p.danger(), p.surface());
-        let badge = container(ui::mono_bold(mentions.to_string(), 10.0, p.background()))
-            .padding([1, 5])
-            .style(move |_| container::Style {
-                background: Some(fill.into()),
-                border: iced::border::rounded(9).color(ring).width(2),
-                ..container::Style::default()
-            });
-        tile = stack![
-            tile,
-            container(badge)
-                .width(52)
-                .height(50)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::End),
-        ]
-        .into();
-    }
+    let tile = rail_badge(tile, group.mentions(), p);
     let tag = group.network().tag();
     let key = match (index <= 9, tags) {
         (true, true) => format!("{index}·{tag}"),
@@ -2816,6 +2870,9 @@ fn channel_pane<'a>(
     p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
+    if session.active_wa_groups {
+        return wa_groups_pane(session, whatsapp, p, l);
+    }
     if session.active_guild.is_some() {
         return guild_pane(session, discord, p, l);
     }
@@ -2897,7 +2954,7 @@ fn channel_pane<'a>(
                 let open = WebChat { network: Network::Discord, id: dm.id.clone(), name: dm.name.clone(), dm: true };
                 (dm.last_ms, web_chat_row(session, open, dm.avatar.as_deref(), dm.unread, dm.mentions, p, l))
             }));
-            rows.extend(whatsapp_chats.iter().map(|chat| {
+            rows.extend(whatsapp_chats.iter().filter(|chat| !chat.group).map(|chat| {
                 let open = WebChat { network: Network::WhatsApp, id: chat.id.clone(), name: chat.name.clone(), dm: !chat.group };
                 (chat.last_ms, web_chat_row(session, open, chat.avatar.as_deref(), chat.unread > 0, chat.unread, p, l))
             }));
@@ -2980,6 +3037,32 @@ fn voice_channel<'a>(
 /// A Discord server straight from the hidden client: its categories, each
 /// with text channels (opening the bridged room, when there is one) and
 /// voice channels (click to join).
+/// The WhatsApp groups list (off its rail tile): group chats, most recent
+/// first, opening in the chat pane like any other web chat.
+fn wa_groups_pane<'a>(
+    session: &'a Session,
+    whatsapp: Option<&'a whatsapp::Snapshot>,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let footer = user_panel(session, None, p, l);
+    let mut groups: Vec<&whatsapp::Chat> =
+        whatsapp.map(|w| w.chats.iter().filter(|c| c.group).collect()).unwrap_or_default();
+    groups.sort_by_key(|c| std::cmp::Reverse(c.last_ms));
+    let header = column![
+        ui::sans("WhatsApp groups", 15.0, Weight::Semibold, p.text_bright()),
+        ui::mono(format!("{} groups", groups.len()), 11.0, p.text_muted()),
+    ]
+    .spacing(4)
+    .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
+    let mut list = column![].spacing(2).padding([10, 8]);
+    for chat in groups {
+        let open = WebChat { network: Network::WhatsApp, id: chat.id.clone(), name: chat.name.clone(), dm: false };
+        list = list.push(web_chat_row(session, open, chat.avatar.as_deref(), chat.unread > 0, chat.unread, p, l));
+    }
+    column![header, ui::hline(p), scrollable(list).height(Length::Fill), ui::hline(p), footer].into()
+}
+
 fn guild_pane<'a>(
     session: &'a Session,
     discord: Option<&'a mesh_discord::Snapshot>,
