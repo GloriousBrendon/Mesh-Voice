@@ -42,6 +42,8 @@ pub enum MeshError {
     Serde(#[from] serde_json::Error),
     #[error("no saved session found")]
     NoSession,
+    #[error("web media isn't downloaded through Matrix")]
+    NotMatrixMedia,
 }
 
 pub type MeshResult<T> = Result<T, MeshError>;
@@ -503,7 +505,7 @@ impl MeshClient {
     pub async fn avatar_thumbnail(&self, media: &MediaRef) -> MeshResult<Vec<u8>> {
         use matrix_sdk::media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings};
         let request = MediaRequestParameters {
-            source: media.0.clone(),
+            source: media.matrix()?,
             format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(96u32.into(), 96u32.into())),
         };
         Ok(self.client.media().get_media_content(&request, true).await?)
@@ -513,7 +515,7 @@ impl MeshClient {
     /// in the local store, so a second call is cheap.
     pub async fn media(&self, media: &MediaRef) -> MeshResult<Vec<u8>> {
         use matrix_sdk::media::{MediaFormat, MediaRequestParameters};
-        let request = MediaRequestParameters { source: media.0.clone(), format: MediaFormat::File };
+        let request = MediaRequestParameters { source: media.matrix()?, format: MediaFormat::File };
         Ok(self.client.media().get_media_content(&request, true).await?)
     }
 

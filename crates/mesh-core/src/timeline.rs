@@ -55,14 +55,40 @@ pub struct ImageInfo {
     pub size: Option<u64>,
 }
 
-/// Where to download a piece of media from; pass it to
-/// [`crate::MeshClient::media`]. Opaque to the UI except for its cache key.
+/// Where to download a piece of media from: Matrix media (pass it to
+/// [`crate::MeshClient::media`]) or a web URL the UI fetches itself (a
+/// Discord picture, say). Opaque to the UI except for its cache key.
 #[derive(Debug, Clone)]
-pub struct MediaRef(pub(crate) MediaSource);
+pub struct MediaRef(pub(crate) Source);
+
+#[derive(Debug, Clone)]
+pub(crate) enum Source {
+    Matrix(MediaSource),
+    Web(String),
+}
 
 impl MediaRef {
     pub(crate) fn plain(url: matrix_sdk::ruma::OwnedMxcUri) -> Self {
-        MediaRef(MediaSource::Plain(url))
+        MediaRef(Source::Matrix(MediaSource::Plain(url)))
+    }
+
+    pub fn web(url: String) -> Self {
+        MediaRef(Source::Web(url))
+    }
+
+    /// The URL, for web media; `None` for Matrix media.
+    pub fn web_url(&self) -> Option<&str> {
+        match &self.0 {
+            Source::Web(url) => Some(url),
+            Source::Matrix(_) => None,
+        }
+    }
+
+    pub(crate) fn matrix(&self) -> crate::MeshResult<MediaSource> {
+        match &self.0 {
+            Source::Matrix(source) => Ok(source.clone()),
+            Source::Web(_) => Err(crate::MeshError::NotMatrixMedia),
+        }
     }
 }
 
@@ -76,8 +102,9 @@ impl MediaRef {
     /// A stable key for caching the downloaded bytes.
     pub fn key(&self) -> String {
         match &self.0 {
-            MediaSource::Plain(uri) => uri.to_string(),
-            MediaSource::Encrypted(file) => file.url.to_string(),
+            Source::Matrix(MediaSource::Plain(uri)) => uri.to_string(),
+            Source::Matrix(MediaSource::Encrypted(file)) => file.url.to_string(),
+            Source::Web(url) => url.clone(),
         }
     }
 }
@@ -217,7 +244,7 @@ fn message_body(msgtype: &MessageType) -> Option<(String, MessageKind)> {
         MessageType::Image(image) => {
             let info = image.info.as_deref();
             let image_info = ImageInfo {
-                media: MediaRef(image.source.clone()),
+                media: MediaRef(Source::Matrix(image.source.clone())),
                 width: info.and_then(|i| i.width).map(u64::from),
                 height: info.and_then(|i| i.height).map(u64::from),
                 size: info.and_then(|i| i.size).map(u64::from),

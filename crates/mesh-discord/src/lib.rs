@@ -28,6 +28,8 @@ pub enum Event {
     Messages(Messages),
     /// A new DM, or a mention of us, worth a desktop notification.
     Notify(Notify),
+    /// A picture asked for with `Engine::fetch_media`: its bytes, or why not.
+    Media { url: String, bytes: std::result::Result<Vec<u8>, String> },
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -68,6 +70,11 @@ impl Engine {
     /// and the rest itself).
     pub fn send_message(&self, channel_id: &str, content: &str) {
         self.call("send", &[channel_id, content]);
+    }
+    /// Downloads a Discord picture through the client's own network (the VPN
+    /// on Linux); answers with `Event::Media`.
+    pub fn fetch_media(&self, url: &str) {
+        self.call("fetchMedia", &[url]);
     }
 
     fn call(&self, function: &str, args: &[&str]) {
@@ -135,6 +142,9 @@ pub struct DiscordMessage {
     pub id: String,
     pub author_id: String,
     pub author: String,
+    /// The author's picture (fetch it with `Engine::fetch_media`).
+    #[serde(default)]
+    pub avatar: Option<String>,
     /// The text, or for a system message what happened ("started a call").
     pub content: String,
     pub system: bool,
@@ -146,6 +156,16 @@ pub struct DiscordMessage {
 pub struct Attachment {
     pub filename: String,
     pub url: String,
+    /// For images: a small copy from Discord's resizing proxy.
+    #[serde(default)]
+    pub preview: Option<String>,
+    #[serde(default)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    pub height: Option<u64>,
+    /// Bytes.
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -253,6 +273,7 @@ async fn session(
         send("Runtime.addBinding", serde_json::json!({ "name": "meshInvite" })),
         send("Runtime.addBinding", serde_json::json!({ "name": "meshMessages" })),
         send("Runtime.addBinding", serde_json::json!({ "name": "meshNotify" })),
+        send("Runtime.addBinding", serde_json::json!({ "name": "meshMedia" })),
         send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": AGENT })),
         send("Runtime.evaluate", serde_json::json!({ "expression": AGENT })),
         send(
@@ -307,6 +328,15 @@ fn binding_event(text: &str) -> Option<Event> {
         "meshInvite" => serde_json::from_str(payload).ok().map(Event::Invite),
         "meshMessages" => serde_json::from_str(payload).ok().map(Event::Messages),
         "meshNotify" => serde_json::from_str(payload).ok().map(Event::Notify),
+        "meshMedia" => {
+            use base64::Engine as _;
+            let media: serde_json::Value = serde_json::from_str(payload).ok()?;
+            let bytes = match media["data"].as_str() {
+                Some(data) => base64::engine::general_purpose::STANDARD.decode(data).map_err(|e| e.to_string()),
+                None => Err(media["error"].as_str().unwrap_or("no data").to_owned()),
+            };
+            Some(Event::Media { url: media["url"].as_str()?.to_owned(), bytes })
+        }
         _ => None,
     }
 }
@@ -436,6 +466,19 @@ mod tests {
         let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshNotify", "payload": payload } });
         let Some(Event::Notify(n)) = binding_event(&msg.to_string()) else { panic!("no notify") };
         assert_eq!((n.channel_id.as_str(), n.title.as_str()), ("5", "B345T"));
+    }
+
+    #[test]
+    fn decodes_media() {
+        let media = |payload: &str| {
+            let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshMedia", "payload": payload } });
+            match binding_event(&msg.to_string()) {
+                Some(Event::Media { url, bytes }) => (url, bytes),
+                other => panic!("not media: {other:?}"),
+            }
+        };
+        assert_eq!(media(r#"{"url":"u","data":"aGk="}"#), ("u".into(), Ok(b"hi".to_vec())));
+        assert_eq!(media(r#"{"url":"u","error":"HTTP 404"}"#), ("u".into(), Err("HTTP 404".into())));
     }
 
     #[test]

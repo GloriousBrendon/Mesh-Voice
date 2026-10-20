@@ -3,7 +3,7 @@
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 6;
+  const version = 7;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -175,9 +175,18 @@
       author: m.nick || author.name,
       content: text ? m.content : SYSTEM[m.type] || "did something Mesh can't show yet",
       system: !text,
+      avatar: m.author.avatar ? `https://cdn.discordapp.com/avatars/${m.author.id}/${m.author.avatar}.png?size=64` : null,
       timestamp_ms: m.timestamp ? m.timestamp.valueOf() : 0,
-      attachments: (m.attachments || []).map((a) => ({ filename: a.filename, url: a.url })),
+      attachments: (m.attachments || []).map(attachment),
     };
+  };
+  // Images get a preview URL from Discord's resizing proxy (at most 480 wide),
+  // so Mesh downloads a few KB instead of the full photo.
+  const attachment = (a) => {
+    const image = /^image\//.test(a.content_type || "") && a.width && a.height;
+    const scale = image ? Math.min(1, 480 / a.width) : 1;
+    const sized = image && `${a.proxy_url}${a.proxy_url.includes("?") ? "&" : "?"}width=${Math.round(a.width * scale)}&height=${Math.round(a.height * scale)}`;
+    return { filename: a.filename, url: a.url, preview: sized || null, width: a.width || null, height: a.height || null, size: a.size || null };
   };
 
   const events = ["VOICE_STATE_UPDATES", "SPEAKING", "VOICE_CHANNEL_SELECT", "AUDIO_TOGGLE_SELF_MUTE",
@@ -228,6 +237,21 @@
     },
     send: (channelId, content) =>
       found.messages.sendMessage(channelId, { content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, true, {}),
+    // Downloads a Discord picture through the page (so through its network,
+    // the VPN on Linux) and hands the bytes to Mesh as base64.
+    fetchMedia: async (url) => {
+      const report = (r) => window.meshMedia(JSON.stringify({ url, ...r }));
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return report({ error: `HTTP ${res.status}` });
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        report({ data: btoa(binary) });
+      } catch (e) {
+        report({ error: String(e) });
+      }
+    },
     // Joins a server from a discord.gg / discord.com/invite link or a bare
     // code. Discord's own client asks for a captcha in its window if it wants
     // one; "waiting" tells Mesh to bring that window up.

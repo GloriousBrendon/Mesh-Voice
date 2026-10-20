@@ -266,33 +266,65 @@ struct DiscordChannel {
     dm: bool,
 }
 
-/// Discord messages as timeline rows, so the Matrix timeline view draws them.
+/// Discord messages as timeline rows, so the Matrix timeline view draws them:
+/// each image becomes its own image row after the text (avatars and images
+/// are web media, fetched through the hidden client by `load_web_media`).
 /// ponytail: authors get a made-up `@discord_<id>:discord.com` user id,
-/// attachments are links and there are no reactions; give Discord its own
-/// message type when those matter.
+/// other attachments are links and there are no reactions; give Discord its
+/// own message type when those matter.
 fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
-    messages
-        .messages
-        .into_iter()
-        .filter_map(|m| {
-            let sender = OwnedUserId::try_from(format!("@discord_{}:discord.com", m.author_id)).ok()?;
-            let mut body = if m.system { format!("{} {}", m.author, m.content) } else { m.content };
-            for a in &m.attachments {
-                body.push_str(&format!("\n{}: {}", a.filename, a.url));
-            }
-            Some(TimelineMessage {
-                event_id: None,
-                sender,
-                sender_name: m.author,
-                sender_avatar: None,
-                sender_network: Network::Discord,
-                body: body.trim().to_string(),
-                kind: if m.system { MessageKind::System } else { MessageKind::Text },
-                reactions: Vec::new(),
-                timestamp_ms: m.timestamp_ms,
-            })
-        })
-        .collect()
+    let mut timeline = Vec::new();
+    for m in messages.messages {
+        let Ok(sender) = OwnedUserId::try_from(format!("@discord_{}:discord.com", m.author_id)) else {
+            continue;
+        };
+        let row = |body: String, kind| TimelineMessage {
+            event_id: None,
+            sender: sender.clone(),
+            sender_name: m.author.clone(),
+            sender_avatar: m.avatar.clone().map(MediaRef::web),
+            sender_network: Network::Discord,
+            body,
+            kind,
+            reactions: Vec::new(),
+            timestamp_ms: m.timestamp_ms,
+        };
+        let mut body = if m.system { format!("{} {}", m.author, m.content) } else { m.content.clone() };
+        let (images, files): (Vec<_>, Vec<_>) = m.attachments.iter().partition(|a| a.preview.is_some());
+        for a in files {
+            body.push_str(&format!("\n{}: {}", a.filename, a.url));
+        }
+        let body = body.trim().to_string();
+        if !body.is_empty() || images.is_empty() {
+            timeline.push(row(body, if m.system { MessageKind::System } else { MessageKind::Text }));
+        }
+        for a in images {
+            let Some(preview) = a.preview.clone() else { continue };
+            let info = mesh_core::ImageInfo { media: MediaRef::web(preview), width: a.width, height: a.height, size: a.size };
+            timeline.push(row(a.filename.clone(), MessageKind::Image(info)));
+        }
+    }
+    timeline
+}
+
+/// Asks the hidden Discord client for the timeline's web avatars and images
+/// that aren't cached or loading; they arrive as `Event::Media`.
+fn load_web_media(session: &mut Session, engine: &mesh_discord::Engine) {
+    for message in &session.timeline {
+        if let Some(url) = message.sender_avatar.as_ref().and_then(MediaRef::web_url)
+            && !session.avatars.contains_key(url)
+        {
+            session.avatars.insert(url.to_string(), None);
+            engine.fetch_media(url);
+        }
+        if let MessageKind::Image(info) = &message.kind
+            && let Some(url) = info.media.web_url()
+            && !session.images.contains_key(url)
+        {
+            session.images.insert(url.to_string(), None);
+            engine.fetch_media(url);
+        }
+    }
 }
 
 /// UI-side view of the single active voice call.
@@ -538,7 +570,8 @@ fn load_avatars(session: &mut Session, media: impl IntoIterator<Item = MediaRef>
     let mut tasks = Vec::new();
     for media in media {
         let key = media.key();
-        if session.avatars.contains_key(&key) {
+        // Web media (Discord) comes through the hidden client instead.
+        if session.avatars.contains_key(&key) || media.web_url().is_some() {
             continue;
         }
         session.avatars.insert(key.clone(), None);
@@ -564,7 +597,7 @@ fn load_images(session: &mut Session) -> Task<Message> {
             continue;
         };
         let key = info.media.key();
-        if session.images.contains_key(&key) {
+        if session.images.contains_key(&key) || info.media.web_url().is_some() {
             continue;
         }
         session.images.insert(key.clone(), None);
@@ -1109,7 +1142,23 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         && session.discord_channel.as_ref().is_some_and(|c| c.id == messages.channel_id)
                     {
                         session.timeline = discord_timeline(messages);
+                        if let Some(engine) = &state.discord {
+                            load_web_media(session, engine);
+                        }
                     }
+                }
+                mesh_discord::Event::Media { url, bytes } => {
+                    let Screen::LoggedIn(session) = &state.screen else {
+                        return Task::none();
+                    };
+                    let pending = |map: &HashMap<String, Option<iced::widget::image::Handle>>| matches!(map.get(&url), Some(None));
+                    return if pending(&session.avatars) {
+                        update(state, Message::AvatarLoaded(url, bytes))
+                    } else if pending(&session.images) {
+                        update(state, Message::ImageLoaded(url, bytes))
+                    } else {
+                        Task::none()
+                    };
                 }
                 mesh_discord::Event::Notify(n) => {
                     let open = match &state.screen {
