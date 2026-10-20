@@ -3,7 +3,7 @@
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 8;
+  const version = 9;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -180,8 +180,16 @@
       system: !text,
       avatar: m.author.avatar ? `https://cdn.discordapp.com/avatars/${m.author.id}/${m.author.avatar}.png?size=64` : null,
       timestamp_ms: m.timestamp ? m.timestamp.valueOf() : 0,
-      attachments: (m.attachments || []).map(attachment),
+      attachments: (m.attachments || []).map(attachment).concat((m.stickerItems || []).map(sticker).filter(Boolean)),
     };
+  };
+  // Stickers as 160 px images: PNG/APNG (first frame) and GIF through the
+  // media proxy; Lottie ones (format 3) aren't images, so they're left out.
+  const sticker = (s) => {
+    const format = s.format_type || s.formatType;
+    if (format === 3) return null;
+    const url = `https://media.discordapp.net/stickers/${s.id}.${format === 4 ? "gif" : "png"}?size=160`;
+    return { filename: s.name || "sticker", url, preview: url, width: 160, height: 160, size: null };
   };
   // Images get a preview URL from Discord's resizing proxy (at most 480 wide),
   // so Mesh downloads a few KB instead of the full photo.

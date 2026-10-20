@@ -343,13 +343,15 @@ fn whatsapp_timeline(messages: whatsapp::Messages) -> Vec<TimelineMessage> {
             continue;
         }
         if let Some(image) = &m.image {
-            let info = mesh_core::ImageInfo {
-                media: MediaRef::web(whatsapp::image_url(&m.id)),
-                width: image.width,
-                height: image.height,
-                size: None,
+            // Stickers come down 160 px wide; draw them at that size.
+            let (width, height, label) = if image.sticker {
+                let scale = |v: Option<u64>| v.map(|v| v * 160 / image.width.unwrap_or(160).max(1));
+                (Some(160), scale(image.height), "sticker")
+            } else {
+                (image.width, image.height, "photo")
             };
-            timeline.push(row("photo".to_string(), MessageKind::Image(info)));
+            let info = mesh_core::ImageInfo { media: MediaRef::web(whatsapp::image_url(&m.id)), width, height, size: None };
+            timeline.push(row(label.to_string(), MessageKind::Image(info)));
         }
         if !m.content.is_empty() {
             timeline.push(row(m.content.clone(), MessageKind::Text));

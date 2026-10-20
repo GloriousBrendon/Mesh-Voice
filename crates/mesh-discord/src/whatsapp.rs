@@ -108,6 +108,9 @@ pub struct Message {
 pub struct Image {
     pub width: Option<u64>,
     pub height: Option<u64>,
+    /// A sticker (fetched as a small transparent PNG) rather than a photo.
+    #[serde(default)]
+    pub sticker: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

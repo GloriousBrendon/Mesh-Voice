@@ -5,7 +5,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 1;
+  const version = 2;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -82,7 +82,7 @@
   };
 
   // Media kinds Mesh shows as a label (with any caption) rather than inline.
-  const LABEL = { video: "Video", ptt: "Voice message", audio: "Audio", document: "Document", sticker: "Sticker", location: "Location", vcard: "Contact" };
+  const LABEL = { video: "Video", ptt: "Voice message", audio: "Audio", document: "Document", location: "Location", vcard: "Contact" };
   const SYSTEM = { revoked: "deleted a message", call_log: "called", ciphertext: "sent a message WhatsApp is still decrypting" };
   const message = (m) => {
     const fromMe = !!m.id.fromMe;
@@ -93,7 +93,10 @@
     if (m.type === "chat") content = m.body || "";
     else if (m.type === "image") {
       content = m.caption || "";
-      image = { width: m.width || null, height: m.height || null };
+      image = { width: m.width || null, height: m.height || null, sticker: false };
+    } else if (m.type === "sticker") {
+      content = "";
+      image = { width: m.width || 512, height: m.height || 512, sticker: true };
     } else if (LABEL[m.type]) content = `[${LABEL[m.type]}${m.type === "document" && m.filename ? `: ${m.filename}` : ""}]${m.caption ? ` ${m.caption}` : ""}`;
     else if (SYSTEM[m.type]) { content = SYSTEM[m.type]; system = true; }
     else return null; // protocol, encryption notices, group events…
@@ -137,13 +140,15 @@
     try { window.waNotify(JSON.stringify({ chat_id: chatId, title: name, body })); } catch {}
   };
 
-  // Shrinks a picture to at most 480 px wide, so Mesh gets a few KB.
-  const shrink = async (blob) => {
+  // Shrinks a picture so Mesh gets a few KB: photos to 480 px wide as JPEG,
+  // stickers to 160 px as PNG (keeping their transparency). ponytail: an
+  // animated sticker shows its first frame.
+  const shrink = async (blob, sticker) => {
     const bitmap = await createImageBitmap(blob);
-    const scale = Math.min(1, 480 / bitmap.width);
+    const scale = Math.min(1, (sticker ? 160 : 480) / bitmap.width);
     const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
     canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    return canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 });
+    return sticker ? canvas.convertToBlob({ type: "image/png" }) : canvas.convertToBlob({ type: "image/jpeg", quality: 0.8 });
   };
   const decrypt = async (id) => {
     const m = wa.Msg.get(id);
@@ -177,7 +182,10 @@
       const report = (r) => window.waMedia(JSON.stringify({ url, ...r }));
       try {
         let blob;
-        if (url.startsWith("wa-msg:")) blob = await shrink(await decrypt(url.slice(7)));
+        if (url.startsWith("wa-msg:")) {
+          const m = wa.Msg.get(url.slice(7));
+          blob = await shrink(await decrypt(url.slice(7)), !!m && m.type === "sticker");
+        }
         else {
           const res = await fetch(url);
           if (!res.ok) return report({ error: `HTTP ${res.status}` });
