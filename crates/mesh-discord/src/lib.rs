@@ -115,6 +115,9 @@ pub struct Dm {
     pub name: String,
     /// The other person, for a one-to-one DM.
     pub recipient_id: Option<String>,
+    /// The other person's picture, or a group DM's icon.
+    #[serde(default)]
+    pub avatar: Option<String>,
     /// When the last message was sent (ms since the epoch), for sorting.
     #[serde(default)]
     pub last_ms: u64,

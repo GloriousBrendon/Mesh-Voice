@@ -3,7 +3,7 @@
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 7;
+  const version = 8;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -117,6 +117,9 @@
         id: ch.id,
         name: ch.name || recipients.map((r) => r.name).join(", ") || "Direct message",
         recipient_id: recipients.length === 1 ? recipients[0].id : null,
+        avatar: ch.icon
+          ? `https://cdn.discordapp.com/channel-icons/${ch.id}/${ch.icon}.png?size=64`
+          : recipients.length === 1 ? recipients[0].avatar : null,
         // A snowflake id carries its time: ms since Discord's 2015 epoch, << 22.
         last_ms: ch.lastMessageId ? Number(BigInt(ch.lastMessageId) >> 22n) + 1420070400000 : 0,
         unread: !!(reads && reads.hasUnread(ch.id)),

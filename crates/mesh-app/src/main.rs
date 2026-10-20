@@ -307,6 +307,29 @@ fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
     timeline
 }
 
+/// Asks the hidden Discord client for the snapshot's pictures (server icons,
+/// DM and voice avatars) that aren't cached or loading.
+fn load_snapshot_media(session: &mut Session, snapshot: &mesh_discord::Snapshot, engine: &mesh_discord::Engine) {
+    let members = snapshot.guilds.iter().flat_map(|g| g.voice_channels.iter().flat_map(|c| &c.members));
+    let urls = snapshot
+        .guilds
+        .iter()
+        .filter_map(|g| g.icon.as_ref())
+        .chain(snapshot.dms.iter().filter_map(|d| d.avatar.as_ref()))
+        .chain(members.chain(&snapshot.voice.members).filter_map(|m| m.avatar.as_ref()));
+    for url in urls {
+        if !session.avatars.contains_key(url) {
+            session.avatars.insert(url.clone(), None);
+            engine.fetch_media(url);
+        }
+    }
+}
+
+/// A downloaded Discord picture (from `load_snapshot_media`), if there is one.
+fn web_picture<'a>(session: &'a Session, url: Option<&str>) -> Option<&'a iced::widget::image::Handle> {
+    session.avatars.get(url?)?.as_ref()
+}
+
 /// Asks the hidden Discord client for the timeline's web avatars and images
 /// that aren't cached or loading; they arrive as `Event::Media`.
 fn load_web_media(session: &mut Session, engine: &mesh_discord::Engine) {
@@ -537,6 +560,12 @@ fn boot() -> (App, Task<Message>) {
 /// push-update stream.
 fn enter_session(state: &mut App, client: Arc<MeshClient>) -> Task<Message> {
     state.screen = Screen::LoggedIn(Session::new(client.clone()));
+    // Discord often connects before the session exists; catch up on its pictures.
+    if let (Screen::LoggedIn(session), Some(snapshot), Some(engine)) =
+        (&mut state.screen, &state.discord_state, &state.discord)
+    {
+        load_snapshot_media(session, snapshot, engine);
+    }
     let rooms_client = client.clone();
     let profile_client = client.clone();
     let backup_client = client.clone();
@@ -1132,7 +1161,14 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     }
                     state.discord = Some(engine);
                 }
-                mesh_discord::Event::Snapshot(snapshot) => state.discord_state = Some(snapshot),
+                mesh_discord::Event::Snapshot(snapshot) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && let Some(engine) = &state.discord
+                    {
+                        load_snapshot_media(session, &snapshot, engine);
+                    }
+                    state.discord_state = Some(snapshot);
+                }
                 mesh_discord::Event::Disconnected => {
                     state.discord = None;
                     state.discord_state = None;
@@ -2369,9 +2405,17 @@ fn rail_view<'a>(
         .iter()
         .map(|guild| {
             let active = session.active_guild.as_deref() == Some(guild.id.as_str());
-            let face = ui::mono_bold(initials(&guild.name), 13.0, if active { p.text_bright() } else { p.text() });
+            let face: Element<'_, Message> = match web_picture(session, guild.icon.as_deref()) {
+                Some(handle) => iced::widget::image(handle.clone())
+                    .width(40)
+                    .height(40)
+                    .border_radius((l.rounding - 2.0).max(0.0))
+                    .content_fit(iced::ContentFit::Cover)
+                    .into(),
+                None => ui::mono_bold(initials(&guild.name), 13.0, if active { p.text_bright() } else { p.text() }).into(),
+            };
             iced::widget::tooltip(
-                rail_tile(face.into(), active, Some(Message::GuildSelected(guild.id.clone())), p, l),
+                rail_tile(face, active, Some(Message::GuildSelected(guild.id.clone())), p, l),
                 container(text(&guild.name).size(12).color(p.text())).padding([4, 8]),
                 iced::widget::tooltip::Position::Right,
             )
@@ -2644,7 +2688,7 @@ fn channel_pane<'a>(
         if dm_section {
             rows.extend(discord_dms.iter().map(|dm| {
                 let open = DiscordChannel { id: dm.id.clone(), name: dm.name.clone(), dm: true };
-                (dm.last_ms, discord_channel_row(session, open, dm.unread, dm.mentions, p, l))
+                (dm.last_ms, discord_channel_row(session, open, dm.avatar.as_deref(), dm.unread, dm.mentions, p, l))
             }));
             rows.sort_by_key(|(last, _)| std::cmp::Reverse(*last));
         }
@@ -2665,7 +2709,7 @@ fn channel_pane<'a>(
             .and_then(guild_of)
             .and_then(|id| discord.guilds.iter().find(|x| x.id == id))
     {
-        list = list.push(voice_channels(guild, discord.voice.channel_id.as_deref(), p, l));
+        list = list.push(voice_channels(session, guild, discord.voice.channel_id.as_deref(), p, l));
     }
 
     if let Some(space) = group.and_then(|g| g.space.as_ref()).filter(|s| s.is_invite) {
@@ -2683,6 +2727,7 @@ fn channel_pane<'a>(
 
 /// A server's voice channels: click to join; who's in each, lit while talking.
 fn voice_channels<'a>(
+    session: &'a Session,
     guild: &'a mesh_discord::Guild,
     current: Option<&str>,
     p: &theme::Palette,
@@ -2690,13 +2735,14 @@ fn voice_channels<'a>(
 ) -> Element<'a, Message> {
     let mut col = column![ui::section("voice", p)].spacing(2);
     for channel in &guild.voice_channels {
-        col = col.push(voice_channel(channel, current, p, l));
+        col = col.push(voice_channel(session, channel, current, p, l));
     }
     col.into()
 }
 
 /// One voice channel row (click to join), with who's in it under it.
 fn voice_channel<'a>(
+    session: &'a Session,
     channel: &'a mesh_discord::VoiceChannel,
     current: Option<&str>,
     p: &theme::Palette,
@@ -2715,7 +2761,7 @@ fn voice_channel<'a>(
     }
     let mut col = column![ui::row_button(line, Message::DiscordJoin(channel.id.clone()), here, p, l)].spacing(2);
     for member in &channel.members {
-        col = col.push(container(voice_member(member, 22.0, p)).padding(iced::Padding { left: 30.0, ..iced::Padding::ZERO }));
+        col = col.push(container(voice_member(member, web_picture(session, member.avatar.as_deref()), 22.0, p)).padding(iced::Padding { left: 30.0, ..iced::Padding::ZERO }));
     }
     col.into()
 }
@@ -2762,19 +2808,24 @@ fn guild_pane<'a>(
         }
         for channel in guild.text_channels.iter().filter(|c| c.category.as_deref() == category) {
             let open = DiscordChannel { id: channel.id.clone(), name: channel.name.clone(), dm: false };
-            list = list.push(discord_channel_row(session, open, false, 0, p, l));
+            list = list.push(discord_channel_row(session, open, None, false, 0, p, l));
         }
         for channel in guild.voice_channels.iter().filter(|c| c.category.as_deref() == category) {
-            list = list.push(voice_channel(channel, current, p, l));
+            list = list.push(voice_channel(session, channel, current, p, l));
         }
     }
     column![header, ui::hline(p), scrollable(list).height(Length::Fill), ui::hline(p), footer].into()
 }
 
 /// Someone in a Discord call: avatar (ringed while talking), name, mute/deaf.
-fn voice_member<'a>(member: &'a mesh_discord::Member, size: f32, p: &theme::Palette) -> Element<'a, Message> {
+fn voice_member<'a>(
+    member: &'a mesh_discord::Member,
+    picture: Option<&iced::widget::image::Handle>,
+    size: f32,
+    p: &theme::Palette,
+) -> Element<'a, Message> {
     let ring = if member.speaking { p.success() } else { iced::Color::TRANSPARENT };
-    let face = container(ui::avatar(&member.name, None, size, p.proto_dc(), p, None))
+    let face = container(ui::avatar(&member.name, picture, size, p.proto_dc(), p, None))
         .padding(2)
         .style(move |_| container::Style {
             border: iced::border::rounded(size).color(ring).width(2),
@@ -2796,6 +2847,7 @@ fn voice_member<'a>(member: &'a mesh_discord::Member, size: f32, p: &theme::Pale
 fn discord_channel_row<'a>(
     session: &Session,
     channel: DiscordChannel,
+    picture: Option<&str>,
     unread: bool,
     mentions: u64,
     p: &theme::Palette,
@@ -2804,9 +2856,13 @@ fn discord_channel_row<'a>(
     let selected = session.discord_channel.as_ref().is_some_and(|c| c.id == channel.id);
     let color = if selected || unread { p.text_bright() } else { p.text() };
     let bar = if selected { p.accent() } else { iced::Color::TRANSPARENT };
+    let face = match web_picture(session, picture) {
+        Some(handle) => ui::avatar(&channel.name, Some(handle), 20.0, p.surface_alt(), p, None),
+        None => ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 14.0, p.text_muted()),
+    };
     let mut label = row![
         ui::swatch(bar, 2.0, 18.0, 1.0),
-        ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 14.0, p.text_muted()),
+        face,
         ui::sans(channel.name.clone(), 14.0, if unread { Weight::Semibold } else { Weight::Normal }, color)
             .width(Length::Fill),
     ]
@@ -3011,7 +3067,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         col = col.push(container(call_bar(call, p)).padding([8, 16]));
     }
     if let Some(snapshot) = state.discord_state.as_ref().filter(|s| s.voice.connected()) {
-        col = col.push(container(discord_call_bar(&snapshot.voice, p, l)).padding([8, 16]));
+        col = col.push(container(discord_call_bar(session, &snapshot.voice, p, l)).padding([8, 16]));
     }
     if let Some(prompt) = &session.verification {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
@@ -3147,10 +3203,15 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Elem
 }
 
 /// The Discord call you're in: where, who (lit while talking), mute, leave.
-fn discord_call_bar<'a>(voice: &'a mesh_discord::Voice, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn discord_call_bar<'a>(
+    session: &'a Session,
+    voice: &'a mesh_discord::Voice,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
     let mut people = row![].spacing(10).align_y(iced::Alignment::Center);
     for member in &voice.members {
-        people = people.push(voice_member(member, 26.0, p));
+        people = people.push(voice_member(member, web_picture(session, member.avatar.as_deref()), 26.0, p));
     }
     let status = if voice.connection.contains("CONNECTED") && !voice.connection.contains("DIS") {
         p.success()
