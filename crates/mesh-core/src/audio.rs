@@ -403,3 +403,73 @@ impl Resampler {
         out
     }
 }
+
+/// Speeds speech up (or slows it down) without changing its pitch, like
+/// WhatsApp's 1.5×/2×: WSOLA. Overlap-adds 30 ms Hann-windowed frames taken
+/// from the input at `speed` times the output rate, each nudged (±10 ms) to
+/// where it best continues the previous one, so voices don't go phasey.
+/// Takes and gives 48 kHz mono.
+pub fn time_stretch(input: &[i16], speed: f32) -> Vec<i16> {
+    const FRAME: usize = 1440; // 30 ms
+    const HOP: usize = FRAME / 2; // output hop: Hann at 50% overlap sums to 1
+    const SEEK: usize = 480; // ±10 ms
+    if (speed - 1.0).abs() < 0.01 || speed <= 0.0 || input.len() < FRAME * 2 {
+        return input.to_vec();
+    }
+    let window: Vec<f32> =
+        (0..FRAME).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FRAME as f32).cos()).collect();
+    let at = |i: usize| input.get(i).copied().unwrap_or(0) as f32;
+    let last_start = input.len() - FRAME;
+    let out_len = (input.len() as f32 / speed) as usize;
+    let mut out = vec![0f32; out_len + FRAME];
+    let mut prev = 0;
+    for out_pos in (0..out_len).step_by(HOP) {
+        let nominal = ((out_pos as f32 * speed) as usize).min(last_start);
+        let from = if out_pos == 0 {
+            0
+        } else {
+            // Line up with where the previous frame would naturally carry on.
+            // ponytail: correlation on every 4th sample, every 2nd offset;
+            // plenty for speech and ~16× cheaper.
+            let natural = prev + HOP;
+            let (lo, hi) = (nominal.saturating_sub(SEEK), (nominal + SEEK).min(last_start));
+            let mut best = (f32::MIN, nominal);
+            for cand in (lo..=hi).step_by(2) {
+                let score: f32 = (0..HOP).step_by(4).map(|j| at(cand + j) * at(natural + j)).sum();
+                if score > best.0 {
+                    best = (score, cand);
+                }
+            }
+            best.1
+        };
+        for (i, w) in window.iter().enumerate() {
+            out[out_pos + i] += at(from + i) * w;
+        }
+        prev = from;
+    }
+    out.truncate(out_len);
+    out.into_iter().map(|s| s.clamp(-32768.0, 32767.0) as i16).collect()
+}
+
+#[cfg(test)]
+mod stretch_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_pitch_while_shortening() {
+        // A 300 Hz tone, 2 s.
+        let tone: Vec<i16> = (0..96_000)
+            .map(|i| ((std::f32::consts::TAU * 300.0 * i as f32 / 48_000.0).sin() * 10_000.0) as i16)
+            .collect();
+        let fast = time_stretch(&tone, 2.0);
+        assert_eq!(fast.len(), 48_000);
+        // Same pitch: count rising zero crossings over the middle second-ish.
+        let rises = |s: &[i16]| s.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count();
+        let per_sec = rises(&fast[4_800..43_200]) as f32 / 0.8;
+        assert!((per_sec - 300.0).abs() < 15.0, "pitch drifted to {per_sec} Hz");
+        // And it stays loud (frames add up in phase rather than cancelling).
+        let peak = fast[4_800..43_200].iter().map(|s| s.unsigned_abs()).max().unwrap();
+        assert!(peak > 8_000, "peak {peak}");
+        assert_eq!(time_stretch(&tone, 1.0), tone);
+    }
+}

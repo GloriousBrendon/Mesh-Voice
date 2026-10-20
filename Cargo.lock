@@ -4035,6 +4035,7 @@ dependencies = [
  "chrono",
  "dirs",
  "iced",
+ "image",
  "mesh-core",
  "mesh-discord",
  "notify-rust",

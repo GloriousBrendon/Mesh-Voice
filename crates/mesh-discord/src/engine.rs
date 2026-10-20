@@ -63,7 +63,12 @@ type Result<T> = std::result::Result<T, String>;
 async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, connected: &mut bool) -> Result<()> {
     let page = page(socket, site.host).await?;
     let stream = connect(socket).await?;
-    let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://localhost{page}"), stream)
+    // A decrypted video arrives base64 in one binding payload, so lift the
+    // default 16 MiB frame / 64 MiB message caps well past any attachment.
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(256 << 20))
+        .max_message_size(Some(256 << 20));
+    let (mut ws, _) = tokio_tungstenite::client_async_with_config(format!("ws://localhost{page}"), stream, Some(config))
         .await
         .map_err(|e| e.to_string())?;
 

@@ -1,0 +1,4 @@
+# opus (via audiopus_sys) ships a CMakeLists that asks for CMake < 3.5, which
+# CMake 4 refuses. Tell it to configure anyway so the voice stack builds.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

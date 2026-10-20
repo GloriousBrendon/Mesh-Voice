@@ -9,12 +9,13 @@ mod spaces;
 mod timeline;
 mod verification;
 
+pub use audio::{PlaybackHandle, SAMPLE_RATE, start_playback, time_stretch};
 pub use bridge::{BridgedIds, Network, user_network};
 pub use call::CallEngine;
 pub use contacts::PendingContact;
 pub use session::{Session, SessionStore};
 pub use spaces::{SpaceGroup, group_by_space};
-pub use timeline::{ImageInfo, MediaRef, MessageKind, Reaction, TimelineMessage};
+pub use timeline::{FileInfo, ImageInfo, MediaRef, MessageKind, Quote, Reaction, TimelineMessage};
 
 pub use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
 

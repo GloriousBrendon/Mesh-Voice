@@ -2,6 +2,7 @@
 // No console window next to the app on Windows (debug builds keep it for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cache;
 mod rain;
 mod theme;
 mod ui;
@@ -120,6 +121,64 @@ struct LoginForm {
     error: Option<String>,
 }
 
+/// The new WhatsApp chat picker: a name to search contacts, or a number.
+#[derive(Default)]
+struct NewChat {
+    query: String,
+    contacts: Vec<whatsapp::Contact>,
+    /// Waiting for WhatsApp to open the chat.
+    busy: bool,
+    error: Option<String>,
+}
+
+/// A GIF as one sprite sheet (its frames in a grid), drawn a frame at a time
+/// by cropping. One image rather than one per frame, because iced evicts
+/// images that weren't drawn last frame and re-decodes them on a worker,
+/// which blanks a frame-per-image GIF between frames (it flashes).
+struct Animation {
+    sheet: iced::widget::image::Handle,
+    /// One frame's size.
+    frame: (u32, u32),
+    cols: u32,
+    count: u32,
+    delay_ms: u64,
+}
+
+/// The voice note playing (or paused) in Mesh.
+struct Player {
+    /// Its media key (`wa-file:<id>`).
+    key: String,
+    /// Where it's paused, in samples of the original (while `out` is `None`).
+    position: usize,
+    out: Option<Playing>,
+    /// Waiting for WhatsApp to decode it (or for it to be sped up).
+    loading: bool,
+}
+
+/// A voice note coming out of the speaker.
+struct Playing {
+    _stream: mesh_core::PlaybackHandle,
+    /// Samples still to play.
+    left: Arc<std::sync::Mutex<std::collections::VecDeque<i16>>>,
+    /// How many were queued, starting `from` samples into the original, at `speed`.
+    queued: usize,
+    from: usize,
+    speed: f32,
+}
+
+impl Player {
+    /// How far in it is, in samples of the original.
+    fn position(&self) -> usize {
+        match &self.out {
+            Some(p) => {
+                let played = p.queued.saturating_sub(p.left.lock().map(|l| l.len()).unwrap_or(0));
+                p.from + (played as f32 * p.speed) as usize
+            }
+            None => self.position,
+        }
+    }
+}
+
 struct Session {
     client: Arc<MeshClient>,
     rooms: Vec<RoomSummary>,
@@ -166,6 +225,34 @@ struct Session {
     pending_attachment: Option<Attachment>,
     /// A file send is in flight (so the send button waits).
     sending_attachment: bool,
+    /// The message under the mouse (its web id), for the action bar.
+    hovered: Option<String>,
+    /// The message whose quick-reaction strip is open.
+    reacting: Option<String>,
+    /// The message the next send replies to: (web id, quote).
+    replying: Option<(String, mesh_core::Quote)>,
+    /// The forward picker, while open: (message web id, chat filter).
+    forwarding: Option<(String, String)>,
+    /// Playing GIFs' frames, by media key (their first frame is in `images`).
+    animations: HashMap<String, Animation>,
+    /// The GIF clock, advanced by `MediaTick`.
+    anim_ms: u64,
+    /// The full-screen image: (shown media key, bigger copy's key).
+    lightbox: Option<(String, Option<String>)>,
+    /// Decoded voice notes (48 kHz mono), by media key.
+    voice_pcm: HashMap<String, Arc<Vec<i16>>>,
+    /// The voice note playing (or paused) in Mesh.
+    player: Option<Player>,
+    /// Voice note speed: 1, 1.5 or 2.
+    voice_speed: f32,
+    /// The new WhatsApp chat picker, while open.
+    new_chat: Option<NewChat>,
+    /// Archived WhatsApp chats are listed (under Home).
+    show_archived: bool,
+    /// The WhatsApp chat whose Delete is waiting for a yes.
+    confirm_delete: Option<String>,
+    /// The WhatsApp chat being deleted (closed once it's gone).
+    deleting: Option<String>,
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
     web_chat: Option<WebChat>,
@@ -185,6 +272,8 @@ struct Session {
 
 /// Text input id of the jump palette, to focus it on open.
 const JUMP_INPUT: &str = "jump";
+const FORWARD_INPUT: &str = "forward";
+const NEW_CHAT_INPUT: &str = "new-chat";
 
 /// Text input id of the message composer, to refocus after picking an emoji.
 const COMPOSER_INPUT: &str = "composer";
@@ -279,6 +368,20 @@ impl Session {
             emoji_open: false,
             pending_attachment: None,
             sending_attachment: false,
+            hovered: None,
+            reacting: None,
+            replying: None,
+            forwarding: None,
+            animations: HashMap::new(),
+            anim_ms: 0,
+            lightbox: None,
+            voice_pcm: HashMap::new(),
+            player: None,
+            voice_speed: 1.0,
+            new_chat: None,
+            show_archived: false,
+            confirm_delete: None,
+            deleting: None,
             web_chat: None,
             jump: None,
             typing: HashMap::new(),
@@ -354,17 +457,18 @@ impl Clients<'_> {
             Network::Matrix => None,
         };
     }
-    fn send(&self, chat: &WebChat, text: &str) -> bool {
+    /// `reply_to` (a web message id) quotes that message; WhatsApp only.
+    fn send(&self, chat: &WebChat, text: &str, reply_to: Option<&str>) -> bool {
         match chat.network {
             Network::Discord => self.discord.map(|e| e.send_message(&chat.id, text)).is_some(),
-            Network::WhatsApp => self.whatsapp.map(|e| e.send_message(&chat.id, text)).is_some(),
+            Network::WhatsApp => self.whatsapp.map(|e| e.send_message(&chat.id, text, reply_to)).is_some(),
             Network::Matrix => false,
         }
     }
     /// WhatsApp's media (message photos, its profile picture CDN) goes
     /// through its own tab; everything else through Discord's.
     fn fetch_media(&self, url: &str) {
-        if url.starts_with("wa-msg:") || url.contains(".whatsapp.net/") {
+        if url.starts_with("wa-") || url.contains(".whatsapp.net/") {
             self.whatsapp.map(|e| e.fetch_media(url));
         } else {
             self.discord.map(|e| e.fetch_media(url));
@@ -393,7 +497,10 @@ fn whatsapp_timeline(messages: whatsapp::Messages) -> Vec<TimelineMessage> {
             kind,
             reactions: Vec::new(),
             timestamp_ms: m.timestamp_ms,
+            web_id: Some(m.id.clone()),
+            reply_to: None,
         };
+        let first = timeline.len();
         if m.system {
             timeline.push(row(format!("{} {}", m.author, m.content), MessageKind::System));
             continue;
@@ -404,13 +511,54 @@ fn whatsapp_timeline(messages: whatsapp::Messages) -> Vec<TimelineMessage> {
                 let scale = |v: Option<u64>| v.map(|v| v * 160 / image.width.unwrap_or(160).max(1));
                 (Some(160), scale(image.height), "sticker")
             } else {
-                (image.width, image.height, "photo")
+                (image.width, image.height, if image.gif { "GIF" } else { "photo" })
             };
-            let info = mesh_core::ImageInfo { media: MediaRef::web(whatsapp::image_url(&m.id)), width, height, size: None };
+            // A GIF plays from its frames; a photo has a bigger copy for full screen.
+            let (media, full) = if image.gif {
+                (whatsapp::gif_url(&m.id), None)
+            } else {
+                (whatsapp::image_url(&m.id), (!image.sticker).then(|| MediaRef::web(whatsapp::big_url(&m.id))))
+            };
+            let info = mesh_core::ImageInfo { media: MediaRef::web(media), width, height, size: None, full };
             timeline.push(row(label.to_string(), MessageKind::Image(info)));
+        }
+        if let Some(f) = &m.file {
+            let info = mesh_core::FileInfo {
+                media: MediaRef::web(whatsapp::file_url(&m.id)),
+                name: f.name.clone(),
+                kind: f.kind.clone(),
+                size: f.size,
+                duration: f.duration,
+                waveform: f.waveform.clone(),
+                // Filled into `images` from the message as it arrives.
+                thumbnail: f.thumb.as_ref().map(|_| mesh_core::ImageInfo {
+                    media: MediaRef::web(format!("wa-thumb:{}", m.id)),
+                    width: f.width,
+                    height: f.height,
+                    size: None,
+                    full: None,
+                }),
+            };
+            timeline.push(row(f.name.clone(), MessageKind::File(info)));
         }
         if !m.content.is_empty() {
             timeline.push(row(m.content.clone(), MessageKind::Text));
+        }
+        // A message can take several rows (photo, then caption): the quote
+        // goes above the first, the reactions under the last.
+        if let Some(q) = &m.quote
+            && let Some(row) = timeline.get_mut(first)
+        {
+            row.reply_to = Some(mesh_core::Quote { author: q.author.clone(), text: q.text.clone() });
+        }
+        if timeline.len() > first
+            && let Some(row) = timeline.last_mut()
+        {
+            row.reactions = m
+                .reactions
+                .iter()
+                .map(|r| mesh_core::Reaction { key: r.key.clone(), count: r.count as usize, mine: None, by_me: r.mine })
+                .collect();
         }
     }
     timeline
@@ -438,23 +586,47 @@ fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
             kind,
             reactions: Vec::new(),
             timestamp_ms: m.timestamp_ms,
+            web_id: None,
+            reply_to: None,
         };
-        let mut body = if m.system { format!("{} {}", m.author, m.content) } else { m.content.clone() };
-        let (images, files): (Vec<_>, Vec<_>) = m.attachments.iter().partition(|a| a.preview.is_some());
-        for a in files {
-            body.push_str(&format!("\n{}: {}", a.filename, a.url));
-        }
+        let body = if m.system { format!("{} {}", m.author, m.content) } else { m.content.clone() };
         let body = body.trim().to_string();
-        if !body.is_empty() || images.is_empty() {
+        let (images, files): (Vec<_>, Vec<_>) = m.attachments.iter().partition(|a| a.preview.is_some());
+        if !body.is_empty() || m.attachments.is_empty() {
             timeline.push(row(body, if m.system { MessageKind::System } else { MessageKind::Text }));
+        }
+        // Videos, audio, documents: a card that opens the CDN URL in the browser.
+        for a in files {
+            let info = mesh_core::FileInfo {
+                media: MediaRef::web(a.url.clone()),
+                name: a.filename.clone(),
+                kind: file_kind(&a.filename).to_string(),
+                size: a.size,
+                duration: None,
+                waveform: Vec::new(),
+                thumbnail: None,
+            };
+            timeline.push(row(a.filename.clone(), MessageKind::File(info)));
         }
         for a in images {
             let Some(preview) = a.preview.clone() else { continue };
-            let info = mesh_core::ImageInfo { media: MediaRef::web(preview), width: a.width, height: a.height, size: a.size };
+            let full = Some(MediaRef::web(a.url.clone()));
+            let info = mesh_core::ImageInfo { media: MediaRef::web(preview), width: a.width, height: a.height, size: a.size, full };
             timeline.push(row(a.filename.clone(), MessageKind::Image(info)));
         }
     }
     timeline
+}
+
+/// A label for an attachment, from its extension.
+fn file_kind(name: &str) -> &'static str {
+    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).as_deref() {
+        Some("mp4" | "mov" | "mkv" | "webm" | "avi") => "Video",
+        Some("mp3" | "ogg" | "opus" | "wav" | "m4a" | "flac") => "Audio",
+        Some("pdf") => "PDF",
+        Some("zip" | "rar" | "7z" | "gz") => "Archive",
+        _ => "File",
+    }
 }
 
 /// A picture a hidden client fetched: into whichever cache is waiting for it.
@@ -483,11 +655,126 @@ fn load_snapshot_media(session: &mut Session, snapshot: &mesh_discord::Snapshot,
         .chain(snapshot.dms.iter().filter_map(|d| d.avatar.as_ref()))
         .chain(members.chain(&snapshot.voice.members).filter_map(|m| m.avatar.as_ref()));
     for url in urls {
-        if !session.avatars.contains_key(url) {
-            session.avatars.insert(url.clone(), None);
+        if wants(&mut session.avatars, cache::Kind::Avatar, url) {
             engine.fetch_media(url);
         }
     }
+}
+
+/// Plays a decoded voice note from `from` (samples of the original) at the
+/// chosen speed on the chosen speaker, replacing whatever was playing. A
+/// speed it hasn't been stretched to yet is worked out off the UI thread
+/// first (`VoiceStretched` then plays it).
+fn play_voice(session: &mut Session, key: String, from: usize) -> Task<Message> {
+    let Some(pcm) = session.voice_pcm.get(&key).cloned() else {
+        return Task::none();
+    };
+    session.player = None; // stops the old stream first
+    let speed = session.voice_speed;
+    let from = from.min(pcm.len());
+    let source = if speed == 1.0 {
+        pcm
+    } else if let Some(fast) = session.voice_pcm.get(&stretched_key(&key, speed)) {
+        fast.clone()
+    } else {
+        session.player = Some(Player { key: key.clone(), position: from, out: None, loading: true });
+        return Task::perform(async move { Arc::new(mesh_core::time_stretch(&pcm, speed)) }, move |samples| {
+            Message::VoiceStretched { key: key.clone(), speed, samples, from }
+        });
+    };
+    let start = ((from as f32 / speed) as usize).min(source.len());
+    let device = (session.selected_output != DEFAULT_DEVICE).then(|| session.selected_output.clone());
+    match mesh_core::start_playback(device) {
+        Ok((stream, left)) => {
+            if let Ok(mut left) = left.lock() {
+                left.extend(&source[start..]);
+            }
+            let playing = Playing { _stream: stream, left, queued: source.len() - start, from, speed };
+            session.player = Some(Player { key, position: from, out: Some(playing), loading: false });
+        }
+        Err(err) => session.status = Some(format!("Couldn't play it: {err}")),
+    }
+    Task::none()
+}
+
+/// Where a voice note sped up to `speed` is kept in `voice_pcm`.
+fn stretched_key(key: &str, speed: f32) -> String {
+    format!("{key}@{speed}")
+}
+
+/// How often `MediaTick` fires (a GIF frame is ~83 ms).
+const MEDIA_TICK_MS: u64 = 80;
+
+/// Shows a GIF: its first frame as the still in `images`, all of them in
+/// `animations`.
+fn show_frames(
+    images: &mut HashMap<String, Option<iced::widget::image::Handle>>,
+    animations: &mut HashMap<String, Animation>,
+    key: &str,
+    delay_ms: u64,
+    frames: Vec<Vec<u8>>,
+) {
+    let decoded: Vec<image::RgbaImage> =
+        frames.iter().filter_map(|f| image::load_from_memory(f).ok().map(|i| i.to_rgba8())).collect();
+    let (Some(first), Some(still)) = (decoded.first(), frames.into_iter().next()) else {
+        return;
+    };
+    let (w, h) = first.dimensions();
+    let count = decoded.len() as u32;
+    let cols = (count as f32).sqrt().ceil() as u32;
+    let mut sheet = image::RgbaImage::new(w * cols, h * count.div_ceil(cols));
+    for (i, frame) in (0..).zip(&decoded) {
+        image::imageops::replace(&mut sheet, frame, i64::from(i % cols * w), i64::from(i / cols * h));
+    }
+    let sheet = iced::widget::image::Handle::from_rgba(sheet.width(), sheet.height(), sheet.into_raw());
+    images.insert(key.to_string(), Some(iced::widget::image::Handle::from_bytes(still)));
+    animations.insert(key.to_string(), Animation { sheet, frame: (w, h), cols, count, delay_ms: delay_ms.max(20) });
+}
+
+/// GIF frames for the disk cache: the delay, then each frame length-prefixed.
+fn pack_frames(delay_ms: u64, frames: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = (delay_ms as u32).to_le_bytes().to_vec();
+    for frame in frames {
+        out.extend((frame.len() as u32).to_le_bytes());
+        out.extend(frame);
+    }
+    out
+}
+
+fn unpack_frames(bytes: &[u8]) -> Option<(u64, Vec<Vec<u8>>)> {
+    let word = |b: &[u8]| b.get(..4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) as usize);
+    let delay = word(bytes)? as u64;
+    let (mut rest, mut frames) = (&bytes[4..], Vec::new());
+    while !rest.is_empty() {
+        let len = word(rest)?;
+        frames.push(rest.get(4..4 + len)?.to_vec());
+        rest = &rest[4 + len..];
+    }
+    (!frames.is_empty()).then_some((delay, frames))
+}
+
+/// The image to draw for `key`: a GIF's current frame (cropped out of its
+/// sprite sheet), else the downloaded picture.
+fn drawn_image(session: &Session, key: &str) -> Option<iced::widget::Image<iced::widget::image::Handle>> {
+    if let Some(anim) = session.animations.get(key) {
+        let i = (session.anim_ms / anim.delay_ms) as u32 % anim.count;
+        let (w, h) = anim.frame;
+        let region = iced::Rectangle { x: i % anim.cols * w, y: i / anim.cols * h, width: w, height: h };
+        return Some(iced::widget::image(anim.sheet.clone()).crop(region));
+    }
+    session.images.get(key)?.as_ref().map(|handle| iced::widget::image(handle.clone()))
+}
+
+/// Whether `key` still needs downloading into `map`: false when it's there
+/// already or was on disk (loaded now); otherwise it's marked loading.
+fn wants(map: &mut HashMap<String, Option<iced::widget::image::Handle>>, kind: cache::Kind, key: &str) -> bool {
+    if map.contains_key(key) {
+        return false;
+    }
+    let cached = cache::get(kind, key).map(iced::widget::image::Handle::from_bytes);
+    let missing = cached.is_none();
+    map.insert(key.to_string(), cached);
+    missing
 }
 
 /// A downloaded Discord picture (from `load_snapshot_media`), if there is one.
@@ -500,17 +787,26 @@ fn web_picture<'a>(session: &'a Session, url: Option<&str>) -> Option<&'a iced::
 fn load_web_media(session: &mut Session, clients: &Clients) {
     for message in &session.timeline {
         if let Some(url) = message.sender_avatar.as_ref().and_then(MediaRef::web_url)
-            && !session.avatars.contains_key(url)
+            && wants(&mut session.avatars, cache::Kind::Avatar, url)
         {
-            session.avatars.insert(url.to_string(), None);
             clients.fetch_media(url);
         }
         if let MessageKind::Image(info) = &message.kind
             && let Some(url) = info.media.web_url()
-            && !session.images.contains_key(url)
         {
-            session.images.insert(url.to_string(), None);
-            clients.fetch_media(url);
+            if url.starts_with("wa-gif:") {
+                if !session.images.contains_key(url) {
+                    match cache::get(cache::Kind::Media, url).and_then(|b| unpack_frames(&b)) {
+                        Some((delay, frames)) => show_frames(&mut session.images, &mut session.animations, url, delay, frames),
+                        None => {
+                            session.images.insert(url.to_string(), None);
+                            clients.fetch_media(url);
+                        }
+                    }
+                }
+            } else if wants(&mut session.images, cache::Kind::Media, url) {
+                clients.fetch_media(url);
+            }
         }
     }
 }
@@ -648,6 +944,51 @@ enum Message {
     WindowFocused(bool),
     OpenJoinServer,
     JoinServerLink(String),
+    /// Open a link from a message in the default browser.
+    OpenUrl(String),
+    /// The mouse entered / left a message (by web id).
+    HoverMessage(String),
+    UnhoverMessage(String),
+    /// Open or close a message's quick-reaction strip.
+    ToggleReactPicker(String),
+    /// React to a web message; "" takes ours back.
+    React { id: String, emoji: String },
+    /// Reply to a web message with the next send.
+    ReplyTo(String, mesh_core::Quote),
+    CancelReply,
+    /// Play or pause a voice note (by media key).
+    VoiceToggle(String),
+    /// Play a voice note from this far in (0–1).
+    VoiceSeek(String, f32),
+    /// Cycle voice note speed: 1× → 1.5× → 2×.
+    VoiceSpeed,
+    /// A voice note sped up (off the UI thread), ready to play from `from`.
+    VoiceStretched { key: String, speed: f32, samples: Arc<Vec<i16>>, from: usize },
+    /// Advances GIFs and the voice player's progress.
+    MediaTick,
+    /// Show an image full screen: (its media key, a bigger copy's key).
+    OpenImage(String, Option<String>),
+    CloseLightbox,
+    /// Open the new WhatsApp chat picker.
+    NewChatOpen,
+    NewChatQuery(String),
+    /// Open the chat with this contact id or phone number.
+    NewChatStart(String),
+    /// Show or hide archived WhatsApp chats.
+    ToggleArchived,
+    /// Archive (true) or unarchive a WhatsApp chat.
+    WaArchive(String, bool),
+    /// Ask before deleting a WhatsApp chat, then do or don't.
+    WaDeleteAsk(String),
+    WaDeleteConfirm,
+    WaDeleteCancel,
+    /// Open the forward picker for a web message.
+    ForwardStart(String),
+    ForwardQuery(String),
+    ForwardTo(String),
+    /// Download a message attachment (by its media key) and open it in the
+    /// OS's default app.
+    OpenMedia(String),
     /// Accept the pasted invite through the hidden Discord client.
     JoinServerSubmit,
     DensityChosen(theme::Density),
@@ -781,10 +1122,9 @@ fn load_avatars(session: &mut Session, media: impl IntoIterator<Item = MediaRef>
     for media in media {
         let key = media.key();
         // Web media (Discord) comes through the hidden client instead.
-        if session.avatars.contains_key(&key) || media.web_url().is_some() {
+        if media.web_url().is_some() || !wants(&mut session.avatars, cache::Kind::Avatar, &key) {
             continue;
         }
-        session.avatars.insert(key.clone(), None);
         let client = session.client.clone();
         tasks.push(Task::perform(
             async move { client.avatar_thumbnail(&media).await.map_err(|e| e.to_string()) },
@@ -807,10 +1147,9 @@ fn load_images(session: &mut Session) -> Task<Message> {
             continue;
         };
         let key = info.media.key();
-        if session.images.contains_key(&key) || info.media.web_url().is_some() {
+        if info.media.web_url().is_some() || !wants(&mut session.images, cache::Kind::Media, &key) {
             continue;
         }
-        session.images.insert(key.clone(), None);
         let (client, media) = (session.client.clone(), info.media.clone());
         tasks.push(Task::perform(
             async move { client.media(&media).await.map_err(|e| e.to_string()) },
@@ -980,6 +1319,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 match result {
                     Ok(bytes) => {
+                        cache::put(cache::Kind::Avatar, &key, &bytes);
                         session
                             .avatars
                             .insert(key, Some(iced::widget::image::Handle::from_bytes(bytes)));
@@ -994,6 +1334,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 match result {
                     Ok(bytes) => {
+                        cache::put(cache::Kind::Media, &key, &bytes);
                         session
                             .images
                             .insert(key, Some(iced::widget::image::Handle::from_bytes(bytes)));
@@ -1268,8 +1609,10 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             // A web chat sends through its hidden client; the echo comes back
             // with its messages.
             if let Some(chat) = &session.web_chat {
-                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &session.message_draft) {
+                let reply_to = session.replying.as_ref().map(|(id, _)| id.as_str());
+                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &session.message_draft, reply_to) {
                     session.message_draft.clear();
+                    session.replying = None;
                 } else {
                     session.status = Some("That chat's client isn't running, so this can't be sent.".to_string());
                 }
@@ -1511,9 +1854,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     if let Screen::LoggedIn(session) = &mut state.screen
                         && let Some(engine) = &state.whatsapp
                     {
-                        for url in snapshot.chats.iter().filter_map(|c| c.avatar.as_ref()) {
-                            if !session.avatars.contains_key(url) {
-                                session.avatars.insert(url.clone(), None);
+                        for url in snapshot.chats.iter().chain(&snapshot.archived).filter_map(|c| c.avatar.as_ref()) {
+                            if wants(&mut session.avatars, cache::Kind::Avatar, url) {
                                 engine.fetch_media(url);
                             }
                         }
@@ -1524,6 +1866,14 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     if let Screen::LoggedIn(session) = &mut state.screen
                         && session.web_chat.as_ref().is_some_and(|c| c.network == Network::WhatsApp && c.id == messages.chat_id)
                     {
+                        for m in &messages.messages {
+                            let key = format!("wa-thumb:{}", m.id);
+                            if !session.images.contains_key(&key)
+                                && let Some(jpeg) = m.file.as_ref().and_then(whatsapp::FileMeta::thumbnail)
+                            {
+                                session.images.insert(key, Some(iced::widget::image::Handle::from_bytes(jpeg)));
+                            }
+                        }
                         session.timeline = whatsapp_timeline(messages);
                         load_web_media(session, &Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() });
                     }
@@ -1539,6 +1889,110 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 whatsapp::Event::Sent { result, .. } => return update(state, Message::AttachmentSent(result)),
+                whatsapp::Event::File { id, filename, bytes } => {
+                    // Kept for the day, so opening it again skips the download.
+                    let outcome = bytes.and_then(|data| {
+                        let path = cache::put_file(&whatsapp::file_url(&id), &safe_filename(&filename), &data)
+                            .map_err(|e| e.to_string())?;
+                        open_url(&path.to_string_lossy()).map_err(|e| e.to_string())
+                    });
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        session.status = match outcome {
+                            Ok(()) => None,
+                            Err(err) => Some(format!("Couldn't open that: {err}")),
+                        };
+                    }
+                }
+                whatsapp::Event::Frames { url, delay_ms, frames } => {
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        match frames {
+                            Ok(frames) if !frames.is_empty() => {
+                                cache::put(cache::Kind::Media, &url, &pack_frames(delay_ms, &frames));
+                                show_frames(&mut session.images, &mut session.animations, &url, delay_ms, frames);
+                            }
+                            other => {
+                                // Out of the cache so the next timeline load retries.
+                                tracing::warn!("gif {url}: {:?}", other.err());
+                                session.images.remove(&url);
+                            }
+                        }
+                    }
+                }
+                whatsapp::Event::Pcm { id, samples } => {
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        let key = whatsapp::file_url(&id);
+                        let waiting = session.player.as_ref().is_some_and(|pl| pl.key == key && pl.loading);
+                        match samples {
+                            Ok(samples) => {
+                                session.voice_pcm.insert(key.clone(), Arc::new(samples));
+                                if waiting {
+                                    return play_voice(session, key, 0);
+                                }
+                            }
+                            Err(err) => {
+                                session.status = Some(format!("Couldn't play that voice note: {err}"));
+                                if waiting {
+                                    session.player = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                whatsapp::Event::Contacts { query, contacts } => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && let Some(picker) = session.new_chat.as_mut().filter(|p| p.query == query)
+                    {
+                        picker.contacts = contacts;
+                    }
+                }
+                whatsapp::Event::ChatStarted(result) => {
+                    let Screen::LoggedIn(session) = &mut state.screen else {
+                        return Task::none();
+                    };
+                    match result {
+                        Ok(chat) => {
+                            session.new_chat = None;
+                            let open = WebChat { network: Network::WhatsApp, id: chat.id, name: chat.name, dm: !chat.group };
+                            return update(state, Message::WebChatSelected(open));
+                        }
+                        Err(err) => {
+                            if let Some(picker) = &mut session.new_chat {
+                                picker.busy = false;
+                                picker.error = Some(err);
+                            }
+                        }
+                    }
+                }
+                whatsapp::Event::ChatAction { chat_id, result } => {
+                    let Screen::LoggedIn(session) = &mut state.screen else {
+                        return Task::none();
+                    };
+                    let deleted = session.deleting.as_ref() == Some(&chat_id);
+                    if deleted {
+                        session.deleting = None;
+                    }
+                    session.status = match result {
+                        Ok(()) if deleted => Some("Chat deleted.".to_string()),
+                        Ok(()) => None,
+                        Err(err) => Some(format!("Couldn't do that: {err}")),
+                    };
+                    // A deleted chat that's open closes.
+                    if deleted && session.status.as_deref() == Some("Chat deleted.") && session.web_chat.as_ref().is_some_and(|c| c.id == chat_id) {
+                        if let Some(engine) = &state.whatsapp {
+                            engine.close_chat();
+                        }
+                        session.web_chat = None;
+                        session.timeline.clear();
+                    }
+                }
+                whatsapp::Event::Forwarded(result) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        session.status = Some(match result {
+                            Ok(()) => "Forwarded.".to_string(),
+                            Err(err) => format!("Couldn't forward: {err}"),
+                        });
+                    }
+                }
                 whatsapp::Event::Disconnected => {
                     state.whatsapp = None;
                     state.whatsapp_state = None;
@@ -1841,12 +2295,24 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::Escape => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                if session.add_friend.is_some() {
+                if session.lightbox.is_some() {
+                    session.lightbox = None;
+                } else if session.new_chat.is_some() {
+                    session.new_chat = None;
+                } else if session.confirm_delete.is_some() {
+                    session.confirm_delete = None;
+                } else if session.add_friend.is_some() {
                     session.add_friend = None;
                 } else if session.join_server.is_some() {
                     session.join_server = None;
                 } else if session.jump.is_some() {
                     session.jump = None;
+                } else if session.forwarding.is_some() {
+                    session.forwarding = None;
+                } else if session.reacting.is_some() {
+                    session.reacting = None;
+                } else if session.replying.is_some() {
+                    session.replying = None;
                 } else if session.emoji_open {
                     session.emoji_open = false;
                 } else {
@@ -1920,6 +2386,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             session.selected_room = None;
             session.web_chat = Some(channel);
+            (session.hovered, session.reacting, session.replying) = (None, None, None);
+            session.confirm_delete = None;
             session.focused = Pane::Chat;
             session.timeline.clear();
             session.members.clear();
@@ -2019,6 +2487,272 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 session.status = Some("theme.toml copied to the clipboard.".to_string());
             }
             iced::clipboard::write(toml)
+        }
+        Message::OpenUrl(url) => {
+            if let Err(err) = open_url(&url) {
+                tracing::warn!("open url {url}: {err}");
+            }
+            Task::none()
+        }
+        Message::HoverMessage(id) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.hovered = Some(id);
+            }
+            Task::none()
+        }
+        Message::UnhoverMessage(id) => {
+            // Only if it's still this one: entering the next can come first.
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && session.hovered.as_ref() == Some(&id)
+            {
+                session.hovered = None;
+            }
+            Task::none()
+        }
+        Message::ToggleReactPicker(id) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.reacting = if session.reacting.as_ref() == Some(&id) { None } else { Some(id) };
+            }
+            Task::none()
+        }
+        Message::React { id, emoji } => {
+            if let Some(engine) = &state.whatsapp {
+                engine.react(&id, &emoji);
+            }
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.reacting = None;
+            }
+            Task::none()
+        }
+        Message::ReplyTo(id, quote) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.replying = Some((id, quote));
+            }
+            focus_composer()
+        }
+        Message::CancelReply => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.replying = None;
+            }
+            Task::none()
+        }
+        Message::VoiceToggle(key) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            let total = session.voice_pcm.get(&key).map_or(0, |pcm| pcm.len());
+            if let Some(player) = session.player.as_mut().filter(|pl| pl.key == key) {
+                if player.loading {
+                    return Task::none();
+                }
+                if player.out.is_some() {
+                    // Pause: stop the stream, remember where.
+                    player.position = player.position();
+                    player.out = None;
+                    return Task::none();
+                }
+                let from = if player.position >= total { 0 } else { player.position };
+                return play_voice(session, key, from);
+            }
+            session.player = None;
+            if total > 0 {
+                return play_voice(session, key, 0);
+            } else if let Some(id) = key.strip_prefix("wa-file:")
+                && let Some(engine) = &state.whatsapp
+            {
+                engine.voice_pcm(id);
+                session.player = Some(Player { key, position: 0, out: None, loading: true });
+            }
+            Task::none()
+        }
+        Message::VoiceSeek(key, at) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            match session.voice_pcm.get(&key).map(|pcm| pcm.len()) {
+                Some(total) => play_voice(session, key, (total as f32 * at.clamp(0.0, 1.0)) as usize),
+                // Not decoded yet: start it from the top.
+                None => update(state, Message::VoiceToggle(key)),
+            }
+        }
+        Message::VoiceSpeed => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.voice_speed = match session.voice_speed {
+                s if s < 1.25 => 1.5,
+                s if s < 1.75 => 2.0,
+                _ => 1.0,
+            };
+            // Carry on from the same spot at the new speed.
+            match &session.player {
+                Some(pl) if pl.out.is_some() => {
+                    let (key, at) = (pl.key.clone(), pl.position());
+                    play_voice(session, key, at)
+                }
+                _ => Task::none(),
+            }
+        }
+        Message::VoiceStretched { key, speed, samples, from } => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.voice_pcm.insert(stretched_key(&key, speed), samples);
+            let waiting = session.player.as_ref().is_some_and(|pl| pl.key == key && pl.loading);
+            if waiting && session.voice_speed == speed {
+                return play_voice(session, key, from);
+            }
+            Task::none()
+        }
+        Message::MediaTick => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.anim_ms += MEDIA_TICK_MS;
+                // A finished voice note stops and rewinds.
+                if let Some(player) = &mut session.player
+                    && let Some(playing) = &player.out
+                    && playing.left.lock().map(|l| l.is_empty()).unwrap_or(true)
+                {
+                    player.out = None;
+                    player.position = 0;
+                }
+            }
+            Task::none()
+        }
+        Message::OpenImage(key, full) => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            if let Some(full) = &full
+                && wants(&mut session.images, cache::Kind::Media, full)
+            {
+                (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).fetch_media(full);
+            }
+            session.lightbox = Some((key, full));
+            Task::none()
+        }
+        Message::CloseLightbox => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.lightbox = None;
+            }
+            Task::none()
+        }
+        Message::NewChatOpen => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.new_chat = Some(NewChat::default());
+            }
+            iced::widget::operation::focus(iced::widget::Id::new(NEW_CHAT_INPUT))
+        }
+        Message::NewChatQuery(query) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(picker) = &mut session.new_chat
+            {
+                if let Some(engine) = &state.whatsapp {
+                    engine.search_contacts(&query);
+                }
+                picker.query = query;
+                picker.error = None;
+            }
+            Task::none()
+        }
+        Message::NewChatStart(who) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(picker) = &mut session.new_chat
+            {
+                match &state.whatsapp {
+                    Some(engine) => {
+                        engine.start_chat(&who);
+                        picker.busy = true;
+                    }
+                    None => picker.error = Some("WhatsApp isn't running.".to_string()),
+                }
+            }
+            Task::none()
+        }
+        Message::ToggleArchived => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.show_archived = !session.show_archived;
+            }
+            Task::none()
+        }
+        Message::WaArchive(chat_id, archive) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(engine) = &state.whatsapp
+            {
+                engine.set_archived(&chat_id, archive);
+                session.status = Some(if archive { "Archiving…" } else { "Unarchiving…" }.to_string());
+            }
+            Task::none()
+        }
+        Message::WaDeleteAsk(chat_id) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.confirm_delete = Some(chat_id);
+            }
+            Task::none()
+        }
+        Message::WaDeleteCancel => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.confirm_delete = None;
+            }
+            Task::none()
+        }
+        Message::WaDeleteConfirm => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(chat_id) = session.confirm_delete.take()
+                && let Some(engine) = &state.whatsapp
+            {
+                engine.delete_chat(&chat_id);
+                session.deleting = Some(chat_id);
+                session.status = Some("Deleting…".to_string());
+            }
+            Task::none()
+        }
+        Message::ForwardStart(id) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.forwarding = Some((id, String::new()));
+            }
+            iced::widget::operation::focus(iced::widget::Id::new(FORWARD_INPUT))
+        }
+        Message::ForwardQuery(query) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some((_, filter)) = &mut session.forwarding
+            {
+                *filter = query;
+            }
+            Task::none()
+        }
+        Message::ForwardTo(chat_id) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some((id, _)) = session.forwarding.take()
+            {
+                session.status = Some(match &state.whatsapp {
+                    Some(engine) => {
+                        engine.forward(&id, &chat_id);
+                        "Forwarding…".to_string()
+                    }
+                    None => "WhatsApp isn't running, so this can't be forwarded.".to_string(),
+                });
+            }
+            Task::none()
+        }
+        Message::OpenMedia(url) => {
+            // WhatsApp attachments ("wa-file:<id>") are encrypted: its hidden
+            // client decrypts them, then `Event::File` opens the file. Anything
+            // else (a Discord CDN URL) opens straight in the browser.
+            if let Some(path) = cache::file(&url) {
+                if let Err(err) = open_url(&path.to_string_lossy()) {
+                    tracing::warn!("open {}: {err}", path.display());
+                }
+            } else if let Some(id) = url.strip_prefix("wa-file:") {
+                if let Some(engine) = &state.whatsapp {
+                    engine.save_media(id);
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        session.status = Some("Opening…".to_string());
+                    }
+                }
+            } else if let Err(err) = open_url(&url) {
+                tracing::warn!("open media {url}: {err}");
+            }
+            Task::none()
         }
         Message::OpenAddFriend => {
             let Screen::LoggedIn(session) = &mut state.screen else {
@@ -2244,6 +2978,12 @@ fn subscription(state: &App) -> Subscription<Message> {
         } else {
             Subscription::none()
         },
+        // GIF frames and the voice player's progress, only while one is showing.
+        if media_moving(state) {
+            iced::time::every(std::time::Duration::from_millis(MEDIA_TICK_MS)).map(|_| Message::MediaTick)
+        } else {
+            Subscription::none()
+        },
         // Hot-reload the rice: an mtime poll is cheap and works everywhere.
         iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
         // Global shortcuts work even while an input has focus.
@@ -2256,6 +2996,18 @@ fn subscription(state: &App) -> Subscription<Message> {
             _ => None,
         }),
     ])
+}
+
+/// Whether something on screen animates: a loaded GIF in the chat or the
+/// full-screen view, or a voice note playing.
+fn media_moving(state: &App) -> bool {
+    let Screen::LoggedIn(session) = &state.screen else {
+        return false;
+    };
+    let gif = |key: &str| session.animations.contains_key(key);
+    session.player.as_ref().is_some_and(|pl| pl.out.is_some())
+        || session.lightbox.as_ref().is_some_and(|(key, _)| gif(key))
+        || session.timeline.iter().any(|m| matches!(&m.kind, MessageKind::Image(info) if gif(&info.media.key())))
 }
 
 /// A desktop notification, shown off the UI thread (the D-Bus / WinRT call
@@ -2443,12 +3195,18 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         let shell = column![top_bar(session, guild, engine, state.whatsapp.is_some(), p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
-        if let Some(dialog) = &session.add_friend {
+        if let Some((shown, full)) = &session.lightbox {
+            stack![shell, lightbox_view(session, shown, full.as_deref(), p)].into()
+        } else if let Some(dialog) = &session.add_friend {
             stack![shell, add_friend_view(session, dialog, p, l)].into()
         } else if let Some(dialog) = &session.join_server {
             stack![shell, join_server_view(dialog, state.discord.is_some(), p, l)].into()
         } else if session.jump.is_some() {
             stack![shell, jump_palette(session, p, l)].into()
+        } else if let Some(picker) = &session.new_chat {
+            stack![shell, new_chat_picker(picker, p, l)].into()
+        } else if let Some((_, query)) = &session.forwarding {
+            stack![shell, forward_picker(query, state.whatsapp_state.as_ref(), p, l)].into()
         } else {
             shell.into()
         }
@@ -2502,6 +3260,160 @@ fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
             background: Some(scrim.into()),
             ..container::Style::default()
         }),
+    )
+    .on_press(Message::Escape)
+    .into()
+}
+
+/// An image full screen: the bigger copy once it's in, the chat's meanwhile.
+/// Click anywhere or press Esc to close.
+fn lightbox_view<'a>(session: &'a Session, shown: &str, full: Option<&str>, p: &theme::Palette) -> Element<'a, Message> {
+    let big = full.and_then(|key| drawn_image(session, key));
+    let still_loading = full.is_some() && big.is_none();
+    let picture: Element<'a, Message> = match big.or_else(|| drawn_image(session, shown)) {
+        Some(image) => image
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .content_fit(iced::ContentFit::Contain)
+            .into(),
+        None => ui::mono("loading…", 12.0, p.text_muted()).into(),
+    };
+    let hint = if still_loading { "loading full size… · esc to close" } else { "esc to close" };
+    let scrim = theme::alpha(p.background(), 0.92);
+    mouse_area(
+        container(column![picture, ui::mono(hint, 11.0, p.text_muted())].spacing(8).align_x(iced::Alignment::Center))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(32)
+            .center(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(scrim.into()),
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::CloseLightbox)
+    .into()
+}
+
+/// Whether the new-chat input is a phone number rather than a name.
+fn looks_like_number(query: &str) -> bool {
+    let digits = query.chars().filter(char::is_ascii_digit).count();
+    digits >= 7 && query.trim().chars().all(|c| c.is_ascii_digit() || " +-()".contains(c))
+}
+
+/// Start a WhatsApp chat: search your contacts by name or number, or type a
+/// phone number to message someone who isn't one.
+fn new_chat_picker<'a>(picker: &'a NewChat, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let number = looks_like_number(&picker.query).then(|| picker.query.trim().to_string());
+    let first = number.clone().or_else(|| picker.contacts.first().map(|c| c.id.clone()));
+    let mut list = column![
+        text_input("new WhatsApp chat: a name or a phone number…", &picker.query)
+            .id(iced::widget::Id::new(NEW_CHAT_INPUT))
+            .on_input(Message::NewChatQuery)
+            .on_submit_maybe(first.filter(|_| !picker.busy).map(Message::NewChatStart))
+            .padding(10)
+            .size(14),
+    ]
+    .spacing(2);
+    if picker.busy {
+        list = list.push(container(ui::mono("opening…", 12.0, p.text_muted())).padding(8));
+    }
+    if let Some(error) = &picker.error {
+        list = list.push(container(ui::mono(error, 12.0, p.danger())).padding(8));
+    }
+    let mut first_row = true;
+    if let Some(number) = number {
+        let line = row![
+            ui::mono("+", 13.0, p.text_muted()),
+            ui::sans(format!("Message {number} on WhatsApp"), 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+            ui::mono("Enter", 11.0, p.text_muted()),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        list = list.push(ui::row_button(line, Message::NewChatStart(number), true, p, l));
+        first_row = false;
+    }
+    for contact in &picker.contacts {
+        let mut line = row![
+            ui::mono("@", 13.0, p.text_muted()),
+            ui::sans(&contact.name, 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+            ui::mono(format!("+{}", contact.number), 11.0, p.text_muted()),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        if first_row {
+            line = line.push(ui::mono("Enter", 11.0, p.text_muted()));
+        }
+        list = list.push(ui::row_button(line, Message::NewChatStart(contact.id.clone()), first_row, p, l));
+        first_row = false;
+    }
+    if picker.query.trim().is_empty() {
+        list = list.push(container(ui::mono("type a contact's name, or a number like 082 123 4567", 12.0, p.text_muted())).padding(8));
+    } else if first_row && !picker.busy && picker.error.is_none() {
+        list = list.push(container(ui::mono("no contact by that name", 12.0, p.text_muted())).padding(8));
+    }
+    let scrim = theme::alpha(p.background(), 0.6);
+    mouse_area(
+        container(iced::widget::opaque(ui::pane(list.padding(10), true, p, l, false).max_width(560)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .padding(iced::Padding { top: 96.0, ..iced::Padding::ZERO })
+            .style(move |_| container::Style {
+                background: Some(scrim.into()),
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::Escape)
+    .into()
+}
+
+/// Pick a WhatsApp chat to forward a message to; type to filter.
+fn forward_picker<'a>(
+    query: &'a str,
+    snapshot: Option<&'a whatsapp::Snapshot>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let needle = query.to_lowercase();
+    let matches: Vec<&whatsapp::Chat> = snapshot
+        .map(|s| s.chats.iter().filter(|c| c.name.to_lowercase().contains(&needle)).take(12).collect())
+        .unwrap_or_default();
+    let mut list = column![
+        text_input("forward to…", query)
+            .id(iced::widget::Id::new(FORWARD_INPUT))
+            .on_input(Message::ForwardQuery)
+            .on_submit_maybe(matches.first().map(|c| Message::ForwardTo(c.id.clone())))
+            .padding(10)
+            .size(14),
+    ]
+    .spacing(2);
+    for (i, chat) in matches.iter().enumerate() {
+        let mut line = row![
+            ui::mono(if chat.group { "#" } else { "@" }, 13.0, p.text_muted()),
+            ui::sans(&chat.name, 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center);
+        if i == 0 {
+            line = line.push(ui::mono("Enter", 11.0, p.text_muted()));
+        }
+        list = list.push(ui::row_button(line, Message::ForwardTo(chat.id.clone()), i == 0, p, l));
+    }
+    if matches.is_empty() {
+        list = list.push(container(ui::mono("no match", 12.0, p.text_muted())).padding(8));
+    }
+    let scrim = theme::alpha(p.background(), 0.6);
+    mouse_area(
+        container(iced::widget::opaque(ui::pane(list.padding(10), true, p, l, false).max_width(560)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .padding(iced::Padding { top: 96.0, ..iced::Padding::ZERO })
+            .style(move |_| container::Style {
+                background: Some(scrim.into()),
+                ..container::Style::default()
+            }),
     )
     .on_press(Message::Escape)
     .into()
@@ -3050,6 +3962,13 @@ fn channel_pane<'a>(
             .width(Length::Fill),
     ]
     .align_y(iced::Alignment::Center);
+    if whatsapp.is_some() && !group.is_some_and(|g| g.space.is_some()) {
+        title = title.push(iced::widget::tooltip(
+            ui::icon_button(ui::Icon::Plus, Some(Message::NewChatOpen), false, p, l),
+            container(text("New WhatsApp chat").size(12).color(p.text())).padding([4, 8]),
+            iced::widget::tooltip::Position::Bottom,
+        ));
+    }
     if session.discord_voice.is_some() {
         title = title.push(
             iced::widget::tooltip(
@@ -3139,6 +4058,19 @@ fn channel_pane<'a>(
         list = list.push(ui::section(label, p));
         for (_, row) in rows {
             list = list.push(row);
+        }
+    }
+
+    // Archived WhatsApp chats: one row that opens them, like WhatsApp's.
+    if let Some(w) = whatsapp.filter(|w| shows(Network::WhatsApp) && !w.archived.is_empty()) {
+        let arrow = if session.show_archived { "▾" } else { "▸" };
+        let line = row![ui::mono(format!("{arrow} archived ({})", w.archived.len()), 12.0, p.text_muted())];
+        list = list.push(ui::row_button(line, Message::ToggleArchived, false, p, l));
+        if session.show_archived {
+            for chat in &w.archived {
+                let open = WebChat { network: Network::WhatsApp, id: chat.id.clone(), name: chat.name.clone(), dm: !chat.group };
+                list = list.push(web_chat_row(session, open, chat.avatar.as_deref(), chat.unread > 0, chat.unread, p, l));
+            }
         }
     }
 
@@ -3481,6 +4413,22 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
+        if channel.network == Network::WhatsApp {
+            let flat = |label: &'static str, color: iced::Color, press: Message| {
+                button(text(label).size(12).color(color)).on_press(press).padding([4, 10]).style(flat_button_style(p))
+            };
+            if session.confirm_delete.as_deref() == Some(channel.id.as_str()) {
+                header = header
+                    .push(ui::mono("delete this chat?", 11.0, p.danger()))
+                    .push(flat("Delete", p.danger(), Message::WaDeleteConfirm))
+                    .push(flat("Cancel", p.text(), Message::WaDeleteCancel));
+            } else {
+                let archived = state.whatsapp_state.as_ref().is_some_and(|w| w.archived.iter().any(|c| c.id == channel.id));
+                header = header
+                    .push(flat(if archived { "Unarchive" } else { "Archive" }, p.text(), Message::WaArchive(channel.id.clone(), !archived)))
+                    .push(flat("Delete", p.text_muted(), Message::WaDeleteAsk(channel.id.clone())));
+            }
+        }
         // ponytail: WhatsApp calls aren't wired yet (design/WHATSAPP-NATIVE.md).
         if channel.dm && channel.network == Network::Discord {
             let in_call = state.discord_state.as_ref().and_then(|d| d.voice.channel_id.as_deref()) == Some(channel.id.as_str());
@@ -3659,6 +4607,28 @@ fn composer<'a>(
         }
         outer = outer.push(
             container(chip).padding([6, 10]).style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(radius).color(edge).width(1),
+                ..container::Style::default()
+            }),
+        );
+    }
+    if let Some((_, quote)) = &session.replying {
+        outer = outer.push(
+            container(
+                row![
+                    column![
+                        ui::mono(format!("replying to {}", quote.author), 11.0, p.accent()),
+                        ui::mono(quote.text.lines().next().unwrap_or_default(), 11.0, p.text_muted()),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    ui::icon_button(ui::Icon::Close, Some(Message::CancelReply), false, p, l),
+                ]
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([6, 10])
+            .style(move |_| container::Style {
                 background: Some(fill.into()),
                 border: iced::border::rounded(radius).color(edge).width(1),
                 ..container::Style::default()
@@ -3887,7 +4857,7 @@ fn timeline_view<'a>(
     me: Option<&OwnedUserId>,
     density: theme::Density,
     x: &theme::Extras,
-    p: &theme::Palette,
+    p: &'a theme::Palette,
 ) -> Element<'a, Message> {
     let tags = x.show_network_tags;
     let mut list = column![].spacing(if density == theme::Density::Cozy { 4 } else { 2 });
@@ -4013,10 +4983,14 @@ fn message_content<'a>(
     session: &'a Session,
     all_mono: bool,
     plain: bool,
-    p: &theme::Palette,
+    p: &'a theme::Palette,
 ) -> Element<'a, Message> {
     let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
     let mut col = column![].spacing(6).width(Length::Fill);
+
+    if let Some(quote) = &message.reply_to {
+        col = col.push(quote_block(quote, p));
+    }
 
     match &message.kind {
         MessageKind::Image(info) if plain => {
@@ -4025,6 +4999,15 @@ fn message_content<'a>(
         }
         MessageKind::Image(info) => {
             col = col.push(image_figure(&message.body, info, session, p));
+        }
+        MessageKind::File(info) if let Some(poster) = &info.thumbnail => {
+            col = col.push(video_figure(info, poster, session, p));
+        }
+        MessageKind::File(info) if info.kind == "Voice note" => {
+            col = col.push(voice_player(info, session, p));
+        }
+        MessageKind::File(info) => {
+            col = col.push(file_figure(info, p));
         }
         MessageKind::Undecryptable => {
             col = col.push(text(&message.body).size(13).color(p.warning()));
@@ -4047,12 +5030,23 @@ fn message_content<'a>(
         }
     }
 
-    if !message.reactions.is_empty()
-        && let Some(event_id) = &message.event_id
-    {
+    if !message.reactions.is_empty() {
         let mut pills = row![].spacing(6);
         for reaction in &message.reactions {
-            let mine = reaction.mine.is_some();
+            // Matrix toggles by event; WhatsApp sends the emoji (or "" to undo).
+            let press = match (&message.event_id, &message.web_id) {
+                (Some(event_id), _) => Some(Message::ToggleReaction {
+                    event_id: event_id.clone(),
+                    key: reaction.key.clone(),
+                    mine: reaction.mine.clone(),
+                }),
+                (None, Some(id)) => Some(Message::React {
+                    id: id.clone(),
+                    emoji: if reaction.by_me { String::new() } else { reaction.key.clone() },
+                }),
+                (None, None) => None,
+            };
+            let mine = reaction.by_me;
             let (fill, edge) = if mine {
                 (theme::mix(p.accent(), p.surface(), 0.85), p.accent())
             } else {
@@ -4061,11 +5055,7 @@ fn message_content<'a>(
             let fg = if mine { p.text_bright() } else { p.text() };
             pills = pills.push(
                 button(ui::mono(format!("{} {}", reaction.key, reaction.count), 11.0, fg))
-                    .on_press(Message::ToggleReaction {
-                        event_id: event_id.clone(),
-                        key: reaction.key.clone(),
-                        mine: reaction.mine.clone(),
-                    })
+                    .on_press_maybe(press)
                     .padding([3, 8])
                     .style(move |_, _| button::Style {
                         background: Some(fill.into()),
@@ -4076,7 +5066,105 @@ fn message_content<'a>(
         }
         col = col.push(pills);
     }
-    col.into()
+
+    // WhatsApp messages get an action bar on hover: react, reply, forward.
+    let Some(id) = message.web_id.as_deref().filter(|_| message.sender_network == Network::WhatsApp) else {
+        return col.into();
+    };
+    let picking = session.reacting.as_deref() == Some(id);
+    if picking {
+        col = col.push(quick_reactions(message, id, p));
+    }
+    let mut layers = stack![col];
+    if picking || session.hovered.as_deref() == Some(id) {
+        layers = layers.push(
+            container(message_actions(message, id, p))
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right),
+        );
+    }
+    mouse_area(layers)
+        .on_enter(Message::HoverMessage(id.to_string()))
+        .on_exit(Message::UnhoverMessage(id.to_string()))
+        .into()
+}
+
+/// The quoted message above a reply: its author and a line of its text.
+fn quote_block<'a>(quote: &'a mesh_core::Quote, p: &theme::Palette) -> Element<'a, Message> {
+    let (fill, edge) = (p.panel_dim(), theme::mix(p.accent(), p.border(), 0.5));
+    let line = quote.text.lines().next().unwrap_or_default();
+    container(
+        column![
+            ui::sans(&quote.author, 12.0, Weight::Semibold, p.accent()),
+            text(line).size(13).color(p.text_muted()),
+        ]
+        .spacing(2),
+    )
+    .padding([4, 10])
+    .max_width(520)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(6).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// What a reply to `message` quotes.
+fn quote_of(message: &TimelineMessage) -> mesh_core::Quote {
+    let text = match &message.kind {
+        MessageKind::Image(_) => "Photo".to_string(),
+        MessageKind::File(info) => info.kind.clone(),
+        _ => message.body.chars().take(200).collect(),
+    };
+    mesh_core::Quote { author: message.sender_name.clone(), text }
+}
+
+/// The hover bar on a WhatsApp message.
+fn message_actions<'a>(message: &TimelineMessage, id: &str, p: &'a theme::Palette) -> Element<'a, Message> {
+    let action = |glyph: &'static str, tip: &'static str, press: Message| {
+        iced::widget::tooltip(
+            button(text(glyph).size(15)).on_press(press).padding([2, 7]).style(flat_button_style(p)),
+            container(text(tip).size(12)).padding([4, 8]),
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let (fill, edge) = (p.surface(), p.border_ctrl());
+    container(
+        row![
+            action("🙂", "React", Message::ToggleReactPicker(id.to_string())),
+            action("↩", "Reply", Message::ReplyTo(id.to_string(), quote_of(message))),
+            action("↪", "Forward", Message::ForwardStart(id.to_string())),
+        ]
+        .spacing(2),
+    )
+    .padding(2)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// WhatsApp's quick reactions; picking the one you already used takes it back.
+const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+fn quick_reactions<'a>(message: &TimelineMessage, id: &str, p: &'a theme::Palette) -> Element<'a, Message> {
+    // WhatsApp reports ❤ without the emoji variation selector; compare without it.
+    let bare = |e: &str| e.trim_end_matches('\u{fe0f}').to_string();
+    let mine = message.reactions.iter().find(|r| r.by_me).map(|r| bare(&r.key));
+    let mut strip = row![].spacing(2);
+    for emoji in QUICK_REACTIONS {
+        let again = mine.as_deref() == Some(bare(emoji).as_str());
+        strip = strip.push(
+            button(text(emoji).size(18))
+                .on_press(Message::React { id: id.to_string(), emoji: if again { String::new() } else { emoji.to_string() } })
+                .padding([2, 6])
+                .style(flat_button_style(p)),
+        );
+    }
+    strip.into()
 }
 
 /// Splits a message into `(is_code, text)` parts at ``` fences; a fence's
@@ -4101,32 +5189,70 @@ fn split_fences(body: &str) -> Vec<(bool, &str)> {
         .collect()
 }
 
-/// Prose with `inline code` spans.
+/// Splits text into (is_link, slice) runs: `http(s)://…` tokens at a word
+/// boundary are links, everything else is plain. Trailing punctuation
+/// (`.`, `)`, `,`…) stays out of the link so "see https://x.com." works.
+fn link_segments(s: &str) -> Vec<(bool, &str)> {
+    let mut segs = Vec::new();
+    let (mut text_start, mut prev_ws) = (0usize, true);
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if prev_ws && (s[i..].starts_with("http://") || s[i..].starts_with("https://")) {
+            let rel = s[i..].find(char::is_whitespace).unwrap_or(s.len() - i);
+            let url = s[i..i + rel].trim_end_matches([',', '.', '!', '?', ')', ']', '}', '>', '"', '\'', ':', ';']);
+            let end = i + url.len();
+            if text_start < i {
+                segs.push((false, &s[text_start..i]));
+            }
+            segs.push((true, &s[i..end]));
+            text_start = end;
+            while chars.peek().is_some_and(|&(j, _)| j < end) {
+                chars.next();
+            }
+            prev_ws = false;
+            continue;
+        }
+        prev_ws = c.is_whitespace();
+    }
+    if text_start < s.len() {
+        segs.push((false, &s[text_start..]));
+    }
+    segs
+}
+
+/// Prose with `inline code` spans and clickable links.
 fn prose<'a>(body: &'a str, all_mono: bool, color: iced::Color, p: &theme::Palette) -> Element<'a, Message> {
     let font = if all_mono { ui::MONO } else { ui::SANS };
     let size = if all_mono { 12.0 } else { 14.0 };
-    if !body.contains('`') {
+    let has_link = body.contains("http://") || body.contains("https://");
+    if !body.contains('`') && !has_link {
         return text(body).font(font).size(size).color(color).into();
     }
-    let (code_fill, code_fg) = (p.surface_alt(), p.text_bright());
-    let spans: Vec<iced::widget::text::Span<'a, (), iced::Font>> = body
-        .split('`')
-        .enumerate()
-        .map(|(i, part)| {
-            let span = iced::widget::span(part).size(size);
-            if i % 2 == 1 {
-                span.font(ui::MONO)
+    let (code_fill, code_fg, link_color) = (p.surface_alt(), p.text_bright(), p.accent());
+    let mut spans: Vec<iced::widget::text::Span<'a, String, iced::Font>> = Vec::new();
+    for (i, part) in body.split('`').enumerate() {
+        if i % 2 == 1 {
+            spans.push(
+                iced::widget::span(part)
+                    .font(ui::MONO)
                     .size(12)
                     .color(code_fg)
                     .background(code_fill)
                     .border(iced::border::rounded(4))
-                    .padding([1, 5])
-            } else {
-                span.font(font).color(color)
+                    .padding([1, 5]),
+            );
+        } else {
+            for (is_link, seg) in link_segments(part) {
+                let span = iced::widget::span(seg).font(font).size(size);
+                spans.push(if is_link {
+                    span.color(link_color).underline(true).link(seg.to_string())
+                } else {
+                    span.color(color)
+                });
             }
-        })
-        .collect();
-    iced::widget::rich_text(spans).into()
+        }
+    }
+    iced::widget::rich_text(spans).on_link_click(Message::OpenUrl).into()
 }
 
 fn code_block<'a>(code: &'a str, p: &theme::Palette) -> Element<'a, Message> {
@@ -4158,12 +5284,12 @@ fn image_figure<'a>(
         }
         _ => (MAX_W, 220.0),
     };
-    let picture: Element<'_, Message> = match session.images.get(&info.media.key()) {
-        Some(Some(handle)) => iced::widget::image(handle.clone())
-            .width(w)
-            .height(h)
-            .content_fit(iced::ContentFit::Contain)
-            .into(),
+    let key = info.media.key();
+    let picture: Element<'_, Message> = match drawn_image(session, &key) {
+        Some(image) => mouse_area(image.width(w).height(h).content_fit(iced::ContentFit::Contain))
+        .on_press(Message::OpenImage(key.clone(), info.full.as_ref().map(MediaRef::key)))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into(),
         _ => container(ui::mono("loading…", 11.0, p.text_muted()))
             .width(w)
             .height(h)
@@ -4200,6 +5326,172 @@ fn image_figure<'a>(
         .style(move |_| container::Style {
             border: iced::border::rounded(8).color(edge).width(1),
             ..container::Style::default()
+        })
+        .into()
+}
+
+/// A video as its preview with a ▶ on it; click to play it in your video
+/// player. ponytail: the preview is WhatsApp's tiny one, so it's soft.
+fn video_figure<'a>(
+    info: &'a mesh_core::FileInfo,
+    poster: &'a mesh_core::ImageInfo,
+    session: &'a Session,
+    p: &'a theme::Palette,
+) -> Element<'a, Message> {
+    const MAX: f32 = 320.0;
+    let (w, h) = match (poster.width, poster.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => {
+            let scale = (MAX / w as f32).min(MAX / h as f32).min(1.0);
+            (w as f32 * scale, h as f32 * scale)
+        }
+        _ => (MAX, 180.0),
+    };
+    let (fill, edge, badge_fill) = (p.panel_dim(), p.border_ctrl(), theme::alpha(p.background(), 0.75));
+    let picture: Element<'a, Message> = match session.images.get(&poster.media.key()) {
+        Some(Some(handle)) => iced::widget::image(handle.clone()).width(w).height(h).content_fit(iced::ContentFit::Cover).into(),
+        _ => Space::new().width(w).height(h).into(),
+    };
+    let badge = container(ui::mono("▶", 20.0, p.text_bright())).padding([8, 14]).style(move |_| container::Style {
+        background: Some(badge_fill.into()),
+        border: iced::border::rounded(24),
+        ..container::Style::default()
+    });
+    let mut details = Vec::new();
+    if let Some(secs) = info.duration {
+        details.push(format!("{}:{:02}", secs as u64 / 60, secs as u64 % 60));
+    }
+    if let Some(size) = info.size {
+        details.push(human_size(size));
+    }
+    let caption = container(
+        row![ui::mono("video · click to play", 11.0, p.text_muted()).width(Length::Fill), ui::mono(details.join(" · "), 11.0, p.text_muted())]
+            .spacing(10),
+    )
+    .padding([6, 10])
+    .width(w);
+    let url = info.media.web_url().unwrap_or_default().to_string();
+    mouse_area(
+        container(column![stack![picture, container(badge).width(w).height(h).center_x(w).center_y(h)], caption])
+            .clip(true)
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(8).color(edge).width(1),
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::OpenMedia(url))
+    .interaction(iced::mouse::Interaction::Pointer)
+    .into()
+}
+
+/// A voice note played inside Mesh: ▶/⏸, a text waveform (click a bar to
+/// jump there) and the time.
+fn voice_player<'a>(info: &'a mesh_core::FileInfo, session: &'a Session, p: &'a theme::Palette) -> Element<'a, Message> {
+    const BARS: usize = 32;
+    const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let rate = mesh_core::SAMPLE_RATE as usize;
+    let key = info.media.key();
+    let total = session
+        .voice_pcm
+        .get(&key)
+        .map(|pcm| pcm.len())
+        .unwrap_or_else(|| (info.duration.unwrap_or(0.0) * rate as f64) as usize)
+        .max(1);
+    let player = session.player.as_ref().filter(|pl| pl.key == key);
+    let position = player.map_or(0, Player::position).min(total);
+    let glyph = match player {
+        Some(pl) if pl.loading => "…",
+        Some(pl) if pl.out.is_some() => "⏸",
+        _ => "▶",
+    };
+    let played = position as f32 / total as f32;
+    let mut bars = row![];
+    for (i, level) in waveform_bars(&info.waveform, BARS).into_iter().enumerate() {
+        let at = i as f32 / BARS as f32;
+        let color = if at < played { p.accent() } else { p.text_muted() };
+        bars = bars.push(
+            mouse_area(ui::mono(LEVELS[level as usize * 7 / 100].to_string(), 16.0, color))
+                .on_press(Message::VoiceSeek(key.clone(), at))
+                .interaction(iced::mouse::Interaction::Pointer),
+        );
+    }
+    let clock = |samples: usize| format!("{}:{:02}", samples / rate / 60, samples / rate % 60);
+    let (fill, edge) = (p.surface_alt(), p.border_ctrl());
+    container(
+        row![
+            button(ui::mono(glyph, 14.0, p.accent()))
+                .on_press(Message::VoiceToggle(key.clone()))
+                .padding([2, 8])
+                .style(flat_button_style(p)),
+            bars,
+            ui::mono(format!("{} / {}", clock(position), clock(total)), 11.0, p.text_muted()),
+            button(ui::mono(format!("{}×", session.voice_speed), 11.0, p.text()))
+                .on_press(Message::VoiceSpeed)
+                .padding([2, 6])
+                .style(flat_button_style(p)),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([6, 10])
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// A waveform (0–100 each) squeezed or stretched to `bars` levels (0–100),
+/// keeping each span's peak; flat when there's none.
+fn waveform_bars(wave: &[u8], bars: usize) -> Vec<u8> {
+    (0..bars)
+        .map(|i| {
+            if wave.is_empty() {
+                return 30;
+            }
+            let start = i * wave.len() / bars;
+            let end = ((i + 1) * wave.len() / bars).max(start + 1).min(wave.len());
+            wave[start..end].iter().copied().max().unwrap_or(0).min(100)
+        })
+        .collect()
+}
+
+/// Keeps a filename to its basename and safe characters, so a crafted name
+/// can't escape the temp directory.
+fn safe_filename(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    let cleaned: String = base
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') { c } else { '_' })
+        .collect();
+    let cleaned = cleaned.trim_matches(['.', ' ']).to_string();
+    if cleaned.is_empty() { "mesh-file".to_string() } else { cleaned }
+}
+
+/// A video / voice note / document as a clickable card; opening it downloads
+/// the file through the hidden client and hands it to the OS player/viewer.
+fn file_figure<'a>(info: &'a mesh_core::FileInfo, p: &theme::Palette) -> Element<'a, Message> {
+    let url = info.media.web_url().unwrap_or_default().to_string();
+    let size = info.size.map(|s| format!(" · {}", human_size(s))).unwrap_or_default();
+    let (surface, edge) = (p.surface_alt(), p.border_ctrl());
+    let label = row![
+        ui::icon(ui::Icon::Paperclip, 16.0, p.accent()),
+        column![
+            ui::sans(&info.name, 13.0, Weight::Semibold, p.text_bright()),
+            ui::mono(format!("{}{size} · tap to open", info.kind), 11.0, p.text_muted()),
+        ]
+        .spacing(2),
+    ]
+    .spacing(10)
+    .align_y(iced::Alignment::Center);
+    button(label)
+        .on_press(Message::OpenMedia(url))
+        .padding([8, 12])
+        .style(move |_, status| button::Style {
+            background: Some(if matches!(status, button::Status::Hovered) { edge } else { surface }.into()),
+            border: iced::border::rounded(8).color(edge).width(1),
+            ..button::Style::default()
         })
         .into()
 }
@@ -5602,6 +6894,7 @@ fn main() -> iced::Result {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     tracing_subscriber::fmt::init();
+    std::thread::spawn(cache::prune);
 
     let app = ui::FONTS
         .into_iter()
@@ -5626,6 +6919,50 @@ mod tests {
         );
         assert_eq!(split_fences("```unclosed\nx"), [(true, "x")]);
         assert_eq!(split_fences("plain"), [(false, "plain")]);
+    }
+
+    #[test]
+    fn links_split_from_text() {
+        assert_eq!(link_segments("plain text"), [(false, "plain text")]);
+        assert_eq!(
+            link_segments("see https://x.com/a now"),
+            [(false, "see "), (true, "https://x.com/a"), (false, " now")]
+        );
+        // Trailing punctuation stays out of the link.
+        assert_eq!(
+            link_segments("go to http://a.co."),
+            [(false, "go to "), (true, "http://a.co"), (false, ".")]
+        );
+        // Not a link mid-word (no boundary), and unicode before it is fine.
+        assert_eq!(link_segments("café https://é.example"), [(false, "café "), (true, "https://é.example")]);
+        assert_eq!(link_segments("email=http://x"), [(false, "email=http://x")]);
+    }
+
+    #[test]
+    fn gif_frames_round_trip_and_waveform_fits() {
+        let frames = vec![b"one".to_vec(), Vec::new(), b"three".to_vec()];
+        assert_eq!(unpack_frames(&pack_frames(83, &frames)), Some((83, frames)));
+        assert_eq!(unpack_frames(&[1, 0]), None);
+        assert_eq!(waveform_bars(&[10, 90, 20, 40], 2), [90, 40]);
+        assert_eq!(waveform_bars(&[50], 3), [50, 50, 50]);
+        assert_eq!(waveform_bars(&[], 2), [30, 30]);
+    }
+
+    #[test]
+    fn tells_numbers_from_names() {
+        assert!(looks_like_number("082 123 4567"));
+        assert!(looks_like_number("+27 (82) 123-4567"));
+        assert!(!looks_like_number("Brendon"));
+        assert!(!looks_like_number("123"));
+        assert!(!looks_like_number("Room 1234567"));
+    }
+
+    #[test]
+    fn filenames_cant_escape() {
+        assert_eq!(safe_filename("video.mp4"), "video.mp4");
+        assert_eq!(safe_filename("../../etc/passwd"), "passwd");
+        assert_eq!(safe_filename(r"C:\Windows\evil.exe"), "evil.exe");
+        assert_eq!(safe_filename("..."), "mesh-file");
     }
 
     #[test]

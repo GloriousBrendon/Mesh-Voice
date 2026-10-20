@@ -32,6 +32,18 @@ pub struct TimelineMessage {
     pub reactions: Vec<Reaction>,
     /// Origin server timestamp in milliseconds since the epoch.
     pub timestamp_ms: u64,
+    /// A web client's own id for the message (WhatsApp), for replying,
+    /// reacting and forwarding through it.
+    pub web_id: Option<String>,
+    /// The message this one replies to.
+    pub reply_to: Option<Quote>,
+}
+
+/// A quoted message, shown above a reply.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Quote {
+    pub author: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,10 +52,31 @@ pub enum MessageKind {
     /// `/me` action.
     Emote,
     Image(ImageInfo),
+    /// A non-image attachment (video, voice note, document…) opened in the
+    /// OS's default app on click, rather than shown inline.
+    File(FileInfo),
     /// A join, leave, rename...: drawn as a small mono line, not a message.
     System,
     /// Encrypted and we don't have the key.
     Undecryptable,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileInfo {
+    /// Download handle (pass to the client that owns it).
+    pub media: MediaRef,
+    /// Suggested filename, with extension.
+    pub name: String,
+    /// What it is: "Video", "Voice note", "Document"…
+    pub kind: String,
+    /// Bytes, when known.
+    pub size: Option<u64>,
+    /// Seconds, for audio and video.
+    pub duration: Option<f64>,
+    /// A voice note's loudness over time (0–100 each), for its player.
+    pub waveform: Vec<u8>,
+    /// A video's poster image.
+    pub thumbnail: Option<ImageInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +86,8 @@ pub struct ImageInfo {
     pub height: Option<u64>,
     /// Bytes.
     pub size: Option<u64>,
+    /// A bigger copy for the full-screen view, when `media` is a thumbnail.
+    pub full: Option<MediaRef>,
 }
 
 /// Where to download a piece of media from: Matrix media (pass it to
@@ -115,7 +150,10 @@ pub struct Reaction {
     pub key: String,
     pub count: usize,
     /// Our own reaction event, if we reacted (redact it to take it back).
+    /// Matrix only; web clients just set `by_me`.
     pub mine: Option<OwnedEventId>,
+    /// We reacted with this.
+    pub by_me: bool,
 }
 
 /// Builds the timeline from a newest-first `chunk`; returns it oldest-first.
@@ -175,6 +213,8 @@ pub(crate) async fn build(room: &Room, chunk: Vec<TimelineEvent>, me: Option<&Us
             kind,
             reactions: Vec::new(),
             timestamp_ms: event.origin_server_ts().0.into(),
+            web_id: None,
+            reply_to: None,
         });
     }
 
@@ -199,7 +239,7 @@ fn fold_reactions(list: Vec<(String, OwnedUserId, OwnedEventId)>, me: Option<&Us
         let index = match pills.iter().position(|(r, _)| r.key == key) {
             Some(index) => index,
             None => {
-                pills.push((Reaction { key, count: 0, mine: None }, Vec::new()));
+                pills.push((Reaction { key, count: 0, mine: None, by_me: false }, Vec::new()));
                 pills.len() - 1
             }
         };
@@ -209,6 +249,7 @@ fn fold_reactions(list: Vec<(String, OwnedUserId, OwnedEventId)>, me: Option<&Us
         }
         if me == Some(sender.as_ref()) {
             pill.mine = Some(event_id);
+            pill.by_me = true;
         }
         senders.push(sender);
         pill.count += 1;
@@ -248,6 +289,7 @@ fn message_body(msgtype: &MessageType) -> Option<(String, MessageKind)> {
                 width: info.and_then(|i| i.width).map(u64::from),
                 height: info.and_then(|i| i.height).map(u64::from),
                 size: info.and_then(|i| i.size).map(u64::from),
+                full: None,
             };
             let name = image.filename.clone().unwrap_or_else(|| image.body.clone());
             (name, MessageKind::Image(image_info))
@@ -369,7 +411,7 @@ mod tests {
         ];
         let pills = fold_reactions(list, Some(&me));
         assert_eq!(pills.len(), 2);
-        assert_eq!(pills[0], Reaction { key: "👍".into(), count: 2, mine: Some(eid("$4")) });
-        assert_eq!(pills[1], Reaction { key: "🔥".into(), count: 1, mine: None });
+        assert_eq!(pills[0], Reaction { key: "👍".into(), count: 2, mine: Some(eid("$4")), by_me: true });
+        assert_eq!(pills[1], Reaction { key: "🔥".into(), count: 1, mine: None, by_me: false });
     }
 }
