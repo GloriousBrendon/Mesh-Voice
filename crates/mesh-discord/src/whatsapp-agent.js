@@ -5,7 +5,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 4;
+  const version = 6;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -178,7 +178,13 @@
       const chat = chatId && wa.Chat.get(chatId);
       if (chat && (chat.unreadCount || 0) > 0) {
         const seen = req("WAWebChatSendConversationSeen");
-        if (seen) Promise.resolve(seen.sendConversationSeen({ chat, unreadDelta: -1 })).catch(() => {});
+        const msgs = chat.msgs.getModelsArray();
+        const key = msgs.length ? msgs[msgs.length - 1].id : undefined;
+        // The receipt/sync; it doesn't touch the local count, so clear that
+        // too (fires change:unreadCount → a fresh snapshot for Mesh's badge).
+        if (seen) Promise.resolve(seen.sendConversationSeen({ chat, key, unreadDelta: -1 })).catch(() => {});
+        try { chat.unreadCount = 0; chat.markedUnread = false; } catch {}
+        emit(); // push a fresh snapshot so Mesh clears the badge now
       }
     },
     send: (chatId, text) => {

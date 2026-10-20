@@ -189,6 +189,11 @@ const JUMP_INPUT: &str = "jump";
 /// Text input id of the message composer, to refocus after picking an emoji.
 const COMPOSER_INPUT: &str = "composer";
 
+/// Puts the cursor in the message box (on opening a chat, picking an emoji).
+fn focus_composer() -> Task<Message> {
+    iced::widget::operation::focus(iced::widget::Id::new(COMPOSER_INPUT))
+}
+
 /// A small curated set for the composer's emoji picker; expand if it's missed.
 const EMOJI: &[&str] = &[
     "😀", "😂", "🙂", "😉", "😍", "😘", "😎", "🤔", "😅", "😭", "😡", "🥳", "😴", "🙄", "😇", "🤗",
@@ -938,6 +943,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             Task::batch([
                 load_timeline(session.client.clone(), room_id.clone()),
                 load_members(session.client.clone(), room_id),
+                focus_composer(),
             ])
         }
         Message::TimelineLoaded(room_id, result) => {
@@ -1918,7 +1924,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             session.timeline.clear();
             session.members.clear();
             session.show_settings = false;
-            Task::none()
+            focus_composer()
         }
         Message::StartDiscord => {
             if let Some(cmd) = &state.discord_command
@@ -2434,7 +2440,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         } else {
             active_guild(session, state.discord_state.as_ref()).map(|g| g.name.as_str())
         };
-        let shell = column![top_bar(session, guild, engine, p, l, x.translucent_panes), panes]
+        let shell = column![top_bar(session, guild, engine, state.whatsapp.is_some(), p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
         if let Some(dialog) = &session.add_friend {
@@ -2627,6 +2633,7 @@ fn top_bar<'a>(
     session: &'a Session,
     guild: Option<&str>,
     discord_engine: Option<bool>,
+    whatsapp_up: bool,
     p: &theme::Palette,
     l: &theme::Layout,
     translucent: bool,
@@ -2654,22 +2661,30 @@ fn top_bar<'a>(
             .push(ui::mono(room_label(room), 12.0, p.text_bright()));
     }
 
+    // Compact per-platform status dots: green = fully connected, yellow =
+    // partly, red = off. Clicking opens the connection (or starts the engine
+    // when its tab is down).
     let mut chips = row![].spacing(6).align_y(iced::Alignment::Center);
-    if let Some(profile) = &session.my_profile {
-        chips = chips.push(connection_chip(
-            "mx",
-            p.proto_mx(),
-            profile.user_id.server_name().to_string(),
-            p,
-            true,
-        ));
-    }
-    if session.rooms.iter().any(|r| r.network == Network::Discord) {
-        chips = chips.push(connection_chip("dc", p.proto_dc(), "bridge".to_string(), p, true));
-    }
-    if let Some(up) = discord_engine {
-        chips = chips.push(connection_chip("dc", p.proto_dc(), "voice".to_string(), p, up));
-    }
+    // Matrix: logged in or not.
+    let mx = session.my_profile.as_ref().map_or(Health::Off, |p| {
+        let _ = p;
+        Health::On
+    });
+    chips = chips.push(connection_chip("mx", p.proto_mx(), mx, Message::OpenSettings(SettingsPage::Accounts), p));
+    // Discord: bridge (text in Matrix) + the hidden client (voice, servers).
+    let bridge = session.rooms.iter().any(|r| r.network == Network::Discord);
+    let voice = discord_engine == Some(true);
+    let dc = match (bridge, voice) {
+        (true, true) => Health::On,
+        (false, false) => Health::Off,
+        _ => Health::Partial,
+    };
+    let dc_click = if voice { Message::OpenSettings(SettingsPage::Accounts) } else { Message::StartDiscord };
+    chips = chips.push(connection_chip("dc", p.proto_dc(), dc, dc_click, p));
+    // WhatsApp: the hidden WhatsApp Web tab.
+    let wa = if whatsapp_up { Health::On } else { Health::Off };
+    let wa_click = if whatsapp_up { Message::OpenSettings(SettingsPage::Accounts) } else { Message::StartDiscord };
+    chips = chips.push(connection_chip("wa", p.success(), wa, wa_click, p));
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
     let search = button(
@@ -2721,23 +2736,41 @@ fn top_bar<'a>(
 }
 
 /// `● mx strange.lab`: a status dot, the network tag and a name.
+/// A platform's connection health, shown as a dot colour.
+#[derive(Clone, Copy)]
+enum Health {
+    On,
+    Partial,
+    Off,
+}
+
+/// A compact, clickable platform status: a dot (green/yellow/red) and its tag.
 fn connection_chip<'a>(
     proto: &'a str,
     color: iced::Color,
-    name: String,
+    health: Health,
+    on_press: Message,
     p: &theme::Palette,
-    up: bool,
 ) -> Element<'a, Message> {
-    ui::outline_chip(
-        row![
-            ui::swatch(if up { p.success() } else { p.text_muted() }, 7.0, 7.0, 3.5),
-            ui::mono_bold(proto, 12.0, color),
-            ui::mono(name, 12.0, p.text()),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center),
-        p,
+    let dot = match health {
+        Health::On => p.success(),
+        Health::Partial => p.warning(),
+        Health::Off => p.danger(),
+    };
+    let (fill, edge, radius) = (p.panel_dim(), p.border_ctrl(), 999.0);
+    button(
+        row![ui::swatch(dot, 7.0, 7.0, 3.5), ui::mono_bold(proto, 12.0, color)]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
     )
+    .on_press(on_press)
+    .padding([5, 10])
+    .style(move |_, status| button::Style {
+        background: Some(if matches!(status, button::Status::Hovered) { edge } else { fill }.into()),
+        border: iced::border::rounded(radius).color(edge).width(1),
+        ..button::Style::default()
+    })
+    .into()
 }
 
 /// The space rail: Home, then (later) one tile per space, then "+".
@@ -3042,9 +3075,14 @@ fn channel_pane<'a>(
     }
     let home = !group.is_some_and(|g| g.space.is_some());
     if home {
-        let mut chips = row![].spacing(4);
-        for (label, filter) in [("all", None), ("matrix", Some(Network::Matrix)), ("discord", Some(Network::Discord)), ("whatsapp", Some(Network::WhatsApp))] {
-            chips = chips.push(segment(label, session.home_filter == filter, Message::HomeFilter(filter), p, l));
+        // Compact icon toggles (with tooltips) so they don't overflow.
+        let mut chips = row![filter_chip(None, ui::Icon::Home, "All", p.text_bright(), session.home_filter, p, l)].spacing(4);
+        for (icon, label, color, filter) in [
+            (ui::Icon::Matrix, "Matrix", p.proto_mx(), Network::Matrix),
+            (ui::Icon::Discord, "Discord", p.proto_dc(), Network::Discord),
+            (ui::Icon::Phone, "WhatsApp", p.success(), Network::WhatsApp),
+        ] {
+            chips = chips.push(filter_chip(Some(filter), icon, label, color, session.home_filter, p, l));
         }
         header = header.push(chips);
     }
@@ -4732,6 +4770,34 @@ fn knob<'a>(key: &'a str, value: f32, max: f32, p: &theme::Palette) -> Element<'
 }
 
 /// One option of a segmented control (density, preset, add-friend mode).
+/// A Home filter toggle: a network icon (tooltip = its name), lit when active.
+fn filter_chip<'a>(
+    filter: Option<Network>,
+    icon: ui::Icon,
+    label: &'a str,
+    color: iced::Color,
+    current: Option<Network>,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let on = current == filter;
+    let (fill, radius) = (if on { p.surface_alt() } else { iced::Color::TRANSPARENT }, l.control_radius());
+    let button = button(ui::icon(icon, 16.0, if on { color } else { p.text_muted() }))
+        .on_press(Message::HomeFilter(filter))
+        .padding([5, 9])
+        .style(move |_, _| button::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(radius),
+            ..button::Style::default()
+        });
+    iced::widget::tooltip(
+        button,
+        container(text(label).size(12).color(p.text())).padding([4, 8]),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .into()
+}
+
 fn segment<'a>(label: &'a str, on: bool, msg: Message, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
     let (fill, fg) = if on {
         (p.surface_alt(), p.text_bright())
