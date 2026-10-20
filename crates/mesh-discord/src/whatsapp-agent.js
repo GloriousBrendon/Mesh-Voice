@@ -5,7 +5,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 3;
+  const version = 4;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -173,6 +173,13 @@
     open: (chatId) => {
       open = chatId || null;
       emitMessages();
+      // Opening a chat marks it read (clears unread here and on the phone,
+      // and sends read receipts), as WhatsApp Web does on view.
+      const chat = chatId && wa.Chat.get(chatId);
+      if (chat && (chat.unreadCount || 0) > 0) {
+        const seen = req("WAWebChatSendConversationSeen");
+        if (seen) Promise.resolve(seen.sendConversationSeen({ chat, unreadDelta: -1 })).catch(() => {});
+      }
     },
     send: (chatId, text) => {
       const chat = wa.Chat.get(chatId);

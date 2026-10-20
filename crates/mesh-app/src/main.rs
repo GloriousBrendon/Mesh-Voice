@@ -571,6 +571,8 @@ enum Message {
     TimelineLoaded(OwnedRoomId, Result<Vec<TimelineMessage>, String>),
     Update(MeshUpdate),
     DraftChanged(String),
+    /// A fire-and-forget task finished; nothing to do.
+    Noop,
     ToggleEmoji,
     InsertEmoji(&'static str),
     /// Open the native file picker for an attachment.
@@ -949,10 +951,19 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         let avatars: Vec<MediaRef> =
                             session.timeline.iter().filter_map(|m| m.sender_avatar.clone()).collect();
                         let avatars = load_avatars(session, avatars);
+                        // Opening a room marks it read up to its newest event.
+                        let mut tasks = vec![avatars];
                         if !plain {
-                            return Task::batch([avatars, load_images(session)]);
+                            tasks.push(load_images(session));
                         }
-                        return avatars;
+                        if let Some(event_id) = session.timeline.iter().rev().find_map(|m| m.event_id.clone()) {
+                            let client = session.client.clone();
+                            tasks.push(Task::perform(
+                                async move { client.mark_read(&room_id, &event_id).await },
+                                |()| Message::Noop,
+                            ));
+                        }
+                        return Task::batch(tasks);
                     }
                     Err(err) => session.status = Some(format!("Failed to load messages: {err}")),
                 }
@@ -1141,6 +1152,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             state.window_focused = focused;
             Task::none()
         }
+        Message::Noop => Task::none(),
         Message::DraftChanged(value) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.message_draft = value;

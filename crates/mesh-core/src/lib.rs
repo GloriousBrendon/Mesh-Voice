@@ -506,6 +506,22 @@ impl MeshClient {
         Ok(())
     }
 
+    /// Marks `room_id` read up to `event_id`: a read receipt (blue ticks) and
+    /// the fully-read marker (clears the unread badge here and on other
+    /// devices). Best-effort; a failed receipt isn't worth surfacing.
+    pub async fn mark_read(&self, room_id: &OwnedRoomId, event_id: &OwnedEventId) {
+        use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
+        use matrix_sdk::ruma::events::receipt::ReceiptThread;
+        let Some(room) = self.client.get_room(room_id) else {
+            return;
+        };
+        for receipt in [ReceiptType::Read, ReceiptType::FullyRead] {
+            if let Err(err) = room.send_single_receipt(receipt, ReceiptThread::Unthreaded, event_id.clone()).await {
+                tracing::debug!("read receipt failed: {err}");
+            }
+        }
+    }
+
     /// Reacts to `event_id` with `key` (an emoji, usually).
     pub async fn react(&self, room_id: &OwnedRoomId, event_id: &OwnedEventId, key: &str) -> MeshResult<()> {
         use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotation};
