@@ -1,4 +1,6 @@
 #![recursion_limit = "1024"]
+// No console window next to the app on Windows (debug builds keep it for logs).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod rain;
 mod theme;
@@ -82,6 +84,8 @@ struct App {
     theme_reloaded: String,
     /// Socket of the hidden Discord client (Discord voice), if configured.
     discord_socket: Option<PathBuf>,
+    /// Command that starts it (`discord_engine_command`).
+    discord_command: Option<String>,
     /// Handle to drive it, while connected.
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
@@ -139,6 +143,13 @@ struct Session {
     groups: Vec<SpaceGroup>,
     /// The space shown in the channel pane; `None` is Home.
     active_space: Option<OwnedRoomId>,
+    /// The Discord server (from the hidden client) shown in the channel pane
+    /// instead of a space.
+    active_guild: Option<String>,
+    /// Which rail folders are expanded: [Discord, Matrix].
+    folders_open: [bool; 2],
+    /// Home's network chip; `None` is All.
+    home_filter: Option<Network>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
     /// Who's typing, per room.
@@ -147,6 +158,8 @@ struct Session {
     images: HashMap<String, Option<iced::widget::image::Handle>>,
     /// The add-friend dialog, while it's open.
     add_friend: Option<AddFriend>,
+    /// The join-a-Discord-server dialog, while it's open.
+    join_server: Option<JoinServer>,
     /// Avatar thumbnails by media key; `None` while loading.
     avatars: HashMap<String, Option<iced::widget::image::Handle>>,
 }
@@ -226,10 +239,14 @@ impl Session {
             show_members: true,
             groups: Vec::new(),
             active_space: None,
+            active_guild: None,
+            folders_open: [true, true],
+            home_filter: None,
             jump: None,
             typing: HashMap::new(),
             images: HashMap::new(),
             add_friend: None,
+            join_server: None,
             avatars: HashMap::new(),
         }
     }
@@ -342,6 +359,17 @@ enum Message {
     /// Join a Discord voice channel, or call a Discord DM.
     DiscordJoin(String),
     DiscordLeave,
+    /// Show a Discord server (by id) from the hidden client.
+    GuildSelected(String),
+    /// Expand or collapse a rail folder.
+    ToggleFolder(Network),
+    HomeFilter(Option<Network>),
+    /// Start the hidden Discord client with `discord_engine_command`.
+    StartDiscord,
+    OpenJoinServer,
+    JoinServerLink(String),
+    /// Accept the pasted invite through the hidden Discord client.
+    JoinServerSubmit,
     DensityChosen(theme::Density),
     ToggleExtra(Extra),
     /// Copy the generated theme.toml to the clipboard.
@@ -381,7 +409,7 @@ fn boot() -> (App, Task<Message>) {
 
     // Start the hidden Discord client (once) if it isn't running yet.
     if let (Some(socket), Some(cmd)) = (discord_socket(&config), &config.discord_engine_command)
-        && !socket.exists()
+        && !mesh_discord::is_running(&socket)
         && let Err(err) = run_command(cmd)
     {
         tracing::warn!("could not start the Discord engine ({cmd}): {err}");
@@ -414,6 +442,7 @@ fn boot() -> (App, Task<Message>) {
             discord_warning_seen: config.discord_warning_seen,
             theme_reloaded: Local::now().format("%H:%M").to_string(),
             discord_socket: discord_socket(&config),
+            discord_command: config.discord_engine_command.clone(),
             discord: None,
             discord_state: None,
             theme_stamps: theme::stamps(&theme_files),
@@ -997,6 +1026,60 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     state.discord = None;
                     state.discord_state = None;
                 }
+                mesh_discord::Event::Invite(result) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen
+                        && let Some(dialog) = &mut session.join_server
+                    {
+                        use mesh_discord::Invite;
+                        dialog.busy = result == Invite::Waiting;
+                        dialog.note = Some(match result {
+                            Invite::Waiting => (
+                                "Discord wants a captcha. Finish it in the Discord window that just opened.".to_string(),
+                                false,
+                            ),
+                            Invite::Joined { guild } => (
+                                format!("✓ Joined {}.", guild.unwrap_or_else(|| "the server".to_string())),
+                                false,
+                            ),
+                            Invite::Failed { error } => (format!("✗ {error}"), true),
+                        });
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::OpenJoinServer => {
+            let Screen::LoggedIn(session) = &mut state.screen else {
+                return Task::none();
+            };
+            session.jump = None;
+            session.join_server = Some(JoinServer::default());
+            iced::widget::operation::focus(iced::widget::Id::new(INVITE_INPUT))
+        }
+        Message::JoinServerLink(link) => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(dialog) = &mut session.join_server
+            {
+                dialog.link = link;
+            }
+            Task::none()
+        }
+        Message::JoinServerSubmit => {
+            if let Screen::LoggedIn(session) = &mut state.screen
+                && let Some(dialog) = &mut session.join_server
+                && !dialog.busy
+                && !dialog.link.trim().is_empty()
+            {
+                match &state.discord {
+                    Some(engine) => {
+                        engine.accept_invite(dialog.link.trim());
+                        dialog.busy = true;
+                        dialog.note = None;
+                    }
+                    None => {
+                        dialog.note = Some(("✗ Mesh's Discord client isn't running; see the README.".to_string(), true));
+                    }
+                }
             }
             Task::none()
         }
@@ -1262,6 +1345,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 if session.add_friend.is_some() {
                     session.add_friend = None;
+                } else if session.join_server.is_some() {
+                    session.join_server = None;
                 } else if session.jump.is_some() {
                     session.jump = None;
                 } else {
@@ -1273,6 +1358,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::SpaceSelected(space) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.active_space = space;
+                session.active_guild = None;
                 session.focused = Pane::Channels;
             }
             Task::none()
@@ -1282,7 +1368,38 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 && let Some(group) = session.groups.get(n)
             {
                 session.active_space = group.id().cloned();
+                session.active_guild = None;
                 session.focused = Pane::Channels;
+            }
+            Task::none()
+        }
+        Message::GuildSelected(guild) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.active_space = None;
+                session.active_guild = Some(guild);
+                session.focused = Pane::Channels;
+            }
+            Task::none()
+        }
+        Message::ToggleFolder(network) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                let open = &mut session.folders_open[(network == Network::Matrix) as usize];
+                *open = !*open;
+            }
+            Task::none()
+        }
+        Message::HomeFilter(filter) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.home_filter = filter;
+            }
+            Task::none()
+        }
+        Message::StartDiscord => {
+            if let Some(cmd) = &state.discord_command
+                && let Err(err) = run_command(cmd)
+                && let Screen::LoggedIn(session) = &mut state.screen
+            {
+                session.status = Some(format!("Couldn't start Discord: {err}"));
             }
             Task::none()
         }
@@ -1316,6 +1433,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             session.jump = None;
+            session.active_guild = None;
             if session.groups.iter().any(|g| g.id() == Some(&room_id)) {
                 session.active_space = Some(room_id);
                 session.focused = Pane::Channels;
@@ -1460,6 +1578,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 Ok(room_id) => {
                     session.add_friend = None;
                     session.active_space = None;
+                    session.active_guild = None;
                     let client = session.client.clone();
                     Task::batch([
                         Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
@@ -1600,13 +1719,15 @@ fn subscription(state: &App) -> Subscription<Message> {
 }
 
 /// Where Mesh finds the hidden Discord client: the config, else the
-/// launcher's default socket on Linux.
+/// launcher's default socket on Linux, or Edge's DevTools port on Windows.
 fn discord_socket(config: &theme::Config) -> Option<PathBuf> {
-    config
-        .discord_engine_socket
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("discord-engine.sock")))
+    config.discord_engine_socket.as_ref().map(PathBuf::from).or_else(|| {
+        if cfg!(windows) {
+            Some(PathBuf::from("127.0.0.1:9222"))
+        } else {
+            std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("discord-engine.sock"))
+        }
+    })
 }
 
 fn in_discord_voice(state: &App) -> bool {
@@ -1732,7 +1853,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         let panes: Element<'_, Message> = if session.show_settings {
             settings_shell(session, state, wide)
         } else {
-            let rail = rail_view(session, p, l, x.show_network_tags);
+            let rail = rail_view(session, state.discord_state.as_ref(), state.discord_command.is_some(), p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
                 tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), p, l), 248.0, p, l, x),
@@ -1747,11 +1868,14 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             panes.into()
         };
         let engine = state.discord_socket.as_ref().map(|_| state.discord.is_some());
-        let shell = column![top_bar(session, engine, p, l, x.translucent_panes), panes]
+        let guild = active_guild(session, state.discord_state.as_ref()).map(|g| g.name.as_str());
+        let shell = column![top_bar(session, guild, engine, p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
         if let Some(dialog) = &session.add_friend {
             stack![shell, add_friend_view(session, dialog, p, l)].into()
+        } else if let Some(dialog) = &session.join_server {
+            stack![shell, join_server_view(dialog, state.discord.is_some(), p, l)].into()
         } else if session.jump.is_some() {
             stack![shell, jump_palette(session, p, l)].into()
         } else {
@@ -1875,6 +1999,16 @@ fn active_group(session: &Session) -> Option<&SpaceGroup> {
         .find(|g| g.id() == session.active_space.as_ref())
 }
 
+fn active_guild<'a>(session: &Session, discord: Option<&'a mesh_discord::Snapshot>) -> Option<&'a mesh_discord::Guild> {
+    let id = session.active_guild.as_deref()?;
+    discord?.guilds.iter().find(|g| g.id == id)
+}
+
+/// The Discord server a bridged space stands for, from its portals.
+fn guild_of(group: &SpaceGroup) -> Option<String> {
+    group.rooms.iter().find_map(|r| r.bridged.as_ref()?.guild_id.clone())
+}
+
 /// Two-letter tile label: initials of the first two words, or the first two letters.
 fn initials(name: &str) -> String {
     let words: Vec<&str> = name.split_whitespace().collect();
@@ -1924,6 +2058,7 @@ fn room_label(room: &RoomSummary) -> String {
 
 fn top_bar<'a>(
     session: &'a Session,
+    guild: Option<&str>,
     discord_engine: Option<bool>,
     p: &theme::Palette,
     l: &theme::Layout,
@@ -1942,7 +2077,7 @@ fn top_bar<'a>(
         crumb = crumb.push(ui::chip(index.to_string(), p));
     }
     crumb = crumb.push(ui::mono(
-        active_group(session).map_or("Home", |g| g.name()).to_lowercase(),
+        guild.unwrap_or_else(|| active_group(session).map_or("Home", |g| g.name())).to_lowercase(),
         12.0,
         p.text_muted(),
     ));
@@ -2039,97 +2174,187 @@ fn connection_chip<'a>(
 }
 
 /// The space rail: Home, then (later) one tile per space, then "+".
+/// The rail: Home, then a Discord folder (the hidden client's servers) and a
+/// Matrix folder (spaces), each expanding in place like Discord's folders.
 fn rail_view<'a>(
     session: &'a Session,
+    discord: Option<&'a mesh_discord::Snapshot>,
+    can_start_discord: bool,
     p: &theme::Palette,
     l: &theme::Layout,
     tags: bool,
 ) -> Element<'a, Message> {
     let home = rail_tile(
         ui::icon(ui::Icon::Home, 20.0, p.text_bright()),
-        session.active_space.is_none(),
+        session.active_space.is_none() && session.active_guild.is_none(),
         Some(Message::SpaceSelected(None)),
         p,
         l,
     );
-    let mut tiles = column![].spacing(8).align_x(iced::Alignment::Center);
-    for (index, group) in session.groups.iter().enumerate().skip(1) {
-        let active = group.id() == session.active_space.as_ref();
-        let fg = if active { p.text_bright() } else { p.text() };
-        // The space's own picture (a Discord server icon, say), else its network's logo.
-        let face: Element<'_, Message> =
-            match picture(session, group.space.as_ref().and_then(|s| s.avatar.as_ref())) {
-                Some(handle) => iced::widget::image(handle.clone())
-                    .width(40)
-                    .height(40)
-                    .border_radius((l.rounding - 2.0).max(0.0))
-                    .content_fit(iced::ContentFit::Cover)
-                    .into(),
-                None => match group.network() {
-                    Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { p.proto_dc() } else { fg }),
-                    Network::Matrix => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
-                },
-            };
-        let mut tile: Element<'_, Message> = rail_tile(
-            face,
-            active,
-            Some(Message::SpaceSelected(group.id().cloned())),
-            p,
-            l,
-        );
-        let mentions = group.mentions();
-        if mentions > 0 {
-            let (fill, ring) = (p.danger(), p.surface());
-            let badge = container(ui::mono_bold(mentions.to_string(), 10.0, p.background()))
-                .padding([1, 5])
-                .style(move |_| container::Style {
-                    background: Some(fill.into()),
-                    border: iced::border::rounded(9).color(ring).width(2),
-                    ..container::Style::default()
-                });
-            tile = stack![
-                tile,
-                container(badge)
-                    .width(52)
-                    .height(50)
-                    .align_x(iced::Alignment::End)
-                    .align_y(iced::Alignment::End),
-            ]
-            .into();
-        }
-        let tag = group.network().tag();
-        let key = match (index <= 9, tags) {
-            (true, true) => format!("{index}·{tag}"),
-            (true, false) => index.to_string(),
-            (false, true) => tag.to_string(),
-            (false, false) => String::new(),
-        };
-        tiles = tiles.push(
+    let guilds = discord.map(|d| d.guilds.as_slice()).unwrap_or_default();
+    let mut dc: Vec<Element<'a, Message>> = guilds
+        .iter()
+        .map(|guild| {
+            let active = session.active_guild.as_deref() == Some(guild.id.as_str());
+            let face = ui::mono_bold(initials(&guild.name), 13.0, if active { p.text_bright() } else { p.text() });
             iced::widget::tooltip(
-                column![
-                    tile,
-                    ui::mono(key, 10.0, if active { p.text_bright() } else { p.text_muted() }),
-                ]
-                .spacing(2)
-                .align_x(iced::Alignment::Center),
-                container(text(group.name().to_string()).size(12).color(p.text())).padding([4, 8]),
+                rail_tile(face.into(), active, Some(Message::GuildSelected(guild.id.clone())), p, l),
+                container(text(&guild.name).size(12).color(p.text())).padding([4, 8]),
                 iced::widget::tooltip::Position::Right,
-            ),
+            )
+            .into()
+        })
+        .collect();
+    if discord.is_none() && can_start_discord {
+        dc.push(
+            iced::widget::tooltip(
+                rail_tile(ui::icon(ui::Icon::Discord, 20.0, p.text_muted()), false, Some(Message::StartDiscord), p, l),
+                container(text("Discord isn't running. Click to start it.").size(12).color(p.text())).padding([4, 8]),
+                iced::widget::tooltip::Position::Right,
+            )
+            .into(),
         );
     }
-    let add = ui::not_yet(
-        rail_tile(ui::icon(ui::Icon::Plus, 18.0, p.text_muted()), false, None, p, l),
-        "Joining or creating a space isn't supported yet.",
-        p,
+    // Bridged spaces only for servers the client doesn't list (it isn't
+    // running, say), and never the bridge's own empty spaces.
+    let mut mx = Vec::new();
+    for (index, group) in session.groups.iter().enumerate().skip(1) {
+        if group.network() == Network::Discord {
+            let listed = guild_of(group).is_some_and(|id| guilds.iter().any(|g| g.id == id));
+            if !group.rooms.is_empty() && !listed {
+                dc.push(space_tile(session, index, group, p, l, tags));
+            }
+        } else {
+            mx.push(space_tile(session, index, group, p, l, tags));
+        }
+    }
+    let mut folders = column![].spacing(8).align_x(iced::Alignment::Center);
+    for (network, tiles) in [(Network::Discord, dc), (Network::Matrix, mx)] {
+        if !tiles.is_empty() {
+            let open = session.folders_open[(network == Network::Matrix) as usize];
+            folders = folders.push(rail_folder(network, open, tiles, p, l));
+        }
+    }
+    let add = iced::widget::tooltip(
+        rail_tile(ui::icon(ui::Icon::Plus, 18.0, p.text_muted()), false, Some(Message::OpenJoinServer), p, l),
+        container(text("Join a Discord server").size(12).color(p.text())).padding([4, 8]),
+        iced::widget::tooltip::Position::Right,
     );
     scrollable(
-        column![home, ui::swatch(p.border(), 28.0, 2.0, 1.0), tiles, add]
+        column![home, ui::swatch(p.border(), 28.0, 2.0, 1.0), folders, add]
             .spacing(8)
             .padding([10, 0])
             .width(Length::Fill)
             .align_x(iced::Alignment::Center),
     )
     .height(Length::Fill)
+    .into()
+}
+
+/// A network's folder: its logo and ▾/▸ toggle it; open, its tiles follow on
+/// a tinted strip.
+fn rail_folder<'a>(
+    network: Network,
+    open: bool,
+    tiles: Vec<Element<'a, Message>>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let (icon, color) = match network {
+        Network::Discord => (ui::Icon::Discord, p.proto_dc()),
+        Network::Matrix => (ui::Icon::Matrix, p.proto_mx()),
+    };
+    let head = column![
+        rail_tile(ui::icon(icon, 22.0, color), false, Some(Message::ToggleFolder(network)), p, l),
+        ui::mono(format!("{} {}", network.tag(), if open { "▾" } else { "▸" }), 10.0, p.text_muted()),
+    ]
+    .spacing(2)
+    .align_x(iced::Alignment::Center);
+    if !open {
+        return head.into();
+    }
+    let strip = theme::mix(p.surface(), p.surface_alt(), 0.5);
+    let radius = l.rounding + 4.0;
+    container(column![head].extend(tiles).spacing(8).align_x(iced::Alignment::Center))
+        .padding([6, 4])
+        .style(move |_| container::Style {
+            background: Some(strip.into()),
+            border: iced::border::rounded(radius),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// A space's rail tile: its picture (or network logo), mention badge, and
+/// `Alt+n` key.
+fn space_tile<'a>(
+    session: &'a Session,
+    index: usize,
+    group: &'a SpaceGroup,
+    p: &theme::Palette,
+    l: &theme::Layout,
+    tags: bool,
+) -> Element<'a, Message> {
+    let active = group.id() == session.active_space.as_ref();
+    let fg = if active { p.text_bright() } else { p.text() };
+    // The space's own picture (a Discord server icon, say), else its network's logo.
+    let face: Element<'_, Message> =
+        match picture(session, group.space.as_ref().and_then(|s| s.avatar.as_ref())) {
+            Some(handle) => iced::widget::image(handle.clone())
+                .width(40)
+                .height(40)
+                .border_radius((l.rounding - 2.0).max(0.0))
+                .content_fit(iced::ContentFit::Cover)
+                .into(),
+            None => match group.network() {
+                Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { p.proto_dc() } else { fg }),
+                Network::Matrix => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
+            },
+        };
+    let mut tile: Element<'_, Message> = rail_tile(
+        face,
+        active,
+        Some(Message::SpaceSelected(group.id().cloned())),
+        p,
+        l,
+    );
+    let mentions = group.mentions();
+    if mentions > 0 {
+        let (fill, ring) = (p.danger(), p.surface());
+        let badge = container(ui::mono_bold(mentions.to_string(), 10.0, p.background()))
+            .padding([1, 5])
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(9).color(ring).width(2),
+                ..container::Style::default()
+            });
+        tile = stack![
+            tile,
+            container(badge)
+                .width(52)
+                .height(50)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::End),
+        ]
+        .into();
+    }
+    let tag = group.network().tag();
+    let key = match (index <= 9, tags) {
+        (true, true) => format!("{index}·{tag}"),
+        (true, false) => index.to_string(),
+        (false, true) => tag.to_string(),
+        (false, false) => String::new(),
+    };
+    iced::widget::tooltip(
+        column![
+            tile,
+            ui::mono(key, 10.0, if active { p.text_bright() } else { p.text_muted() }),
+        ]
+        .spacing(2)
+        .align_x(iced::Alignment::Center),
+        container(text(group.name().to_string()).size(12).color(p.text())).padding([4, 8]),
+        iced::widget::tooltip::Position::Right,
+    )
     .into()
 }
 
@@ -2173,6 +2398,9 @@ fn channel_pane<'a>(
     p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
+    if session.active_guild.is_some() {
+        return guild_pane(session, discord, p, l);
+    }
     let group = active_group(session);
     let mut title = row![
         ui::sans(group.map_or("Home", |g| g.name()), 15.0, Weight::Semibold, p.text_bright())
@@ -2202,15 +2430,26 @@ fn channel_pane<'a>(
             .spacing(6),
         );
     }
+    let home = !group.is_some_and(|g| g.space.is_some());
+    if home {
+        let mut chips = row![].spacing(4);
+        for (label, filter) in [("all", None), ("matrix", Some(Network::Matrix)), ("discord", Some(Network::Discord))] {
+            chips = chips.push(segment(label, session.home_filter == filter, Message::HomeFilter(filter), p, l));
+        }
+        header = header.push(chips);
+    }
     let header = header
         .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
 
     let mut list = column![].spacing(2).padding([10, 8]);
     let rooms = group.map(|g| g.rooms.as_slice()).unwrap_or_default();
-    let sections: [(&str, Vec<&RoomSummary>); 2] = if group.is_some_and(|g| g.space.is_some()) {
+    let sections: [(&str, Vec<&RoomSummary>); 2] = if !home {
         [("Text", rooms.iter().collect()), ("", Vec::new())]
     } else {
-        let (directs, others) = rooms.iter().partition(|r| r.is_direct);
+        let (directs, others) = rooms
+            .iter()
+            .filter(|r| session.home_filter.is_none_or(|n| r.network == n))
+            .partition(|r| r.is_direct);
         [("Direct messages", directs), ("Rooms", others)]
     };
     for (label, rooms) in sections {
@@ -2224,24 +2463,15 @@ fn channel_pane<'a>(
         }
     }
 
-    // Discord voice channels, from the hidden client: this space's server,
-    // or (on Home) servers that aren't bridged as a space.
-    if let Some(discord) = discord {
-        let current = discord.voice.channel_id.as_deref();
-        let guild_of = |g: &SpaceGroup| g.rooms.iter().find_map(|r| r.bridged.as_ref()?.guild_id.clone());
-        match group.filter(|g| g.space.is_some()) {
-            Some(g) => {
-                if let Some(guild) = guild_of(g).and_then(|id| discord.guilds.iter().find(|x| x.id == id)) {
-                    list = list.push(voice_channels(None, guild, current, p, l));
-                }
-            }
-            None => {
-                let bridged: Vec<String> = session.groups.iter().filter_map(guild_of).collect();
-                for guild in discord.guilds.iter().filter(|x| !bridged.contains(&x.id)) {
-                    list = list.push(voice_channels(Some(&guild.name), guild, current, p, l));
-                }
-            }
-        }
+    // A bridged server's voice channels, from the hidden client. (Servers it
+    // lists get their own rail tile and guild_pane instead.)
+    if let Some(discord) = discord
+        && let Some(guild) = group
+            .filter(|g| g.space.is_some())
+            .and_then(guild_of)
+            .and_then(|id| discord.guilds.iter().find(|x| x.id == id))
+    {
+        list = list.push(voice_channels(guild, discord.voice.channel_id.as_deref(), p, l));
     }
 
     if let Some(space) = group.and_then(|g| g.space.as_ref()).filter(|s| s.is_invite) {
@@ -2259,34 +2489,114 @@ fn channel_pane<'a>(
 
 /// A server's voice channels: click to join; who's in each, lit while talking.
 fn voice_channels<'a>(
-    label: Option<&str>,
     guild: &'a mesh_discord::Guild,
     current: Option<&str>,
     p: &theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
-    let mut col = column![ui::section(&format!("voice{}", label.map(|n| format!(" · {n}")).unwrap_or_default()), p)].spacing(2);
-    if guild.voice_channels.is_empty() {
-        return col.into();
-    }
+    let mut col = column![ui::section("voice", p)].spacing(2);
     for channel in &guild.voice_channels {
-        let here = current == Some(channel.id.as_str());
-        let color = if here { p.success() } else { p.text() };
-        let mut line = row![
-            ui::icon(ui::Icon::Voice, 15.0, color),
-            ui::sans(&channel.name, 14.0, if here { Weight::Semibold } else { Weight::Normal }, color).width(Length::Fill),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
-        if here {
-            line = line.push(ui::mono("connected", 10.0, p.success()));
-        }
-        col = col.push(ui::row_button(line, Message::DiscordJoin(channel.id.clone()), here, p, l));
-        for member in &channel.members {
-            col = col.push(container(voice_member(member, 22.0, p)).padding(iced::Padding { left: 30.0, ..iced::Padding::ZERO }));
-        }
+        col = col.push(voice_channel(channel, current, p, l));
     }
     col.into()
+}
+
+/// One voice channel row (click to join), with who's in it under it.
+fn voice_channel<'a>(
+    channel: &'a mesh_discord::VoiceChannel,
+    current: Option<&str>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let here = current == Some(channel.id.as_str());
+    let color = if here { p.success() } else { p.text() };
+    let mut line = row![
+        ui::icon(ui::Icon::Voice, 15.0, color),
+        ui::sans(&channel.name, 14.0, if here { Weight::Semibold } else { Weight::Normal }, color).width(Length::Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+    if here {
+        line = line.push(ui::mono("connected", 10.0, p.success()));
+    }
+    let mut col = column![ui::row_button(line, Message::DiscordJoin(channel.id.clone()), here, p, l)].spacing(2);
+    for member in &channel.members {
+        col = col.push(container(voice_member(member, 22.0, p)).padding(iced::Padding { left: 30.0, ..iced::Padding::ZERO }));
+    }
+    col.into()
+}
+
+/// A Discord server straight from the hidden client: its categories, each
+/// with text channels (opening the bridged room, when there is one) and
+/// voice channels (click to join).
+fn guild_pane<'a>(
+    session: &'a Session,
+    discord: Option<&'a mesh_discord::Snapshot>,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let footer = user_panel(session, discord.map(|d| &d.voice), p, l);
+    let Some(guild) = active_guild(session, discord) else {
+        let body = container(text("Discord isn't running, or you left this server.").size(13).color(p.text_muted()))
+            .padding(14)
+            .height(Length::Fill);
+        return column![body, ui::hline(p), footer].into();
+    };
+    let header = column![
+        ui::sans(&guild.name, 15.0, Weight::Semibold, p.text_bright()),
+        ui::mono(format!("{} channels", guild.text_channels.len() + guild.voice_channels.len()), 11.0, p.text_muted()),
+        row![ui::mono("dc", 11.0, p.proto_dc()), ui::mono("from your Discord account", 11.0, p.text_muted())].spacing(6),
+    ]
+    .spacing(4)
+    .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
+
+    // Categories in the order Discord lists them; uncategorised first.
+    let mut categories: Vec<Option<&str>> = Vec::new();
+    let in_order = guild.text_channels.iter().map(|c| c.category.as_deref());
+    for category in in_order.chain(guild.voice_channels.iter().map(|c| c.category.as_deref())) {
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    categories.sort_by_key(|c| c.is_some());
+
+    let current = discord.and_then(|d| d.voice.channel_id.as_deref());
+    let mut list = column![].spacing(2).padding([10, 8]);
+    for category in categories {
+        if let Some(name) = category {
+            list = list.push(ui::section(name, p));
+        }
+        for channel in guild.text_channels.iter().filter(|c| c.category.as_deref() == category) {
+            let bridged = session
+                .rooms
+                .iter()
+                .find(|r| r.bridged.as_ref().is_some_and(|b| b.channel_id == channel.id));
+            list = list.push(match bridged {
+                Some(room) => {
+                    let selected = session.selected_room.as_ref() == Some(&room.id);
+                    channel_row(room, &session.avatars, selected, p, l)
+                }
+                None => ui::not_yet(
+                    container(
+                        row![
+                            ui::swatch(iced::Color::TRANSPARENT, 2.0, 18.0, 1.0),
+                            ui::icon(ui::Icon::Hash, 14.0, p.text_muted()),
+                            ui::sans(&channel.name, 14.0, Weight::Normal, p.text_muted()),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 }),
+                    "Not bridged. Reading Discord text right in Mesh comes next.",
+                    p,
+                ),
+            });
+        }
+        for channel in guild.voice_channels.iter().filter(|c| c.category.as_deref() == category) {
+            list = list.push(voice_channel(channel, current, p, l));
+        }
+    }
+    column![header, ui::hline(p), scrollable(list).height(Length::Fill), ui::hline(p), footer].into()
 }
 
 /// Someone in a Discord call: avatar (ringed while talking), name, mute/deaf.
@@ -2688,19 +2998,23 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
 
 /// Runs a shell command in the background, without waiting for it.
 fn run_command(cmd: &str) -> std::io::Result<()> {
+    // cmd doesn't understand Rust's \" quoting, so pass the line as is; and
+    // don't flash a console window while it runs.
     #[cfg(windows)]
     let mut command = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut c = std::process::Command::new("cmd");
-        c.arg("/C");
+        c.arg("/C").raw_arg(cmd).creation_flags(CREATE_NO_WINDOW);
         c
     };
     #[cfg(not(windows))]
     let mut command = {
         let mut c = std::process::Command::new("sh");
-        c.arg("-c");
+        c.arg("-c").arg(cmd);
         c
     };
-    command.arg(cmd).spawn().map(|_| ())
+    command.spawn().map(|_| ())
 }
 
 /// Opens `url` in the default browser.
@@ -4244,6 +4558,98 @@ fn add_friend_view<'a>(
         ..container::Style::default()
     })
     .into()
+}
+
+/// The join-a-Discord-server dialog's state.
+#[derive(Default)]
+struct JoinServer {
+    link: String,
+    /// Waiting on Discord (or on a captcha in its window).
+    busy: bool,
+    /// Last result, and whether it's an error.
+    note: Option<(String, bool)>,
+}
+
+/// Text input id of the invite field, to focus it on open.
+const INVITE_INPUT: &str = "invite";
+
+/// The join-a-Discord-server dialog, over the shell.
+fn join_server_view<'a>(
+    dialog: &'a JoinServer,
+    engine_up: bool,
+    p: &'a theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let ready = engine_up && !dialog.busy && !dialog.link.trim().is_empty();
+    let join = ui::primary_button(
+        ui::sans(if dialog.busy { "Joining…" } else { "Join" }, 14.0, Weight::Semibold, p.accent_text()),
+        ready.then_some(Message::JoinServerSubmit),
+        p,
+        l,
+    )
+    .padding([10, 16]);
+    let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
+    let input = text_input("https://discord.gg/…", &dialog.link)
+        .id(iced::widget::Id::new(INVITE_INPUT))
+        .on_input(Message::JoinServerLink)
+        .on_submit(Message::JoinServerSubmit)
+        .padding([10, 0])
+        .size(14)
+        .font(ui::MONO)
+        .style(move |_, _| text_input::Style {
+            background: iced::Color::TRANSPARENT.into(),
+            border: iced::Border::default(),
+            icon: muted,
+            placeholder: muted,
+            value: bright,
+            selection,
+        });
+    let (fill, edge) = (p.background(), p.border_ctrl());
+    let field = container(
+        row![container(ui::mono_bold("dc", 11.0, p.proto_dc())).width(20), input, join]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+    )
+    .padding(iced::Padding { top: 4.0, right: 4.0, bottom: 4.0, left: 14.0 })
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    });
+
+    let mut col = column![
+        row![
+            column![
+                ui::sans("Join a Discord server", 20.0, Weight::Semibold, p.text_bright()),
+                text("Paste an invite link. Mesh accepts it through your Discord account.")
+                    .size(14)
+                    .color(p.text_muted()),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            ui::icon_button(ui::Icon::Close, Some(Message::Escape), false, p, l),
+        ],
+        column![ui::mono("INVITE LINK", 11.0, p.text_muted()), field].spacing(8),
+    ]
+    .spacing(18);
+    if !engine_up {
+        col = col.push(ui::mono("Mesh's Discord client isn't running; see the README.", 12.0, p.danger()));
+    }
+    if let Some((note, error)) = &dialog.note {
+        col = col.push(ui::mono(note, 12.0, if *error { p.danger() } else { p.success() }));
+    }
+
+    let scrim = theme::alpha(p.background(), 0.6);
+    container(iced::widget::opaque(ui::pane(col.padding(24), true, p, l, false).max_width(560)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(scrim.into()),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// Secure Backup controls: status, set-up (shows the recovery key once), and
