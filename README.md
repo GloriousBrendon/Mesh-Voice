@@ -61,8 +61,20 @@ and reads Discord's own voice state. You get Discord voice channels (with who's
 talking) in the channel pane, a call button in bridged Discord DMs, a voice bar
 in the chat pane, and the user panel's mic / deafen / leave buttons acting on
 the Discord call. Set `discord_engine_command` to start that client when Mesh
-starts and it isn't running. The client itself (a browser behind a VPN) is set
-up outside Mesh; see design/DISCORD-NATIVE.md.
+starts and it isn't running. On Linux the client itself (a browser behind a
+VPN) is set up outside Mesh; see design/DISCORD-NATIVE.md.
+
+On Windows the engine is Edge with DevTools on `127.0.0.1:9222` (the default
+there; `discord_engine_socket` also takes any `host:port`). Put this in
+`%APPDATA%\mesh\config.toml`, start Mesh, and log into Discord once in the
+window that opens; minimize it after that:
+
+```toml
+discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\mesh\discord-engine --app=https://discord.com/channels/@me --no-first-run --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows'
+```
+
+Any local program can use that port to drive the Discord session in it, so
+only run it on a PC you trust.
 
 ## Build & run
 

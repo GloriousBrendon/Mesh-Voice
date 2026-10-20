@@ -1,24 +1,18 @@
 //! Discord voice for Mesh, driven through a hidden official Discord web
 //! client. The client runs in its own browser (the `discord-voice` launcher,
-//! behind the VPN); this crate reaches it over the Chrome DevTools Protocol
-//! on a unix socket, installs `agent.js` in the page, and streams voice state
-//! back. Mesh never talks to Discord itself, and stays Matrix-only in
+//! behind the VPN, on Linux; Edge on Windows); this crate reaches it over the
+//! Chrome DevTools Protocol on a unix socket or a localhost TCP port, installs
+//! `agent.js` in the page, and streams voice state back. Mesh never talks to Discord itself, and stays Matrix-only in
 //! `mesh-core`.
 
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-#[cfg(unix)]
-use {
-    futures_util::{SinkExt, StreamExt},
-    std::path::Path,
-    std::time::Duration,
-    tokio::io::{AsyncReadExt, AsyncWriteExt},
-    tokio::net::UnixStream,
-    tokio_tungstenite::tungstenite::Message as WsMessage,
-};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-#[cfg(unix)]
 const AGENT: &str = include_str!("agent.js");
 
 /// What Mesh hears from the engine.
@@ -27,6 +21,8 @@ pub enum Event {
     /// Connected to the hidden client; use the handle to act.
     Connected(Engine),
     Snapshot(Snapshot),
+    /// How an `Engine::accept_invite` is going.
+    Invite(Invite),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -34,7 +30,6 @@ pub enum Event {
 /// Commands into the hidden client. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct Engine {
-    #[cfg_attr(not(unix), allow(dead_code))]
     commands: mpsc::UnboundedSender<String>,
 }
 
@@ -52,6 +47,10 @@ impl Engine {
     pub fn toggle_deaf(&self) {
         self.call("toggleDeaf", &[]);
     }
+    /// Joins a server from an invite link or code; answers with `Event::Invite`.
+    pub fn accept_invite(&self, link: &str) {
+        self.call("acceptInvite", &[link]);
+    }
 
     fn call(&self, function: &str, args: &[&str]) {
         let args: Vec<String> = args
@@ -62,6 +61,16 @@ impl Engine {
             .commands
             .send(format!("window.__mesh && window.__mesh.{function}({})", args.join(",")));
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum Invite {
+    /// Discord hasn't answered yet, most likely because it's showing a
+    /// captcha; the engine window has been brought up for it.
+    Waiting,
+    Joined { guild: Option<String> },
+    Failed { error: String },
 }
 
 /// Voice state as the official client sees it.
@@ -107,13 +116,25 @@ pub struct Guild {
     pub id: String,
     pub name: String,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub text_channels: Vec<TextChannel>,
     pub voice_channels: Vec<VoiceChannel>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TextChannel {
+    pub id: String,
+    pub name: String,
+    /// The category it's under, if any.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VoiceChannel {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub category: Option<String>,
     pub members: Vec<Member>,
 }
 
@@ -125,12 +146,8 @@ impl Voice {
 
 /// Keeps a connection to the engine at `socket` for as long as `events` is
 /// open, reconnecting every few seconds when the hidden client isn't there.
-/// ponytail: the engine socket is a unix socket, so this is a no-op on
-/// Windows; add a named-pipe or TCP transport if Windows needs Discord voice.
-#[cfg(not(unix))]
-pub async fn run(_socket: PathBuf, _events: mpsc::UnboundedSender<Event>) {}
-
-#[cfg(unix)]
+/// `socket` is a unix socket path, or `host:port` for a browser started with
+/// `--remote-debugging-port` (Windows).
 pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     while !events.is_closed() {
         let mut connected = false;
@@ -144,17 +161,15 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     }
 }
 
-#[cfg(unix)]
 type Result<T> = std::result::Result<T, String>;
 
-#[cfg(unix)]
 async fn session(
     socket: &Path,
     events: &mpsc::UnboundedSender<Event>,
     connected: &mut bool,
 ) -> Result<()> {
     let page = discord_page(socket).await?;
-    let stream = UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
+    let stream = connect(socket).await?;
     let (mut ws, _) = tokio_tungstenite::client_async(format!("ws://localhost{page}"), stream)
         .await
         .map_err(|e| e.to_string())?;
@@ -168,6 +183,7 @@ async fn session(
     // reinstalls the agent whenever Discord reloads.
     for msg in [
         send("Runtime.addBinding", serde_json::json!({ "name": "meshEmit" })),
+        send("Runtime.addBinding", serde_json::json!({ "name": "meshInvite" })),
         send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": AGENT })),
         send("Runtime.evaluate", serde_json::json!({ "expression": AGENT })),
         send(
@@ -190,9 +206,12 @@ async fn session(
             incoming = ws.next() => {
                 let Some(incoming) = incoming else { return Err("engine closed".into()) };
                 let WsMessage::Text(text) = incoming.map_err(|e| e.to_string())? else { continue };
-                if let Some(snapshot) = binding_snapshot(&text) {
-                    events.send(Event::Snapshot(snapshot)).map_err(|_| "Mesh went away".to_string())?;
+                let Some(event) = binding_event(&text) else { continue };
+                if matches!(event, Event::Invite(Invite::Waiting)) {
+                    // Restores the window even when it's minimized.
+                    ws.send(send("Page.bringToFront", serde_json::json!({}))).await.map_err(|e| e.to_string())?;
                 }
+                events.send(event).map_err(|_| "Mesh went away".to_string())?;
             }
             // Handles may all be dropped (nobody acting); keep streaming state.
             command = command_rx.recv(), if commands_open => {
@@ -207,19 +226,60 @@ async fn session(
     }
 }
 
-/// A `meshEmit` binding call carrying a snapshot, if `text` is one.
-fn binding_snapshot(text: &str) -> Option<Snapshot> {
+/// The event a binding call from the agent carries, if `text` is one.
+fn binding_event(text: &str) -> Option<Event> {
     let msg: serde_json::Value = serde_json::from_str(text).ok()?;
-    if msg["method"] != "Runtime.bindingCalled" || msg["params"]["name"] != "meshEmit" {
+    if msg["method"] != "Runtime.bindingCalled" {
         return None;
     }
-    serde_json::from_str(msg["params"]["payload"].as_str()?).ok()
+    let payload = msg["params"]["payload"].as_str()?;
+    match msg["params"]["name"].as_str()? {
+        "meshEmit" => serde_json::from_str(payload).ok().map(Event::Snapshot),
+        "meshInvite" => serde_json::from_str(payload).ok().map(Event::Invite),
+        _ => None,
+    }
+}
+
+/// Whether something is listening at the engine address (cheap; for deciding
+/// whether to start the engine).
+pub fn is_running(socket: &Path) -> bool {
+    match tcp_address(socket) {
+        Some(addr) => std::net::ToSocketAddrs::to_socket_addrs(addr)
+            .ok()
+            .and_then(|mut a| a.next())
+            .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok()),
+        None => socket.exists(),
+    }
+}
+
+/// `host:port` if the engine address is one rather than a socket path.
+fn tcp_address(socket: &Path) -> Option<&str> {
+    let s = socket.to_str()?;
+    let (host, port) = s.rsplit_once(':')?;
+    let path_like = host.is_empty() || s.contains(['/', '\\']);
+    (!path_like && port.parse::<u16>().is_ok()).then_some(s)
+}
+
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+async fn connect(socket: &Path) -> Result<Box<dyn Io>> {
+    if let Some(addr) = tcp_address(socket) {
+        let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        return Ok(Box::new(stream));
+    }
+    #[cfg(unix)]
+    {
+        let stream = tokio::net::UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
+        Ok(Box::new(stream))
+    }
+    #[cfg(not(unix))]
+    Err(format!("{} isn't host:port", socket.display()))
 }
 
 /// The DevTools websocket path of the Discord tab.
-#[cfg(unix)]
 async fn discord_page(socket: &Path) -> Result<String> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|e| e.to_string())?;
+    let mut stream = connect(socket).await?;
     stream
         .write_all(b"GET /json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await
@@ -275,12 +335,37 @@ mod tests {
     }
 
     #[test]
+    fn tells_tcp_from_socket_paths() {
+        assert_eq!(tcp_address(Path::new("127.0.0.1:9222")), Some("127.0.0.1:9222"));
+        assert_eq!(tcp_address(Path::new("localhost:9222")), Some("localhost:9222"));
+        assert_eq!(tcp_address(Path::new("/run/user/1000/discord-engine.sock")), None);
+        assert_eq!(tcp_address(Path::new(r"C:\Users\me\engine.sock")), None);
+    }
+
+    #[test]
     fn parses_binding_snapshot() {
         let payload = r#"{"me":{"id":"1","name":"me","avatar":null},"voice":{"channel_id":"9","guild_id":null,"channel_name":"call","connection":"RTC_CONNECTED","self_mute":false,"self_deaf":false,"members":[{"id":"2","name":"b","avatar":null,"speaking":true,"mute":false,"deaf":false}]},"guilds":[]}"#;
         let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshEmit", "payload": payload } });
-        let snapshot = binding_snapshot(&msg.to_string()).unwrap();
+        let Some(Event::Snapshot(snapshot)) = binding_event(&msg.to_string()) else { panic!("no snapshot") };
         assert_eq!(snapshot.voice.channel_id.as_deref(), Some("9"));
         assert!(snapshot.voice.members[0].speaking);
-        assert!(binding_snapshot(r#"{"id":3,"result":{}}"#).is_none());
+        assert!(binding_event(r#"{"id":3,"result":{}}"#).is_none());
+    }
+
+    #[test]
+    fn parses_invite_results() {
+        let invite = |payload: &str| {
+            let msg = serde_json::json!({ "method": "Runtime.bindingCalled", "params": { "name": "meshInvite", "payload": payload } });
+            match binding_event(&msg.to_string()) {
+                Some(Event::Invite(invite)) => invite,
+                other => panic!("not an invite: {other:?}"),
+            }
+        };
+        assert_eq!(invite(r#"{"state":"waiting"}"#), Invite::Waiting);
+        assert_eq!(invite(r#"{"state":"joined","guild":"404"}"#), Invite::Joined { guild: Some("404".into()) });
+        assert_eq!(
+            invite(r#"{"state":"failed","error":"Unknown Invite"}"#),
+            Invite::Failed { error: "Unknown Invite".into() }
+        );
     }
 }

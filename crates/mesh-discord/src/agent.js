@@ -2,7 +2,9 @@
 // calls its own actions, so Mesh can show and drive voice without the window.
 // Talks back through the `meshEmit` DevTools binding.
 (() => {
-  if (window.__mesh) return "already";
+  // Bump when the API below changes, so a running page takes the new agent.
+  const version = 3;
+  if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
   // app is the one with the most instantiated modules.
@@ -37,7 +39,7 @@
     const stores = {};
     const wanted = ["UserStore", "GuildStore", "GuildChannelStore", "GuildMemberStore", "ChannelStore",
       "VoiceStateStore", "SpeakingStore", "MediaEngineStore", "SelectedChannelStore", "RTCConnectionStore"];
-    let channel, audio, call;
+    let channel, audio, call, invite;
     for (const c of candidates(req)) {
       try {
         if (typeof c.getName === "function") {
@@ -47,11 +49,13 @@
         if (!channel && typeof c.selectVoiceChannel === "function" && typeof c.disconnect === "function") channel = c;
         if (!audio && typeof c.toggleSelfMute === "function" && typeof c.toggleSelfDeaf === "function") audio = c;
         if (!call && typeof c.call === "function" && typeof c.ring === "function") call = c;
+        if (!invite && typeof c.acceptInvite === "function" && typeof c.resolveInvite === "function") invite = c;
       } catch {}
     }
     const missing = wanted.filter((n) => !stores[n]);
     if (missing.length || !channel || !audio || !call) return null;
-    return { s: stores, channel, audio, call, dispatcher: stores.VoiceStateStore._dispatcher };
+    // Optional: voice keeps working if Discord renames the invite actions.
+    return { s: stores, channel, audio, call, invite, dispatcher: stores.VoiceStateStore._dispatcher };
   };
 
   const user = (id) => {
@@ -80,16 +84,30 @@
     const s = found.s;
     const current = s.SelectedChannelStore.getVoiceChannelId() || null;
     const currentChannel = current ? s.ChannelStore.getChannel(current) : null;
-    const guilds = Object.values(s.GuildStore.getGuilds()).map((g) => ({
-      id: g.id,
-      name: g.name,
-      icon: g.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png?size=64` : null,
-      voice_channels: ((s.GuildChannelStore.getChannels(g.id) || {}).VOCAL || []).map(({ channel }) => ({
-        id: channel.id,
-        name: channel.name,
-        members: members(channel.id, g.id),
-      })),
-    }));
+    const guilds = Object.values(s.GuildStore.getGuilds()).map((g) => {
+      const channels = s.GuildChannelStore.getChannels(g.id) || {};
+      const category = (channel) => {
+        const parent = channel.parent_id && s.ChannelStore.getChannel(channel.parent_id);
+        return (parent && parent.name) || null;
+      };
+      return {
+        id: g.id,
+        name: g.name,
+        icon: g.icon ? `https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png?size=64` : null,
+        // SELECTABLE: the text-like channels you can see, in Discord's order.
+        text_channels: (channels.SELECTABLE || []).map(({ channel }) => ({
+          id: channel.id,
+          name: channel.name,
+          category: category(channel),
+        })),
+        voice_channels: (channels.VOCAL || []).map(({ channel }) => ({
+          id: channel.id,
+          name: channel.name,
+          category: category(channel),
+          members: members(channel.id, g.id),
+        })),
+      };
+    });
     const me = s.UserStore.getCurrentUser();
     return {
       me: me ? user(me.id) : null,
@@ -120,6 +138,7 @@
     "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE"];
 
   window.__mesh = {
+    version,
     ready: () => !!found,
     snapshot: () => (found ? JSON.stringify(snapshot()) : null),
     // Guild voice channels: join. DM / group DM: start or join the call (rings).
@@ -135,6 +154,29 @@
     leave: () => found.channel.disconnect(),
     toggleMute: () => found.audio.toggleSelfMute(),
     toggleDeaf: () => found.audio.toggleSelfDeaf(),
+    // Joins a server from a discord.gg / discord.com/invite link or a bare
+    // code. Discord's own client asks for a captcha in its window if it wants
+    // one; "waiting" tells Mesh to bring that window up.
+    acceptInvite: (link) => {
+      const code = String(link).trim()
+        .replace(/^(https?:\/\/)?(www\.)?(discord\.gg|discord(app)?\.com\/invite)\//i, "")
+        .split(/[/?#\s]/)[0];
+      const report = (r) => window.meshInvite(JSON.stringify(r));
+      if (!found || !found.invite) return report({ state: "failed", error: "Discord isn't ready yet" });
+      if (!code) return report({ state: "failed", error: "That isn't an invite link" });
+      let settled = false;
+      setTimeout(() => settled || report({ state: "waiting" }), 2500);
+      found.invite
+        .acceptInvite({ inviteKey: code, context: { location: "Join Guild Modal" }, skipOnboarding: true })
+        .then(
+          (r) => { settled = true; report({ state: "joined", guild: (r && r.guild && r.guild.name) || null }); },
+          (e) => {
+            settled = true;
+            const error = (e && ((e.body && e.body.message) || e.message)) || "Discord refused the invite";
+            report({ state: "failed", error });
+          },
+        );
+    },
   };
 
   // Stores fill in after login/startup; keep looking until they're there.
