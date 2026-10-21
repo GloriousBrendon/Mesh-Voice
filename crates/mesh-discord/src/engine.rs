@@ -69,8 +69,11 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
     let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_frame_size(Some(256 << 20))
         .max_message_size(Some(256 << 20));
-    let (mut ws, _) = tokio_tungstenite::client_async_with_config(format!("ws://localhost{page}"), stream, Some(config))
+    // A page that's still being created can leave the handshake hanging.
+    let handshake = tokio_tungstenite::client_async_with_config(format!("ws://localhost{page}"), stream, Some(config));
+    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(10), handshake)
         .await
+        .map_err(|_| "DevTools handshake timed out".to_string())?
         .map_err(|e| e.to_string())?;
 
     let mut id = 0u64;
@@ -95,11 +98,18 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
         ws.send(msg).await.map_err(|e| e.to_string())?;
     }
 
+    tracing::debug!("engine ({}): connected to {page}", site.host);
     let (commands, mut command_rx) = mpsc::unbounded_channel();
     raw.send(Raw::Connected(commands)).map_err(|_| "Mesh went away".to_string())?;
     *connected = true;
 
     let mut commands_open = true;
+    // A browser that's just starting can swap a page out from under this
+    // connection without closing it, losing the agent and bindings (or the
+    // page goes quiet); check every ten seconds and start over if so.
+    let probe = format!("typeof window.__mesh + '/' + typeof window.{}", site.bindings.first().copied().unwrap_or("__mesh"));
+    let mut check = tokio::time::interval(Duration::from_secs(10));
+    let mut awaiting = false;
     loop {
         tokio::select! {
             incoming = ws.next() => {
@@ -107,7 +117,20 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
                 let WsMessage::Text(text) = incoming.map_err(|e| e.to_string())? else { continue };
                 if let Some((name, payload)) = binding(&text) {
                     raw.send(Raw::Binding { name, payload }).map_err(|_| "Mesh went away".to_string())?;
+                } else if let Some(healthy) = health(&text) {
+                    if !healthy {
+                        return Err("the agent is gone from the page".into());
+                    }
+                    awaiting = false;
                 }
+            }
+            _ = check.tick() => {
+                if awaiting {
+                    return Err("the page stopped answering".into());
+                }
+                awaiting = true;
+                let request = serde_json::json!({ "id": HEALTH_ID, "method": "Runtime.evaluate", "params": { "expression": probe, "returnByValue": true } });
+                ws.send(WsMessage::text(request.to_string())).await.map_err(|e| e.to_string())?;
             }
             // Handles may all be dropped (nobody acting); keep streaming state.
             command = command_rx.recv(), if commands_open => {
@@ -128,6 +151,17 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
             }
         }
     }
+}
+
+/// Request id of the health check: far from the counter the rest use, and
+/// inside the 32-bit range DevTools accepts.
+const HEALTH_ID: u64 = 2_000_000_000;
+
+/// If `text` is the health check's answer: whether the agent and its
+/// bindings are there.
+fn health(text: &str) -> Option<bool> {
+    let msg: serde_json::Value = serde_json::from_str(text).ok()?;
+    (msg["id"].as_u64() == Some(HEALTH_ID)).then(|| msg["result"]["result"]["value"].as_str() == Some("object/function"))
 }
 
 /// A binding call's (name, payload), if `text` is one.
@@ -388,6 +422,15 @@ mod tests {
         assert_eq!((id.as_str(), local, width, height, rgba.len()), ("t1", true, 4, 2, 4 * 2 * 4));
         assert!(matches!(video(r#"{"id":"t1","ended":true}"#), Some(Video::Ended { id }) if id == "t1"));
         assert!(video(r#"{"id":"t1","jpeg":"bm90IGEganBlZw=="}"#).is_none());
+    }
+
+    #[test]
+    fn notices_a_lost_agent() {
+        let answer = |value: &str| format!(r#"{{"id":{HEALTH_ID},"result":{{"result":{{"type":"string","value":"{value}"}}}}}}"#);
+        assert_eq!(health(&answer("object/function")), Some(true));
+        assert_eq!(health(&answer("undefined/undefined")), Some(false));
+        assert_eq!(health(&answer("object/undefined")), Some(false));
+        assert_eq!(health(r#"{"id":3,"result":{"result":{"value":"undefined/undefined"}}}"#), None);
     }
 
     #[test]
