@@ -4,6 +4,7 @@ mod audio;
 mod bridge;
 mod call;
 mod contacts;
+pub mod networks;
 mod session;
 mod spaces;
 mod timeline;

@@ -2382,7 +2382,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 clients.close(previous);
             }
             if !clients.open(&channel) {
-                let name = if channel.network == Network::WhatsApp { "WhatsApp" } else { "Discord" };
+                let name = channel.network.spec().name;
                 session.status = Some(format!("{name} isn't running."));
             }
             session.selected_room = None;
@@ -3443,12 +3443,7 @@ fn forward_picker<'a>(
 }
 
 fn net_color(network: Network, p: &theme::Palette) -> iced::Color {
-    match network {
-        Network::Matrix => p.proto_mx(),
-        Network::Discord => p.proto_dc(),
-        // The palette has no WhatsApp token; its green reads as WhatsApp.
-        Network::WhatsApp => p.success(),
-    }
+    p.network(network.spec())
 }
 
 /// Your homeserver's name, e.g. `strange.lab`.
@@ -3605,7 +3600,7 @@ fn top_bar<'a>(
         let _ = p;
         Health::On
     });
-    chips = chips.push(connection_chip("mx", p.proto_mx(), mx, Message::OpenSettings(SettingsPage::Accounts), p));
+    chips = chips.push(connection_chip(Network::Matrix, mx, Message::OpenSettings(SettingsPage::Accounts), p));
     // Discord: bridge (text in Matrix) + the hidden client (voice, servers).
     let bridge = session.rooms.iter().any(|r| r.network == Network::Discord);
     let voice = discord_engine == Some(true);
@@ -3615,11 +3610,11 @@ fn top_bar<'a>(
         _ => Health::Partial,
     };
     let dc_click = if voice { Message::OpenSettings(SettingsPage::Accounts) } else { Message::StartDiscord };
-    chips = chips.push(connection_chip("dc", p.proto_dc(), dc, dc_click, p));
+    chips = chips.push(connection_chip(Network::Discord, dc, dc_click, p));
     // WhatsApp: the hidden WhatsApp Web tab.
     let wa = if whatsapp_up { Health::On } else { Health::Off };
     let wa_click = if whatsapp_up { Message::OpenSettings(SettingsPage::Accounts) } else { Message::OpenWhatsApp };
-    chips = chips.push(connection_chip("wa", p.success(), wa, wa_click, p));
+    chips = chips.push(connection_chip(Network::WhatsApp, wa, wa_click, p));
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
     let search = button(
@@ -3681,8 +3676,7 @@ enum Health {
 
 /// A compact, clickable platform status: a dot (green/yellow/red) and its tag.
 fn connection_chip<'a>(
-    proto: &'a str,
-    color: iced::Color,
+    network: Network,
     health: Health,
     on_press: Message,
     p: &theme::Palette,
@@ -3694,7 +3688,7 @@ fn connection_chip<'a>(
     };
     let (fill, edge, radius) = (p.panel_dim(), p.border_ctrl(), 999.0);
     button(
-        row![ui::swatch(dot, 7.0, 7.0, 3.5), ui::mono_bold(proto, 12.0, color)]
+        row![ui::swatch(dot, 7.0, 7.0, 3.5), ui::mono_bold(network.tag(), 12.0, net_color(network, p))]
             .spacing(6)
             .align_y(iced::Alignment::Center),
     )
@@ -3853,9 +3847,9 @@ fn rail_folder<'a>(
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let (icon, color) = match network {
-        Network::Discord => (ui::Icon::Discord, p.proto_dc()),
-        Network::Matrix => (ui::Icon::Matrix, p.proto_mx()),
-        Network::WhatsApp => (ui::Icon::Phone, p.success()),
+        Network::Discord => (ui::Icon::Discord, net_color(Network::Discord, p)),
+        Network::Matrix => (ui::Icon::Matrix, net_color(Network::Matrix, p)),
+        Network::WhatsApp => (ui::Icon::Phone, net_color(Network::WhatsApp, p)),
     };
     let head = column![
         rail_tile(ui::icon(icon, 22.0, color), false, Some(Message::ToggleFolder(network)), p, l),
@@ -3900,8 +3894,8 @@ fn space_tile<'a>(
                 .content_fit(iced::ContentFit::Cover)
                 .into(),
             None => match group.network() {
-                Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { p.proto_dc() } else { fg }),
-                Network::Matrix | Network::WhatsApp => ui::icon(ui::Icon::Matrix, 22.0, if active { p.proto_mx() } else { fg }),
+                Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { net_color(Network::Discord, p) } else { fg }),
+                Network::Matrix | Network::WhatsApp => ui::icon(ui::Icon::Matrix, 22.0, if active { net_color(Network::Matrix, p) } else { fg }),
             },
         };
     let tile: Element<'_, Message> = rail_tile(
@@ -4009,7 +4003,7 @@ fn channel_pane<'a>(
     if group.is_some_and(|g| g.network() == Network::Discord) {
         header = header.push(
             row![
-                ui::mono("dc", 11.0, p.proto_dc()),
+                ui::mono(Network::Discord.tag(), 11.0, net_color(Network::Discord, p)),
                 ui::mono(format!("bridged via {}", my_server(session)), 11.0, p.text_muted()),
             ]
             .spacing(6),
@@ -4020,8 +4014,8 @@ fn channel_pane<'a>(
         // Compact icon toggles (with tooltips) so they don't overflow.
         let mut chips = row![filter_chip(None, ui::Icon::Home, "All", p.text_bright(), session.home_filter, p, l)].spacing(4);
         for (icon, label, color, filter) in [
-            (ui::Icon::Matrix, "Matrix", p.proto_mx(), Network::Matrix),
-            (ui::Icon::Discord, "Discord", p.proto_dc(), Network::Discord),
+            (ui::Icon::Matrix, "Matrix", net_color(Network::Matrix, p), Network::Matrix),
+            (ui::Icon::Discord, "Discord", net_color(Network::Discord, p), Network::Discord),
             (ui::Icon::Phone, "WhatsApp", p.success(), Network::WhatsApp),
         ] {
             chips = chips.push(filter_chip(Some(filter), icon, label, color, session.home_filter, p, l));
@@ -4207,7 +4201,7 @@ fn guild_pane<'a>(
     let header = column![
         ui::sans(&guild.name, 15.0, Weight::Semibold, p.text_bright()),
         ui::mono(format!("{} channels", guild.text_channels.len() + guild.voice_channels.len()), 11.0, p.text_muted()),
-        row![ui::mono("dc", 11.0, p.proto_dc()), ui::mono("from your Discord account", 11.0, p.text_muted())].spacing(6),
+        row![ui::mono(Network::Discord.tag(), 11.0, net_color(Network::Discord, p)), ui::mono("from your Discord account", 11.0, p.text_muted())].spacing(6),
     ]
     .spacing(4)
     .padding(iced::Padding { top: 14.0, right: 14.0, bottom: 10.0, left: 14.0 });
@@ -4247,7 +4241,7 @@ fn voice_member<'a>(
     p: &theme::Palette,
 ) -> Element<'a, Message> {
     let ring = if member.speaking { p.success() } else { iced::Color::TRANSPARENT };
-    let face = container(ui::avatar(&member.name, picture, size, p.proto_dc(), p, None))
+    let face = container(ui::avatar(&member.name, picture, size, net_color(Network::Discord, p), p, None))
         .padding(2)
         .style(move |_| container::Style {
             border: iced::border::rounded(size).color(ring).width(2),
@@ -4532,8 +4526,8 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
 
     if let Some(channel) = &session.web_chat {
         let (hash, account) = match channel.network {
-            Network::WhatsApp => ("", "WhatsApp"),
-            _ => (if channel.dm { "" } else { "#" }, "Discord"),
+            Network::WhatsApp => ("", channel.network.spec().name),
+            _ => (if channel.dm { "" } else { "#" }, channel.network.spec().name),
         };
         let placeholder = format!("message {hash}{}  —  sends with your {account} account", channel.name);
         return body(col, placeholder, None).into();
@@ -4753,7 +4747,7 @@ fn discord_call_bar<'a>(
         column![
             row![
                 ui::icon(ui::Icon::Voice, 17.0, status),
-                ui::mono_bold("dc", 12.0, p.proto_dc()),
+                ui::mono_bold(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)),
                 ui::sans(voice.channel_name.as_deref().unwrap_or("call"), 14.0, Weight::Semibold, p.text_bright())
                     .width(Length::Fill),
                 ui::icon_button(
@@ -4941,9 +4935,8 @@ fn timeline_view<'a>(
                 // their next messages sit under it.
                 if day_changed || previous_sender != Some(&message.sender) {
                     let tag = match message.sender_network {
-                        Network::Discord => "dc".to_string(),
-                        Network::WhatsApp => "wa".to_string(),
-                        Network::Matrix => format!("mx · {}", message.sender.server_name()),
+                        Network::Matrix => format!("{} · {}", Network::Matrix.tag(), message.sender.server_name()),
+                        other => other.tag().to_string(),
                     };
                     let fill = if is_me { p.accent() } else { net };
                     let mut header = row![ui::sans(&message.sender_name, 14.0, Weight::Semibold, p.text_bright())]
@@ -5539,7 +5532,7 @@ fn typing_line<'a>(names: &[String], p: &theme::Palette) -> Element<'a, Message>
     } else {
         names.join(", ")
     };
-    row![ui::mono(who, 11.0, p.proto_mx()), ui::mono(verb, 11.0, p.text_muted())].into()
+    row![ui::mono(who, 11.0, net_color(Network::Matrix, p)), ui::mono(verb, 11.0, p.text_muted())].into()
 }
 
 fn day_label(day: chrono::NaiveDate) -> String {
@@ -5867,7 +5860,7 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
     let mut table = column![];
     for (rice_key, field, color, used_for) in base {
         let key = if rice_keys { rice_key } else { field };
-        table = table.push(token_row(key.to_string(), color, used_for.to_string(), source, p.proto_mx(), p));
+        table = table.push(token_row(key.to_string(), color, used_for.to_string(), source, net_color(Network::Matrix, p), p));
     }
     let muted_contrast = theme::contrast(p.text_muted(), p.surface_alt());
     let derived = [
@@ -6391,7 +6384,7 @@ fn accounts_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Messag
     };
     let mut discord = column![
         heading("discord through a bridge", p),
-        row![ui::mono("dc", 12.0, p.proto_dc()), text(bridge_line).size(13).color(p.text())].spacing(8),
+        row![ui::mono(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)), text(bridge_line).size(13).color(p.text())].spacing(8),
     ]
     .spacing(8);
     if !state.discord_warning_seen {
@@ -6479,7 +6472,7 @@ fn detect_friend(query: &str, mode: FriendMode, my_server: &str) -> Detected {
     if v.starts_with('@') && !v.contains(':') {
         return Detected::Bad(format!("Matrix IDs need a server: {v}:matrix.org"));
     }
-    Detected::Bad("Not a Matrix ID or Discord username.".to_string())
+    Detected::Bad(format!("Not a {} ID or {} username.", Network::Matrix.spec().name, Network::Discord.spec().name))
 }
 
 /// The add-friend dialog's state.
@@ -6514,8 +6507,8 @@ fn add_friend_view<'a>(
     let server = my_server(session);
     let detected = detect_friend(&dialog.query, dialog.mode, &server);
     let (tag, tag_color) = match &detected {
-        Detected::Matrix { .. } => ("mx", p.proto_mx()),
-        Detected::Discord(_) => ("dc", p.proto_dc()),
+        Detected::Matrix { .. } => (Network::Matrix.tag(), net_color(Network::Matrix, p)),
+        Detected::Discord(_) => (Network::Discord.tag(), net_color(Network::Discord, p)),
         _ => ("··", p.text_muted()),
     };
     let (hint, hint_color) = match &detected {
@@ -6523,12 +6516,12 @@ fn add_friend_view<'a>(
             "Start typing — @user:server for Matrix, a plain username for Discord.".to_string(),
             p.text_muted(),
         ),
-        Detected::Matrix { id, guessed: true } => (format!("✓ matrix · assumed your homeserver — {id}"), p.proto_mx()),
+        Detected::Matrix { id, guessed: true } => (format!("✓ {} · assumed your homeserver — {id}", Network::Matrix.tag()), net_color(Network::Matrix, p)),
         Detected::Matrix { id, .. } => (
-            format!("✓ matrix user on {}", id.split_once(':').map_or("", |(_, s)| s)),
-            p.proto_mx(),
+            format!("✓ {} user on {}", Network::Matrix.tag(), id.split_once(':').map_or("", |(_, s)| s)),
+            net_color(Network::Matrix, p),
         ),
-        Detected::Discord(_) => (format!("✓ discord username · via your bridge on {server}"), p.proto_dc()),
+        Detected::Discord(_) => (format!("✓ {} username · via your bridge on {server}", Network::Discord.tag()), net_color(Network::Discord, p)),
         Detected::Bad(why) => (format!("✗ {why}"), p.danger()),
     };
     let edge = match &detected {
@@ -6630,9 +6623,9 @@ fn add_friend_view<'a>(
                 .filter(|(looked_up, _)| looked_up == id)
                 .and_then(|(_, name)| name.clone())
                 .unwrap_or_else(|| id.trim_start_matches('@').split(':').next().unwrap_or_default().to_string());
-            Some((name, format!("{id}  →  from {me}"), p.proto_mx()))
+            Some((name, format!("{id}  →  from {me}"), net_color(Network::Matrix, p)))
         }
-        Detected::Discord(name) => Some((name.clone(), format!("{name}  →  through your bridge on {server}"), p.proto_dc())),
+        Detected::Discord(name) => Some((name.clone(), format!("{name}  →  through your bridge on {server}"), net_color(Network::Discord, p))),
         _ => None,
     };
     if let Some((name, route, color)) = preview {
@@ -6781,7 +6774,7 @@ fn join_server_view<'a>(
         });
     let (fill, edge) = (p.background(), p.border_ctrl());
     let field = container(
-        row![container(ui::mono_bold("dc", 11.0, p.proto_dc())).width(20), input, join]
+        row![container(ui::mono_bold(Network::Discord.tag(), 11.0, net_color(Network::Discord, p))).width(20), input, join]
             .spacing(10)
             .align_y(iced::Alignment::Center),
     )

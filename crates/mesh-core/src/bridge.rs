@@ -1,10 +1,12 @@
-//! Spotting Discord through a mautrix-discord bridge, from Matrix data only:
-//! Mesh never talks to Discord itself.
+//! Spotting bridged networks (Discord through mautrix-discord) from Matrix
+//! data only, using the prefixes and protocol ids in the network registry.
 
 use matrix_sdk::Room;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::ruma::UserId;
 use matrix_sdk::ruma::events::StateEventType;
+
+use crate::networks::{self, NetworkSpec};
 
 /// Which network a room or person is really on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,25 +20,37 @@ pub enum Network {
 }
 
 impl Network {
-    /// The short tag the UI shows: `mx`, `dc` or `wa`.
-    pub fn tag(self) -> &'static str {
-        match self {
+    /// Every network Mesh can show chats from.
+    pub const ALL: [Network; 3] = [Network::Matrix, Network::Discord, Network::WhatsApp];
+
+    /// Its registry entry: tag, name, colour, sign-in.
+    pub fn spec(self) -> &'static NetworkSpec {
+        let id = match self {
             Network::Matrix => "mx",
             Network::Discord => "dc",
             Network::WhatsApp => "wa",
-        }
+        };
+        networks::spec(id).unwrap_or(&networks::NETWORKS[0])
+    }
+
+    /// The registry entry's network, for the ones Mesh can show chats from.
+    pub fn from_id(id: &str) -> Option<Network> {
+        Network::ALL.into_iter().find(|n| n.spec().id == id)
+    }
+
+    /// The short tag the UI shows: `mx`, `dc` or `wa`.
+    pub fn tag(self) -> &'static str {
+        self.spec().code
     }
 }
 
-/// Discord ghosts live in the bridge's user namespace; mautrix-discord's
-/// default is `@discord_<id>:<hs>`. ponytail: a custom `username_template`
+/// Bridge ghosts live in the bridge's user namespace (mautrix-discord's
+/// default is `@discord_<id>:<hs>`). ponytail: a custom `username_template`
 /// in the bridge config isn't read; make the prefix configurable if needed.
 pub fn user_network(user_id: &UserId) -> Network {
-    if user_id.localpart().starts_with("discord_") {
-        Network::Discord
-    } else {
-        Network::Matrix
-    }
+    networks::ghost_network(user_id.localpart())
+        .and_then(|n| Network::from_id(n.id))
+        .unwrap_or_default()
 }
 
 /// What mautrix-discord's bridge state says about a portal room.
@@ -77,13 +91,17 @@ pub fn made_by_bridge(room: &Room) -> bool {
     room.creators()
         .unwrap_or_default()
         .iter()
-        .any(|creator| creator.localpart().starts_with("discord"))
+        .any(|creator| {
+            let local = creator.localpart();
+            networks::bot_network(local).or_else(|| networks::ghost_network(local)).is_some_and(|n| n.id == "dc")
+        })
 }
 
 /// mautrix-discord says `protocol.id = "discordgo"`; other bridges `"discord"`.
 fn discord_bridge_ids(event: &serde_json::Value) -> Option<BridgedIds> {
     let content = &event["content"];
-    if !matches!(content["protocol"]["id"].as_str(), Some("discord" | "discordgo")) {
+    let protocol = content["protocol"]["id"].as_str().and_then(networks::protocol_network);
+    if protocol.map(|n| n.id) != Some(Network::Discord.spec().id) {
         return None;
     }
     Some(BridgedIds {

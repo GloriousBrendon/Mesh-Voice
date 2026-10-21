@@ -163,13 +163,10 @@ impl Palette {
     pub fn danger(&self) -> Color {
         or_derive(&self.danger, || parse_hex("#e07a7a"))
     }
-    /// Matrix network tag.
-    pub fn proto_mx(&self) -> Color {
-        parse_hex("#8fd6cc")
-    }
-    /// Discord network tag (different lightness from mx, so it isn't colour-only).
-    pub fn proto_dc(&self) -> Color {
-        parse_hex("#9aa6f5")
+    /// A network's tag colour, from the registry (each differs in lightness
+    /// too, so tags aren't told apart by hue alone).
+    pub fn network(&self, spec: &mesh_core::networks::NetworkSpec) -> Color {
+        parse_hex(spec.color)
     }
 
     /// Builds a full iced [`iced::Theme::custom`] from the palette, so every
