@@ -7,7 +7,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 17;
+  const version = 18;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -210,6 +210,21 @@
     if (seen) Promise.resolve(seen.sendConversationSeen({ chat, key, unreadDelta: -1 })).catch(() => {});
     try { chat.unreadCount = 0; chat.markedUnread = false; } catch {}
     emit(); // push a fresh snapshot so Mesh clears the badge now
+  };
+
+  // WhatsApp Web keeps only the latest messages of chats it hasn't shown in
+  // a while (sometimes none); load earlier ones, as opening the chat in
+  // WhatsApp does, until there are enough to fill Mesh's view.
+  const loadHistory = async (chat) => {
+    const load = req("WAWebChatLoadMessages");
+    if (!chat || !load) return;
+    for (let i = 0; i < 3 && chat.msgs.length < 50; i++) {
+      if (chat.msgs.msgLoadState && chat.msgs.msgLoadState.noEarlierMsgs) break;
+      const before = chat.msgs.length;
+      try { await load.loadEarlierMsgs({ chat, msgCollection: chat.msgs }); } catch { break; }
+      if (chat.msgs.length === before) break;
+    }
+    if (open === String(chat.id)) emitMessages();
   };
 
   const onMessage = (m) => {
@@ -479,7 +494,10 @@
       emitMessages();
       // Opening a chat marks it read (clears unread here and on the phone,
       // and sends read receipts), as WhatsApp Web does on view.
-      if (chatId) markSeen(wa.Chat.get(chatId));
+      if (chatId) {
+        markSeen(wa.Chat.get(chatId));
+        loadHistory(wa.Chat.get(chatId));
+      }
     },
     // Sends text; `quotedId` (a message id) makes it a reply to that message.
     send: (chatId, text, quotedId) => {
@@ -554,8 +572,14 @@
       const report = (ok, error) => window.waForwarded(JSON.stringify({ chat_id: toChatId, ok, error: error || null }));
       try {
         const m = wa.Msg.get(msgId), chat = wa.Chat.get(toChatId);
+        if (!m) throw new Error("couldn't find that message");
+        if (!chat) throw new Error("couldn't find that chat");
+        // Forwarding lives in a bundle WhatsApp loads when its forward
+        // screen first opens.
+        const flow = req("WAWebForwardMessageFlowLoadable");
+        if (flow) await flow.requireBundle();
         const act = req("WAWebForwardMessagesToChat");
-        if (!m || !chat || !act) throw new Error("couldn't find that message or chat");
+        if (!act) throw new Error("WhatsApp's forward action wasn't found");
         await act.forwardMessagesToChats({ msgs: [m], chats: [chat], includeCaption: true });
         report(true);
       } catch (e) {

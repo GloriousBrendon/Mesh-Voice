@@ -430,6 +430,16 @@ struct Attachment {
     data: Vec<u8>,
 }
 
+/// The clipboard's image (a screenshot, say) as a PNG attachment.
+fn clipboard_image() -> Option<Attachment> {
+    let image = arboard::Clipboard::new().ok()?.get_image().ok()?;
+    let pixels = image::RgbaImage::from_raw(image.width as u32, image.height as u32, image.bytes.into_owned())?;
+    let mut data = Vec::new();
+    pixels.write_to(&mut std::io::Cursor::new(&mut data), image::ImageFormat::Png).ok()?;
+    let filename = format!("screenshot-{}.png", Local::now().format("%Y%m%d-%H%M%S"));
+    Some(Attachment { filename, mime: "image/png".to_string(), data })
+}
+
 /// A best-effort MIME type from a filename's extension (images and the common
 /// ones), else a generic binary type. ponytail: small built-in map; the
 /// backends re-sniff as needed.
@@ -909,6 +919,9 @@ enum Message {
     PickAttachment,
     /// The picker finished (None if cancelled or unreadable).
     AttachmentPicked(Option<Attachment>),
+    /// Ctrl+V: attach the clipboard's image, if it holds one (text pastes
+    /// into the input as usual).
+    PasteImage,
     ClearAttachment,
     /// A web client's file send finished.
     AttachmentSent(Result<(), String>),
@@ -1611,6 +1624,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             },
             Message::AttachmentPicked,
         ),
+        Message::PasteImage => match &state.screen {
+            Screen::LoggedIn(session) if session.selected_room.is_some() || session.web_chat.is_some() => {
+                Task::perform(async { clipboard_image() }, |image| match image {
+                    Some(attachment) => Message::AttachmentPicked(Some(attachment)),
+                    None => Message::Noop,
+                })
+            }
+            _ => Task::none(),
+        },
         Message::AttachmentPicked(attachment) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.pending_attachment = attachment;
@@ -3348,6 +3370,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
     match key.as_ref() {
         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
         keyboard::Key::Character("k") if modifiers.control() => Some(Message::OpenJump),
+        keyboard::Key::Character("v") if modifiers.control() => Some(Message::PasteImage),
         keyboard::Key::Character(c) if modifiers.alt() => match c.parse::<usize>() {
             Ok(n @ 1..=9) => Some(Message::SpaceKey(n)),
             _ => None,
