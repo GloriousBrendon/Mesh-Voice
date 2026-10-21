@@ -41,8 +41,45 @@ pub enum Event {
     ChatAction { chat_id: String, result: Result<(), String> },
     /// Not linked: the page's current QR code to scan (a new one every so often).
     Qr(engine::Qr),
+    /// The active call changed (`None`: no call), or a call action failed.
+    Call(Result<Option<Call>, String>),
+    /// A video call frame (their camera or ours), or its end.
+    Video(engine::Video),
     /// Lost the tab (closed, not logged in yet); reconnects on its own.
     Disconnected,
+}
+
+/// The call WhatsApp has going (one at a time).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Call {
+    pub id: String,
+    /// The other person's chat id.
+    pub peer: String,
+    pub name: String,
+    /// `incoming`, `outgoing`, `connecting`, `active` or `ended`.
+    pub phase: String,
+    /// A video call (offered or answered with cameras).
+    pub video: bool,
+    pub group: bool,
+    pub muted: bool,
+    /// Our camera is on.
+    pub camera: bool,
+}
+
+fn flag(on: bool) -> &'static str {
+    if on { "true" } else { "false" }
+}
+
+/// A `waCall` report: the call, `null`, or `{error}` from a call action.
+fn call_event(payload: &str) -> Option<Event> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if v.is_null() {
+        return Some(Event::Call(Ok(None)));
+    }
+    if let Some(error) = v["error"].as_str() {
+        return Some(Event::Call(Err(error.to_owned())));
+    }
+    serde_json::from_value(v).ok().map(|call| Event::Call(Ok(Some(call))))
 }
 
 /// Commands into WhatsApp Web. Cheap to clone.
@@ -63,6 +100,26 @@ impl Engine {
     /// Unlinks this browser from the phone; the tab reloads to a new QR code.
     pub fn sign_out(&self) {
         self.call("signOut", &[]);
+    }
+    /// Calls a chat (1:1), with our camera on if `video`.
+    pub fn call_start(&self, chat_id: &str, video: bool) {
+        self.call("callStart", &[chat_id, flag(video)]);
+    }
+    /// Answers the ringing call, with our camera on if `video`.
+    pub fn call_accept(&self, video: bool) {
+        self.call("callAccept", &[flag(video)]);
+    }
+    pub fn call_decline(&self) {
+        self.call("callDecline", &[]);
+    }
+    pub fn call_end(&self) {
+        self.call("callEnd", &[]);
+    }
+    pub fn call_mute(&self, muted: bool) {
+        self.call("callMute", &[flag(muted)]);
+    }
+    pub fn call_camera(&self, on: bool) {
+        self.call("callCamera", &[flag(on)]);
     }
     /// Sends through WhatsApp Web's own send action; `reply_to` (a message
     /// id) quotes that message.
@@ -280,7 +337,7 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     let site = engine::Site {
         host: "web.whatsapp.com",
         agent: AGENT,
-        bindings: &["waEmit", "waMessages", "waNotify", "waMedia", "waSent", "waFile", "waForwarded", "waFrames", "waPcm", "waContacts", "waChatStarted", "waChatAction", "waQr"],
+        bindings: &["waEmit", "waMessages", "waNotify", "waMedia", "waSent", "waFile", "waForwarded", "waFrames", "waPcm", "waContacts", "waChatStarted", "waChatAction", "waQr", "waCall", "waVideo"],
         kickoff: "window.__mesh && window.__mesh.ready() && window.waEmit(window.__mesh.snapshot())",
     };
     let (tx, mut raw) = mpsc::unbounded_channel();
@@ -328,6 +385,8 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "waChatAction" => engine::sent(payload).map(|(chat_id, result)| Event::ChatAction { chat_id, result }),
         "waForwarded" => engine::sent(payload).map(|(_, result)| Event::Forwarded(result)),
         "waQr" => engine::qr(payload).map(Event::Qr),
+        "waCall" => call_event(payload),
+        "waVideo" => engine::video(payload).map(Event::Video),
         _ => None,
     }
 }
@@ -413,5 +472,14 @@ mod tests {
         let started = r#"{"chat":{"id":"2@c.us","name":"Bo","group":false,"unread":0,"last_ms":0,"muted":false,"avatar":null}}"#;
         let Some(Event::ChatStarted(Ok(chat))) = binding_event("waChatStarted", started) else { panic!("no chat") };
         assert_eq!(chat.name, "Bo");
+    }
+
+    #[test]
+    fn reads_call_reports() {
+        let call = r#"{"id":"C1","peer":"27821234567@c.us","name":"Ruan","phase":"incoming","video":true,"group":false,"muted":false,"camera":false}"#;
+        let Some(Event::Call(Ok(Some(c)))) = binding_event("waCall", call) else { panic!("no call") };
+        assert_eq!((c.name.as_str(), c.phase.as_str(), c.video), ("Ruan", "incoming", true));
+        assert!(matches!(binding_event("waCall", "null"), Some(Event::Call(Ok(None)))));
+        assert!(matches!(binding_event("waCall", r#"{"error":"couldn't answer: no"}"#), Some(Event::Call(Err(e))) if e.contains("answer")));
     }
 }

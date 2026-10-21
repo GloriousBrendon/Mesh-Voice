@@ -3,11 +3,11 @@
 // actions, so Mesh can show and send WhatsApp chats without the window.
 // Reports through the waEmit / waMessages / waNotify / waMedia / waSent /
 // waFile / waForwarded / waFrames / waPcm / waContacts / waChatStarted /
-// waChatAction / waQr bindings.
+// waChatAction / waQr / waCall / waVideo bindings.
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 15;
+  const version = 16;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -329,8 +329,140 @@
     window.waQr(JSON.stringify({ png: canvas.toDataURL("image/png").split(",")[1] }));
   };
 
+  // Calls run on WhatsApp's own VoIP stack (WASM, not WebRTC). Mesh drives
+  // it the way WhatsApp's call screen does (see design/WHATSAPP-NATIVE.md)
+  // and hears about the active call by polling it: it's one object, read
+  // twice a second, and only a change is sent.
+  const voip = () => req("WAWebVoipStackInterface").getVoipStackInterface();
+  const activeCall = () => {
+    const calls = req("WAWebCallCollection");
+    return calls && calls.activeCall;
+  };
+  const callState = () => {
+    const call = activeCall(), utils = req("WAWebVoipCallStateUtils"), video = req("WAWebVoipVideoStateUtils");
+    if (!call || !utils) return null;
+    const st = call.getState ? call.getState() : call.state;
+    const phase = utils.isCallIncoming(st) ? "incoming"
+      : utils.isCallOutgoing(st) ? "outgoing"
+      : utils.isCallTerminal(st) ? "ended"
+      : utils.isCallConnected(st) ? "active" : "connecting";
+    // Field names seen in WhatsApp's own call code; the first that's there.
+    const peer = String(call.peerJid || call.peer || call.callCreator || call.creator || "");
+    const chat = wa && peer && wa.Chat.get(peer);
+    return {
+      id: String(call.id || ""),
+      peer,
+      name: chat ? title(chat) : peer.split("@")[0],
+      phase,
+      video: !!call.isVideo,
+      group: call.groupJid != null,
+      muted: !!call.selfMicMuted,
+      camera: !!(video && video.isVideoEnabled(call.selfVideoState)),
+    };
+  };
+  let lastCall = "null";
+  setInterval(() => {
+    try {
+      const now = JSON.stringify(callState());
+      if (now !== lastCall) {
+        lastCall = now;
+        window.waCall(now);
+      }
+    } catch {}
+  }, 500);
+  // Runs a VoIP stack call and reports failure in place of the call state.
+  const onStack = (what, fn) => voip().then((stack) => {
+    if (!stack || stack.type !== "web") throw new Error("WhatsApp calls aren't ready");
+    return fn(stack);
+  }).catch((e) => window.waCall(JSON.stringify({ error: `${what}: ${(e && e.message) || e}` })));
+
+  // Video: every frame of every camera in the call (theirs and ours) comes
+  // out of the WASM stack through the renderer registry, which draws each
+  // source into the canvases it's been given. Give it one more per source,
+  // off-screen, and send Mesh a JPEG of that ~15 times a second.
+  const hookVideo = () => {
+    const mod = req("WAWebVoipVideoRendererRegistry"), reg = mod && mod.videoRendererRegistry;
+    if (!reg || reg.__meshHooked) return;
+    reg.__meshHooked = true;
+    const mirrors = new Map();
+    const frameIn = reg.onVideoFrameWasmToJs;
+    reg.onVideoFrameWasmToJs = function (source, ...rest) {
+      try {
+        const key = source && source.key;
+        if (key != null) {
+          const m = mirrors.get(key);
+          if (m) m.at = performance.now();
+          else mirror(source);
+        }
+      } catch {}
+      return frameIn.call(this, source, ...rest);
+    };
+    const mirror = (source) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 360;
+      canvas.style.cssText = "position:fixed;left:-10000px;top:0;width:640px;height:360px;pointer-events:none";
+      document.body.appendChild(canvas);
+      reg.registerVideoCanvas(canvas);
+      reg.assignSourceToCanvas({ canvas, mirror: false, source });
+      const out = new OffscreenCanvas(1, 1), ctx = out.getContext("2d");
+      const id = `wa-${source.key}`, local = !!(source.isSelf && source.isSelf());
+      const m = { at: performance.now(), sent: 0, sending: false };
+      mirrors.set(source.key, m);
+      m.timer = setInterval(() => {
+        // A source with no frames for a while has gone (camera off, call over).
+        if (performance.now() - m.at > 2000) {
+          clearInterval(m.timer);
+          mirrors.delete(source.key);
+          try { reg.unassignSourceFromCanvas(source, canvas); reg.unregisterVideoCanvas(canvas); } catch {}
+          canvas.remove();
+          window.waVideo(JSON.stringify({ id, ended: true }));
+          return;
+        }
+        if (m.sending || m.at === m.sent || !canvas.width || !canvas.height) return;
+        m.sent = m.at;
+        const scale = Math.min(1, 640 / canvas.width);
+        out.width = Math.round(canvas.width * scale);
+        out.height = Math.round(canvas.height * scale);
+        try { ctx.drawImage(canvas, 0, 0, out.width, out.height); } catch { return; }
+        m.sending = true;
+        out.convertToBlob({ type: "image/jpeg", quality: 0.7 })
+          .then((blob) => new Promise((ok, fail) => {
+            const r = new FileReader();
+            r.onload = () => ok(String(r.result).split(",")[1]);
+            r.onerror = fail;
+            r.readAsDataURL(blob);
+          }))
+          .then((jpeg) => window.waVideo(JSON.stringify({ id, local, jpeg })))
+          .catch(() => {})
+          .finally(() => { m.sending = false; });
+      }, 1000 / 15);
+    };
+  };
+
   window.__mesh = {
     version,
+    // Calls ("true" / "false" for flags). Each answers through waCall.
+    callStart: (chatId, video) => {
+      hookVideo();
+      const wid = req("WAWebWidFactory").createWid(chatId);
+      return Promise.resolve(req("WAWebVoipStartCall").startWAWebVoipCall(wid, video === "true", 0, 0, null, { entryTrust: "user_gesture" }))
+        .catch((e) => window.waCall(JSON.stringify({ error: `couldn't call: ${(e && e.message) || e}` })));
+    },
+    callAccept: (video) => {
+      hookVideo();
+      // What WhatsApp's own Answer button does first.
+      try { req("WAWebCallRingtone").stopCallRingtone(); } catch {}
+      try { req("WAWebVoipCallAudioUnlock").prepareCallAudioElement(); } catch {}
+      return onStack("couldn't answer", (stack) => stack.acceptCall(true, video === "true", null));
+    },
+    callDecline: () => onStack("couldn't decline", (stack) => stack.rejectCall()),
+    callEnd: () => onStack("couldn't hang up", (stack) => stack.endCall(req("WAWebVoipSignalingEnums").EndCallReason.Self, true)),
+    callMute: (on) => onStack("couldn't mute", (stack) => stack.setCallMute(on === "true")),
+    callCamera: (on) => {
+      hookVideo();
+      return onStack("couldn't switch the camera", (stack) => stack.setCallVideoMute(on !== "true"));
+    },
     ready: () => !!wa,
     // Unlinks this browser from the phone, as WhatsApp's own "Log out" does;
     // the page reloads to a fresh QR code.
@@ -522,6 +654,7 @@
       try { reportQr(); } catch {}
       return setTimeout(boot, 1000);
     }
+    try { hookVideo(); } catch {}
     wa.Msg.on("add", onMessage);
     wa.Msg.on("change", (m) => { if (m && m.id && String(m.id.remote) === open) emitMessages(); });
     for (const e of ["add", "remove", "change:t", "change:unreadCount", "change:archive"]) wa.Chat.on(e, emit);

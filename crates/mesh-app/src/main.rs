@@ -107,8 +107,11 @@ struct App {
     linked: Vec<String>,
     sync_off: Vec<String>,
     accounts: accounts::Panel,
-    /// The call's video, by track: the latest frame of each camera.
+    /// The call's video, by track: the latest frame of each camera
+    /// (WhatsApp's ids start `wa-`).
     video: HashMap<String, VideoTile>,
+    /// WhatsApp's call, while there is one.
+    wa_call: Option<whatsapp::Call>,
     /// Whether Mesh's window has focus (no notifications for the chat in view).
     window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
@@ -958,6 +961,14 @@ enum Message {
     DiscordLeave,
     /// Camera on or off in the Discord call.
     ToggleVideo,
+    /// Call the open WhatsApp chat (with our camera on if true).
+    WaCallStart(bool),
+    /// Answer WhatsApp's ringing call (with our camera on if true).
+    WaCallAccept(bool),
+    WaCallDecline,
+    WaCallEnd,
+    WaCallMute,
+    WaCallCamera,
     /// Drop video from cameras that stopped sending.
     VideoPrune,
     /// Show a Discord server (by id) from the hidden client.
@@ -1115,6 +1126,7 @@ fn boot() -> (App, Task<Message>) {
             sync_off: config.sync_off.clone(),
             accounts: accounts::Panel::default(),
             video: HashMap::new(),
+            wa_call: None,
             window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
@@ -1818,6 +1830,31 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::WaCallStart(video) => {
+            if let (Some(engine), Screen::LoggedIn(session)) = (&state.whatsapp, &state.screen)
+                && let Some(chat) = session.web_chat.as_ref().filter(|c| c.network == Network::WhatsApp)
+            {
+                engine.call_start(&chat.id, video);
+            }
+            Task::none()
+        }
+        Message::WaCallAccept(video) => {
+            if let Some(engine) = &state.whatsapp {
+                engine.call_accept(video);
+            }
+            Task::none()
+        }
+        Message::WaCallDecline | Message::WaCallEnd | Message::WaCallMute | Message::WaCallCamera => {
+            if let (Some(engine), Some(call)) = (&state.whatsapp, &state.wa_call) {
+                match message {
+                    Message::WaCallDecline => engine.call_decline(),
+                    Message::WaCallEnd => engine.call_end(),
+                    Message::WaCallMute => engine.call_mute(!call.muted),
+                    _ => engine.call_camera(!call.camera),
+                }
+            }
+            Task::none()
+        }
         Message::VideoPrune => {
             state.video.retain(|_, tile| tile.at.elapsed() < VIDEO_STALE);
             Task::none()
@@ -1869,7 +1906,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     state.video.remove(&id);
                 }
                 mesh_discord::Event::Disconnected => {
-                    state.video.clear();
+                    state.video.retain(|id, _| id.starts_with("wa-"));
                     state.discord = None;
                     state.discord_state = None;
                     state.login_qr.remove("dc");
@@ -1942,6 +1979,32 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 }
                 whatsapp::Event::Qr(qr) => {
                     state.login_qr.insert("wa", qr.into());
+                }
+                whatsapp::Event::Call(Ok(call)) => {
+                    let call = call.filter(|c| c.phase != "ended");
+                    let ringing = |c: &Option<whatsapp::Call>| c.as_ref().is_some_and(|c| c.phase == "incoming");
+                    if ringing(&call) && !ringing(&state.wa_call)
+                        && let Some(c) = &call
+                    {
+                        let kind = if c.video { "video call" } else { "call" };
+                        notify(format!("WhatsApp {kind}"), format!("{} is calling", c.name));
+                    }
+                    if call.is_none() {
+                        state.video.retain(|id, _| !id.starts_with("wa-"));
+                    }
+                    state.wa_call = call;
+                }
+                whatsapp::Event::Call(Err(error)) => {
+                    if let Screen::LoggedIn(session) = &mut state.screen {
+                        session.status = Some(format!("WhatsApp: {error}"));
+                    }
+                }
+                whatsapp::Event::Video(mesh_discord::Video::Frame { id, local, width, height, rgba }) => {
+                    let frame = iced::widget::image::Handle::from_rgba(width, height, rgba);
+                    state.video.insert(id, VideoTile { frame, local, at: std::time::Instant::now() });
+                }
+                whatsapp::Event::Video(mesh_discord::Video::Ended { id }) => {
+                    state.video.remove(&id);
                 }
                 whatsapp::Event::Messages(messages) => {
                     if let Screen::LoggedIn(session) = &mut state.screen
@@ -2075,6 +2138,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 whatsapp::Event::Disconnected => {
+                    state.wa_call = None;
+                    state.video.retain(|id, _| !id.starts_with("wa-"));
                     state.whatsapp = None;
                     state.whatsapp_state = None;
                     state.login_qr.remove("wa");
@@ -4577,7 +4642,11 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
                     .push(flat("Delete", p.text_muted(), Message::WaDeleteAsk(channel.id.clone())));
             }
         }
-        // ponytail: WhatsApp calls aren't wired yet (design/WHATSAPP-NATIVE.md).
+        if channel.dm && channel.network == Network::WhatsApp && state.wa_call.is_none() {
+            header = header
+                .push(ui::icon_button(ui::Icon::Phone, Some(Message::WaCallStart(false)), false, p, l))
+                .push(ui::icon_button(ui::Icon::Video, Some(Message::WaCallStart(true)), false, p, l));
+        }
         if channel.dm && channel.network == Network::Discord {
             let in_call = state.discord_state.as_ref().and_then(|d| d.voice.channel_id.as_deref()) == Some(channel.id.as_str());
             header = header.push(if in_call {
@@ -4632,7 +4701,12 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         col = col.push(container(call_bar(call, p)).padding([8, 16]));
     }
     if let Some(snapshot) = state.discord_state.as_ref().filter(|s| s.voice.connected()) {
-        col = col.push(container(discord_call_bar(session, &snapshot.voice, &state.video, p, l)).padding([8, 16]));
+        let discord_video = state.video.iter().filter(|(id, _)| !id.starts_with("wa-")).map(|(_, t)| t);
+        col = col.push(container(discord_call_bar(session, &snapshot.voice, discord_video, p, l)).padding([8, 16]));
+    }
+    if let Some(call) = &state.wa_call {
+        let wa_video = state.video.iter().filter(|(id, _)| id.starts_with("wa-")).map(|(_, t)| t);
+        col = col.push(container(wa_call_bar(call, wa_video, p, l)).padding([8, 16]));
     }
     if let Some(prompt) = &session.verification {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
@@ -4861,7 +4935,7 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Elem
 fn discord_call_bar<'a>(
     session: &'a Session,
     voice: &'a mesh_discord::Voice,
-    video: &'a HashMap<String, VideoTile>,
+    video: impl Iterator<Item = &'a VideoTile>,
     p: &theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
@@ -4918,10 +4992,74 @@ fn discord_call_bar<'a>(
     .into()
 }
 
+/// WhatsApp's call: ringing (answer / decline) or under way (mute, camera,
+/// hang up), with its video.
+fn wa_call_bar<'a>(
+    call: &'a whatsapp::Call,
+    video: impl Iterator<Item = &'a VideoTile>,
+    p: &theme::Palette,
+    l: &theme::Layout,
+) -> Element<'a, Message> {
+    let status = match call.phase.as_str() {
+        "incoming" => if call.video { "video call · ringing" } else { "calling you" },
+        "outgoing" => "ringing…",
+        "connecting" => "connecting…",
+        _ => "in call",
+    };
+    let mut controls = row![].spacing(8).align_y(iced::Alignment::Center);
+    if call.phase == "incoming" {
+        let answer = |label: &'static str, video: bool| {
+            ui::primary_button(ui::sans(label, 13.0, Weight::Semibold, p.accent_text()), Some(Message::WaCallAccept(video)), p, l)
+                .padding([6, 12])
+        };
+        if call.video {
+            controls = controls.push(answer("Answer with video", true));
+        }
+        controls = controls.push(answer(if call.video { "Voice only" } else { "Answer" }, false));
+        controls = controls.push(ui::icon_button(ui::Icon::PhoneOff, Some(Message::WaCallDecline), true, p, l));
+    } else {
+        controls = controls
+            .push(ui::icon_button(if call.muted { ui::Icon::MicOff } else { ui::Icon::Mic }, Some(Message::WaCallMute), call.muted, p, l))
+            .push(ui::icon_button(
+                if call.camera { ui::Icon::Video } else { ui::Icon::VideoOff },
+                Some(Message::WaCallCamera),
+                !call.camera,
+                p,
+                l,
+            ))
+            .push(ui::icon_button(ui::Icon::PhoneOff, Some(Message::WaCallEnd), true, p, l));
+    }
+    let mut body = column![
+        row![
+            ui::icon(ui::Icon::Phone, 17.0, if call.phase == "active" { p.success() } else { p.warning() }),
+            ui::mono_bold(Network::WhatsApp.tag(), 12.0, net_color(Network::WhatsApp, p)),
+            ui::sans(&call.name, 14.0, Weight::Semibold, p.text_bright()),
+            text(status).size(12).color(p.text_muted()).width(Length::Fill),
+            controls,
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(8);
+    if let Some(tiles) = video_tiles(video, p) {
+        body = body.push(tiles);
+    }
+    let (fill, edge) = (p.surface_alt(), p.border());
+    container(body)
+        .padding(12)
+        .width(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::border::rounded(8).color(edge).width(1),
+            ..container::Style::default()
+        })
+        .into()
+}
+
 /// The call's cameras: everyone else's large, ours small at the end.
-fn video_tiles<'a>(video: &'a HashMap<String, VideoTile>, p: &theme::Palette) -> Option<Element<'a, Message>> {
-    let live = || video.values().filter(|t| t.at.elapsed() < VIDEO_STALE);
-    if live().next().is_none() {
+fn video_tiles<'a>(video: impl Iterator<Item = &'a VideoTile>, p: &theme::Palette) -> Option<Element<'a, Message>> {
+    let live: Vec<&VideoTile> = video.filter(|t| t.at.elapsed() < VIDEO_STALE).collect();
+    if live.is_empty() {
         return None;
     }
     let edge = p.border();
@@ -4934,10 +5072,10 @@ fn video_tiles<'a>(video: &'a HashMap<String, VideoTile>, p: &theme::Palette) ->
             })
     };
     let mut tiles = row![].spacing(8).align_y(iced::Alignment::End);
-    for t in live().filter(|t| !t.local) {
+    for t in live.iter().filter(|t| !t.local) {
         tiles = tiles.push(tile(t, 240.0));
     }
-    for t in live().filter(|t| t.local) {
+    for t in live.iter().filter(|t| t.local) {
         tiles = tiles.push(tile(t, 110.0));
     }
     Some(container(tiles).center_x(Length::Fill).into())

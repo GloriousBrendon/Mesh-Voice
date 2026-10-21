@@ -72,9 +72,20 @@ through AudioWorklets (`WAWebVoipAudioCaptureWorklet`,
 `WAWebVoipVideoFrameCtor`, WebGPU capture). Consequences:
 - Voice works from the hidden page as is: its audio plays on the PC's
   output and the mic is granted by `--use-fake-ui-for-media-stream`.
-- Video in Mesh needs a hook into WhatsApp's renderer (frames out of
-  `WAWebVoipVideoRendererRegistry`), not generic WebRTC track capture.
-  Until then, video calls bring up the engine window.
+- Video in Mesh hooks WhatsApp's renderer: every frame passes through
+  `videoRendererRegistry.onVideoFrameWasmToJs(source, …)`; for each new
+  source the agent registers one more (off-screen) canvas with
+  `registerVideoCanvas` + `assignSourceToCanvas({canvas, mirror, source})`
+  and sends Mesh a JPEG of it at ~15 fps.
+- Call controls, as WhatsApp's call screen uses them: `acceptCall(withMic,
+  withCamera, entryPoint)` (after `WAWebCallRingtone.stopCallRingtone()` and
+  `WAWebVoipCallAudioUnlock.prepareCallAudioElement()`), `rejectCall()`,
+  `endCall(EndCallReason.Self, true)`, `setCallMute(bool)`,
+  `setCallVideoMute(bool)`; placing one:
+  `WAWebVoipStartCall.startWAWebVoipCall(wid, isVideo, 0, 0, null,
+  {entryTrust: "user_gesture"})`. State: `WAWebCallCollection.activeCall`
+  (`getState()` read with `WAWebVoipCallStateUtils`, `isVideo`,
+  `selfMicMuted`, `selfVideoState`).
 
 **REA notes.** `inspect-web-page` worked. `analyze-web-bundle` runs out of
 memory on the 30 MB bundle even with a 12 GB heap (and once raced a
