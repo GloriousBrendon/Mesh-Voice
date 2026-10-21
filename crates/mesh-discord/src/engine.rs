@@ -105,7 +105,11 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
             // Handles may all be dropped (nobody acting); keep streaming state.
             command = command_rx.recv(), if commands_open => {
                 let msg = match command {
-                    Some(Command::Eval(expression)) => send("Runtime.evaluate", serde_json::json!({ "expression": expression })),
+                    // As a user gesture: pages keep some things (screen capture,
+                    // starting call audio) for a real click.
+                    Some(Command::Eval(expression)) => {
+                        send("Runtime.evaluate", serde_json::json!({ "expression": expression, "userGesture": true }))
+                    }
                     // Restores the window even when it's minimized.
                     Some(Command::BringToFront) => send("Page.bringToFront", serde_json::json!({})),
                     None => {

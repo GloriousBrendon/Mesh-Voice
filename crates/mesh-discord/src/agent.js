@@ -4,7 +4,7 @@
 // logged out, meshVideo during video calls).
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 11;
+  const version = 12;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -41,7 +41,7 @@
     const wanted = ["UserStore", "GuildStore", "GuildChannelStore", "GuildMemberStore", "ChannelStore",
       "VoiceStateStore", "SpeakingStore", "MediaEngineStore", "SelectedChannelStore", "RTCConnectionStore"];
     // Optional: voice keeps working if Discord renames these.
-    const extra = ["MessageStore", "ReadStateStore"];
+    const extra = ["MessageStore", "ReadStateStore", "ApplicationStreamingStore"];
     let channel, audio, call, invite, messages, uploads;
     for (const c of candidates(req)) {
       try {
@@ -83,6 +83,50 @@
         deaf: !!(vs.selfDeaf || vs.deaf),
       };
     });
+
+  // Screen shares in a voice channel: other people's (and whether we're
+  // watching each), and whether we're sharing ours.
+  const shares = (channelId) => {
+    const ss = found.s.ApplicationStreamingStore, me = found.s.UserStore.getCurrentUser();
+    if (!ss || !channelId || !me) return { streams: [], self_stream: false };
+    const watching = (ss.getAllActiveStreams() || []).map((a) => a.ownerId);
+    return {
+      streams: (ss.getAllApplicationStreamsForChannel(channelId) || [])
+        .filter((st) => st.ownerId !== me.id)
+        .map((st) => ({ owner_id: st.ownerId, name: user(st.ownerId).name, watching: watching.includes(st.ownerId) })),
+      self_stream: !!ss.getCurrentUserActiveStream(),
+    };
+  };
+  // Discord's own stream actions, found once by what they dispatch (their
+  // export names are minified and change between builds).
+  let streamActions = null;
+  const streamAction = (type) => {
+    if (!streamActions) {
+      streamActions = {};
+      const req = runtime();
+      for (const id in (req && req.c) || {}) {
+        const e = req.c[id].exports;
+        if (!e || typeof e !== "object") continue;
+        let props;
+        try { props = Object.getOwnPropertyDescriptors(e); } catch { continue; }
+        for (const d of Object.values(props)) {
+          let f = d.value;
+          if (!f && d.get) try { f = d.get(); } catch { continue; }
+          if (typeof f !== "function") continue;
+          let src;
+          try { src = Function.prototype.toString.call(f); } catch { continue; }
+          const m = src.length < 3000 && src.match(/type:"(STREAM_WATCH|STREAM_START|STREAM_STOP|STREAM_CLOSE)"/);
+          if (m && !streamActions[m[1]]) streamActions[m[1]] = f;
+        }
+      }
+    }
+    const action = streamActions[type];
+    if (!action) throw new Error(`Discord's ${type} action wasn't found`);
+    return action;
+  };
+  // "guild:<guild>:<channel>:<owner>" or "call:<channel>:<owner>".
+  const streamKey = (st) => st.streamKey
+    || [st.streamType, st.guildId, st.channelId, st.ownerId].filter((p) => p != null).join(":");
 
   const snapshot = () => {
     const s = found.s;
@@ -140,6 +184,7 @@
         self_mute: !!s.MediaEngineStore.isSelfMute(),
         self_deaf: !!s.MediaEngineStore.isSelfDeaf(),
         self_video: !!(s.MediaEngineStore.isVideoEnabled && s.MediaEngineStore.isVideoEnabled()),
+        ...shares(current),
         members: current ? members(current, currentChannel && currentChannel.guild_id) : [],
       },
       guilds,
@@ -207,7 +252,9 @@
     "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "LOGOUT", "MEDIA_ENGINE_SET_VIDEO_ENABLED", "GUILD_CREATE", "GUILD_DELETE",
     "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE",
     // DM order and unread state.
-    "MESSAGE_CREATE", "MESSAGE_ACK"];
+    "MESSAGE_CREATE", "MESSAGE_ACK",
+    // Screen shares (Go Live) starting, stopping, being watched.
+    "STREAM_CREATE", "STREAM_UPDATE", "STREAM_DELETE", "STREAM_WATCH", "STREAM_CLOSE", "STREAM_START", "STREAM_STOP"];
   const messageEvents = ["MESSAGE_CREATE", "MESSAGE_UPDATE", "MESSAGE_DELETE", "MESSAGE_DELETE_BULK",
     "LOAD_MESSAGES_SUCCESS", "MESSAGE_SEND_FAILED"];
 
@@ -303,6 +350,19 @@
     if (Object.prototype.hasOwnProperty.call(navigator.mediaDevices, "getUserMedia")) hookCamera(navigator.mediaDevices);
   }
 
+  // Our screen share, previewed like our camera (its own once-per-page
+  // guard: it came after the camera hook).
+  if (!window.__meshScreenHooked && MediaDevices.prototype.getDisplayMedia && window.MediaStreamTrackProcessor) {
+    window.__meshScreenHooked = true;
+    const getDisplayMedia = MediaDevices.prototype.getDisplayMedia;
+    MediaDevices.prototype.getDisplayMedia = function (...args) {
+      return getDisplayMedia.apply(this, args).then((stream) => {
+        for (const t of stream.getVideoTracks()) watchVideo(t, true);
+        return stream;
+      });
+    };
+  }
+
   // Logged out, the login page shows a QR code (an SVG) for the Discord app
   // to scan; pass each new one to Mesh for its Accounts page.
   let lastQr = null;
@@ -344,6 +404,28 @@
     toggleDeaf: () => found.audio.toggleSelfDeaf(),
     // Camera on or off ("true" / "false"), as Discord's own camera button.
     setVideo: (on) => found.audio.setVideoEnabled(on === "true"),
+    // Screen shares in our voice channel: watch someone's, stop watching it,
+    // or share ours (Discord's media engine asks the browser for the screen;
+    // the engine's --use-fake-ui-for-media-stream picks the primary one).
+    watchStream: (ownerId) => {
+      const ss = found.s.ApplicationStreamingStore;
+      const here = ss.getAllApplicationStreamsForChannel(found.s.SelectedChannelStore.getVoiceChannelId()) || [];
+      const st = here.find((x) => x.ownerId === ownerId);
+      if (st) streamAction("STREAM_WATCH")(st);
+    },
+    stopWatching: (ownerId) => {
+      const st = (found.s.ApplicationStreamingStore.getAllActiveStreams() || []).find((x) => x.ownerId === ownerId);
+      if (st) streamAction("STREAM_CLOSE")(streamKey(st));
+    },
+    shareScreen: (on) => {
+      if (on === "true") {
+        const ch = found.s.ChannelStore.getChannel(found.s.SelectedChannelStore.getVoiceChannelId());
+        if (ch) streamAction("STREAM_START")(ch.guild_id || null, ch.id, { pid: null, sourceId: null, sourceName: null, sound: true });
+      } else {
+        const own = found.s.ApplicationStreamingStore.getCurrentUserActiveStream();
+        if (own) streamAction("STREAM_STOP")(streamKey(own));
+      }
+    },
     // Shows a text channel or DM in Mesh: loads its latest messages and
     // streams them (and every change) back; `null` stops.
     open: (channelId) => {

@@ -64,6 +64,14 @@ impl Engine {
     pub fn set_video(&self, on: bool) {
         self.call("setVideo", &[if on { "true" } else { "false" }]);
     }
+    /// Starts or stops watching someone's screen share.
+    pub fn watch_stream(&self, owner_id: &str, watch: bool) {
+        self.call(if watch { "watchStream" } else { "stopWatching" }, &[owner_id]);
+    }
+    /// Shares our (primary) screen in the call, or stops.
+    pub fn share_screen(&self, on: bool) {
+        self.call("shareScreen", &[if on { "true" } else { "false" }]);
+    }
     /// Joins a server from an invite link or code; answers with `Event::Invite`.
     pub fn accept_invite(&self, link: &str) {
         self.call("acceptInvite", &[link]);
@@ -199,6 +207,12 @@ pub struct Voice {
     /// Our camera is on.
     #[serde(default)]
     pub self_video: bool,
+    /// Other people's screen shares in this channel.
+    #[serde(default)]
+    pub streams: Vec<Stream>,
+    /// We're sharing our screen.
+    #[serde(default)]
+    pub self_stream: bool,
     pub members: Vec<Member>,
 }
 
@@ -237,6 +251,15 @@ pub struct VoiceChannel {
     #[serde(default)]
     pub category: Option<String>,
     pub members: Vec<Member>,
+}
+
+/// Someone's screen share (Go Live) in our voice channel.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Stream {
+    pub owner_id: String,
+    pub name: String,
+    /// We're watching it (its video comes in as a call video).
+    pub watching: bool,
 }
 
 impl Voice {

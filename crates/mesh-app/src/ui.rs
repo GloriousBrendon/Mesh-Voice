@@ -45,6 +45,8 @@ pub enum Icon {
     Discord,
     Video,
     VideoOff,
+    ScreenShare,
+    ScreenShareOff,
 }
 
 impl Icon {
@@ -67,6 +69,8 @@ impl Icon {
             Icon::Voice => include_bytes!("../icons/volume-2.svg"),
             Icon::Video => include_bytes!("../icons/video.svg"),
             Icon::VideoOff => include_bytes!("../icons/video-off.svg"),
+            Icon::ScreenShare => include_bytes!("../icons/screen-share.svg"),
+            Icon::ScreenShareOff => include_bytes!("../icons/screen-share-off.svg"),
             Icon::Close => include_bytes!("../icons/x.svg"),
             Icon::Search => include_bytes!("../icons/search.svg"),
             Icon::UserPlus => include_bytes!("../icons/user-plus.svg"),

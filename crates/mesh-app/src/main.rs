@@ -961,6 +961,10 @@ enum Message {
     DiscordLeave,
     /// Camera on or off in the Discord call.
     ToggleVideo,
+    /// Share our screen in the Discord call, or stop.
+    ToggleScreenShare,
+    /// Watch (true) or stop watching someone's screen share, by their id.
+    WatchStream(String, bool),
     /// Call the open WhatsApp chat (with our camera on if true).
     WaCallStart(bool),
     /// Answer WhatsApp's ringing call (with our camera on if true).
@@ -1852,6 +1856,18 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     Message::WaCallMute => engine.call_mute(!call.muted),
                     _ => engine.call_camera(!call.camera),
                 }
+            }
+            Task::none()
+        }
+        Message::ToggleScreenShare => {
+            if let (Some(engine), Some(snapshot)) = (&state.discord, &state.discord_state) {
+                engine.share_screen(!snapshot.voice.self_stream);
+            }
+            Task::none()
+        }
+        Message::WatchStream(owner, watch) => {
+            if let Some(engine) = &state.discord {
+                engine.watch_stream(&owner, watch);
             }
             Task::none()
         }
@@ -4936,7 +4952,7 @@ fn discord_call_bar<'a>(
     session: &'a Session,
     voice: &'a mesh_discord::Voice,
     video: impl Iterator<Item = &'a VideoTile>,
-    p: &theme::Palette,
+    p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let mut people = row![].spacing(10).align_y(iced::Alignment::Center);
@@ -4969,6 +4985,14 @@ fn discord_call_bar<'a>(
                 p,
                 l,
             ),
+            ui::icon_button(
+                if voice.self_stream { ui::Icon::ScreenShare } else { ui::Icon::ScreenShareOff },
+                Some(Message::ToggleScreenShare),
+                !voice.self_stream,
+                p,
+                l,
+            ),
+
             ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l),
         ]
         .spacing(10)
@@ -4978,6 +5002,20 @@ fn discord_call_bar<'a>(
         )),
     ]
     .spacing(8);
+    // Other people's screen shares: Discord only sends one once you watch it.
+    if !voice.streams.is_empty() {
+        let mut shares = row![ui::mono("sharing:", 11.0, p.text_muted())].spacing(8).align_y(iced::Alignment::Center);
+        for stream in &voice.streams {
+            let label = if stream.watching { format!("■ stop watching {}", stream.name) } else { format!("▶ watch {}", stream.name) };
+            shares = shares.push(
+                button(text(label).size(12).color(p.text_bright()))
+                    .on_press(Message::WatchStream(stream.owner_id.clone(), !stream.watching))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+            );
+        }
+        body = body.push(shares);
+    }
     if let Some(tiles) = video_tiles(video, p) {
         body = body.push(tiles);
     }
@@ -5073,7 +5111,7 @@ fn video_tiles<'a>(video: impl Iterator<Item = &'a VideoTile>, p: &theme::Palett
     };
     let mut tiles = row![].spacing(8).align_y(iced::Alignment::End);
     for t in live.iter().filter(|t| !t.local) {
-        tiles = tiles.push(tile(t, 240.0));
+        tiles = tiles.push(tile(t, 320.0));
     }
     for t in live.iter().filter(|t| t.local) {
         tiles = tiles.push(tile(t, 110.0));
