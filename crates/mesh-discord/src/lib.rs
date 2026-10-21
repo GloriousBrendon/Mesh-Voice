@@ -68,8 +68,12 @@ impl Engine {
     pub fn watch_stream(&self, owner_id: &str, watch: bool) {
         self.call(if watch { "watchStream" } else { "stopWatching" }, &[owner_id]);
     }
-    /// Shares our (primary) screen in the call, or stops.
+    /// Shares our screen (or a window) in the call, or stops. Sharing brings
+    /// the Discord window up, since the browser asks what to share there.
     pub fn share_screen(&self, on: bool) {
+        if on {
+            let _ = self.commands.send(engine::Command::BringToFront);
+        }
         self.call("shareScreen", &[if on { "true" } else { "false" }]);
     }
     /// Joins a server from an invite link or code; answers with `Event::Invite`.

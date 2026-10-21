@@ -64,6 +64,9 @@ pub struct Call {
     pub muted: bool,
     /// Our camera is on.
     pub camera: bool,
+    /// We're sharing our screen.
+    #[serde(default)]
+    pub screen: bool,
 }
 
 fn flag(on: bool) -> &'static str {
@@ -120,6 +123,14 @@ impl Engine {
     }
     pub fn call_camera(&self, on: bool) {
         self.call("callCamera", &[flag(on)]);
+    }
+    /// Shares our screen (or a window) in the call, or stops. Sharing brings
+    /// WhatsApp's window up, since the browser asks what to share there.
+    pub fn call_screen(&self, on: bool) {
+        if on {
+            let _ = self.commands.send(engine::Command::BringToFront);
+        }
+        self.call("callScreen", &[flag(on)]);
     }
     /// Sends through WhatsApp Web's own send action; `reply_to` (a message
     /// id) quotes that message.

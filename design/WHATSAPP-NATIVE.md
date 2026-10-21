@@ -71,7 +71,10 @@ through AudioWorklets (`WAWebVoipAudioCaptureWorklet`,
 (`WAWebVoipVideoRendererRegistry`, `…RendererWorkerResource`,
 `WAWebVoipVideoFrameCtor`, WebGPU capture). Consequences:
 - Voice works from the hidden page as is: its audio plays on the PC's
-  output and the mic is granted by `--use-fake-ui-for-media-stream`.
+  output and the mic is granted by the engine (`Browser.grantPermissions`
+  for camera and mic on each site it connects to; that's also why the
+  browser isn't started with `--use-fake-ui-for-media-stream`, which would
+  answer the screen-share picker by itself with the primary screen).
 - Video in Mesh hooks WhatsApp's renderer: every frame passes through
   `videoRendererRegistry.onVideoFrameWasmToJs(source, …)`; for each new
   source the agent registers one more (off-screen) canvas with

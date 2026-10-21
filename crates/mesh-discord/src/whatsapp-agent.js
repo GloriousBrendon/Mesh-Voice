@@ -7,7 +7,7 @@
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 16;
+  const version = 17;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -358,6 +358,7 @@
       group: call.groupJid != null,
       muted: !!call.selfMicMuted,
       camera: !!(video && video.isVideoEnabled(call.selfVideoState)),
+      screen: !!(call.isSelfScreenSharing && call.isSelfScreenSharing()),
     };
   };
   let lastCall = "null";
@@ -459,6 +460,8 @@
     callDecline: () => onStack("couldn't decline", (stack) => stack.rejectCall()),
     callEnd: () => onStack("couldn't hang up", (stack) => stack.endCall(req("WAWebVoipSignalingEnums").EndCallReason.Self, true)),
     callMute: (on) => onStack("couldn't mute", (stack) => stack.setCallMute(on === "true")),
+    // As WhatsApp's own share button: the browser then asks what to share.
+    callScreen: (on) => onStack("couldn't share the screen", (stack) => (on === "true" ? stack.startScreenShare() : stack.stopScreenShare())),
     callCamera: (on) => {
       hookVideo();
       return onStack("couldn't switch the camera", (stack) => stack.setCallVideoMute(on !== "true"));

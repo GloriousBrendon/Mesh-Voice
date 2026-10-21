@@ -71,7 +71,7 @@ that opens and link WhatsApp in its second tab (WhatsApp → Linked devices);
 minimize it after that, but don't close the tabs:
 
 ```toml
-discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\mesh\discord-engine --app=https://discord.com/channels/@me --no-first-run --use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows https://web.whatsapp.com/'
+discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-data-dir=%LOCALAPPDATA%\mesh\discord-engine --app=https://discord.com/channels/@me --no-first-run --autoplay-policy=no-user-gesture-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows https://web.whatsapp.com/'
 ```
 
 WhatsApp chats then show on Home (the `whatsapp` chip filters to them), open

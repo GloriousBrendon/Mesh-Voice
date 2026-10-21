@@ -973,6 +973,7 @@ enum Message {
     WaCallEnd,
     WaCallMute,
     WaCallCamera,
+    WaCallScreen,
     /// Drop video from cameras that stopped sending.
     VideoPrune,
     /// Show a Discord server (by id) from the hidden client.
@@ -1090,6 +1091,31 @@ fn boot() -> (App, Task<Message>) {
         && let Err(err) = run_command(cmd)
     {
         tracing::warn!("could not start the Discord engine ({cmd}): {err}");
+    }
+    // The engine command opens Discord's window only (Edge drops the other
+    // URL), so open each linked engine site's tab once the browser's up.
+    if let Some(socket) = discord_socket(&config) {
+        let sites: Vec<_> = config
+            .linked
+            .iter()
+            .filter_map(|id| mesh_core::networks::spec(id))
+            .filter_map(|spec| Some((spec.engine?, spec.login_url?)))
+            .collect();
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                if mesh_discord::is_running(&socket) {
+                    // Let a browser that's just starting list its own tabs first.
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    for (host, url) in sites {
+                        if let Err(err) = mesh_discord::open(&socket, host, url, false) {
+                            tracing::warn!("could not open {host} in the engine: {err}");
+                        }
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        });
     }
 
     let (screen, task) = if MeshClient::has_saved_session(&data_dir()) {
@@ -1848,12 +1874,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::WaCallDecline | Message::WaCallEnd | Message::WaCallMute | Message::WaCallCamera => {
+        Message::WaCallDecline | Message::WaCallEnd | Message::WaCallMute | Message::WaCallCamera | Message::WaCallScreen => {
             if let (Some(engine), Some(call)) = (&state.whatsapp, &state.wa_call) {
                 match message {
                     Message::WaCallDecline => engine.call_decline(),
                     Message::WaCallEnd => engine.call_end(),
                     Message::WaCallMute => engine.call_mute(!call.muted),
+                    Message::WaCallScreen => engine.call_screen(!call.screen),
                     _ => engine.call_camera(!call.camera),
                 }
             }
@@ -1908,8 +1935,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.login_qr.remove("dc");
                         accounts::remember_linked(state, Network::Discord);
                     }
+                    let was_sharing = state.discord_state.as_ref().is_some_and(|s| s.voice.self_stream);
+                    let shared = snapshot.voice.self_stream && !was_sharing;
                     state.discord_state = Some(snapshot);
                     accounts::refresh_shown(state);
+                    // The share picker came up in the Discord window; once
+                    // something's picked, Mesh goes back in front of it.
+                    if shared {
+                        return iced::window::latest().and_then(iced::window::gain_focus);
+                    }
                 }
                 mesh_discord::Event::Qr(qr) => {
                     state.login_qr.insert("dc", qr.into());
@@ -2008,7 +2042,14 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     if call.is_none() {
                         state.video.retain(|id, _| !id.starts_with("wa-"));
                     }
+                    let sharing = |c: &Option<whatsapp::Call>| c.as_ref().is_some_and(|c| c.screen);
+                    let shared = sharing(&call) && !sharing(&state.wa_call);
                     state.wa_call = call;
+                    // The share picker came up in WhatsApp's window; once
+                    // something's picked, Mesh goes back in front of it.
+                    if shared {
+                        return iced::window::latest().and_then(iced::window::gain_focus);
+                    }
                 }
                 whatsapp::Event::Call(Err(error)) => {
                     if let Screen::LoggedIn(session) = &mut state.screen {
@@ -5062,6 +5103,13 @@ fn wa_call_bar<'a>(
                 if call.camera { ui::Icon::Video } else { ui::Icon::VideoOff },
                 Some(Message::WaCallCamera),
                 !call.camera,
+                p,
+                l,
+            ))
+            .push(ui::icon_button(
+                if call.screen { ui::Icon::ScreenShare } else { ui::Icon::ScreenShareOff },
+                Some(Message::WaCallScreen),
+                !call.screen,
                 p,
                 l,
             ))

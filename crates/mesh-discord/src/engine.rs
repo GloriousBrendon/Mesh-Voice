@@ -25,7 +25,8 @@ pub(crate) struct Site {
 pub(crate) enum Command {
     /// A JavaScript expression to evaluate in the page.
     Eval(String),
-    /// Restore and focus the tab's window (for a captcha, say).
+    /// Restore and focus the tab's window (for a captcha, or the browser's
+    /// "choose what to share" picker).
     BringToFront,
 }
 
@@ -77,10 +78,16 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
         id += 1;
         WsMessage::text(serde_json::json!({ "id": id, "method": method, "params": params }).to_string())
     };
+    // Camera and mic for this site without a prompt nobody would see. The
+    // grant lasts as long as this connection, which is as long as Mesh needs
+    // it; screen capture still goes through the browser's own picker.
+    let origin = format!("https://{}", site.host);
+    let mut setup: Vec<WsMessage> = vec![
+        send("Browser.grantPermissions", serde_json::json!({ "origin": origin, "permissions": ["videoCapture", "audioCapture"] })),
+    ];
     // Bindings are how the page reports; the new-document script reinstalls
     // the agent whenever the site reloads.
-    let mut setup: Vec<WsMessage> =
-        site.bindings.iter().map(|name| send("Runtime.addBinding", serde_json::json!({ "name": name }))).collect();
+    setup.extend(site.bindings.iter().map(|name| send("Runtime.addBinding", serde_json::json!({ "name": name }))));
     setup.push(send("Page.addScriptToEvaluateOnNewDocument", serde_json::json!({ "source": site.agent })));
     setup.push(send("Runtime.evaluate", serde_json::json!({ "expression": site.agent })));
     setup.push(send("Runtime.evaluate", serde_json::json!({ "expression": site.kickoff })));
