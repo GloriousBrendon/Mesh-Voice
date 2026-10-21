@@ -939,6 +939,7 @@ enum Message {
     HomeFilter(Option<Network>),
     /// Start the hidden Discord client with `discord_engine_command`.
     StartDiscord,
+    OpenWhatsApp,
     /// Show a Discord text channel or DM in the chat pane.
     WebChatSelected(WebChat),
     WindowFocused(bool),
@@ -2403,6 +2404,28 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        // Re-running the engine command when it's already up only focuses
+        // Discord, so ask the running engine for the WhatsApp tab directly.
+        Message::OpenWhatsApp => {
+            let shown = state
+                .discord_socket
+                .as_ref()
+                .filter(|s| mesh_discord::is_running(s))
+                .map(|s| mesh_discord::show(s, "web.whatsapp.com", "https://web.whatsapp.com/"));
+            let result = match shown {
+                Some(result) => result,
+                None => match &state.discord_command {
+                    Some(cmd) => run_command(cmd).map_err(|e| e.to_string()),
+                    None => Err("no engine configured".into()),
+                },
+            };
+            if let Err(err) = result
+                && let Screen::LoggedIn(session) = &mut state.screen
+            {
+                session.status = Some(format!("Couldn't open WhatsApp: {err}"));
+            }
+            Task::none()
+        }
         Message::OpenJump => {
             if let Screen::LoggedIn(session) = &mut state.screen {
                 session.jump = Some(String::new());
@@ -3595,7 +3618,7 @@ fn top_bar<'a>(
     chips = chips.push(connection_chip("dc", p.proto_dc(), dc, dc_click, p));
     // WhatsApp: the hidden WhatsApp Web tab.
     let wa = if whatsapp_up { Health::On } else { Health::Off };
-    let wa_click = if whatsapp_up { Message::OpenSettings(SettingsPage::Accounts) } else { Message::StartDiscord };
+    let wa_click = if whatsapp_up { Message::OpenSettings(SettingsPage::Accounts) } else { Message::OpenWhatsApp };
     chips = chips.push(connection_chip("wa", p.success(), wa, wa_click, p));
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());

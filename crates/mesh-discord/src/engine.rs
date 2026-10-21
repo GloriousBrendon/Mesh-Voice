@@ -165,6 +165,57 @@ pub fn is_running(socket: &Path) -> bool {
     }
 }
 
+/// Focuses the engine's tab whose URL contains `host`, opening `url` in a new
+/// tab when there's none (to scan a QR code, say). Only for a `host:port`
+/// engine; otherwise it errors and the caller starts the engine instead.
+pub fn show(socket: &Path, host: &str, url: &str) -> Result<()> {
+    let addr = tcp_address(socket).ok_or("the engine isn't host:port")?;
+    let targets: Vec<serde_json::Value> = serde_json::from_str(&devtools(addr, "GET", "/json")?).map_err(|e| e.to_string())?;
+    let tab = targets
+        .iter()
+        .find(|t| t["type"] == "page" && t["url"].as_str().is_some_and(|u| u.contains(host)))
+        .and_then(|t| t["id"].as_str());
+    match tab {
+        Some(id) => devtools(addr, "GET", &format!("/json/activate/{id}")),
+        None => devtools(addr, "PUT", &format!("/json/new?{url}")),
+    }
+    .map(drop)
+}
+
+/// One request to the DevTools HTTP endpoint; the body back.
+fn devtools(addr: &str, method: &str, path: &str) -> Result<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(addr).map_err(|e| e.to_string())?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").map_err(|e| e.to_string())?;
+    // DevTools may keep the connection open, so stop at Content-Length.
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = stream.read(&mut chunk).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&response);
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_owned()))
+                .and_then(|v| v.parse::<usize>().ok());
+            if length.is_some_and(|len| body.len() >= len) {
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&response);
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(head.lines().next().unwrap_or("no answer").to_owned());
+    }
+    Ok(body.to_owned())
+}
+
 /// `host:port` if the engine address is one rather than a socket path.
 fn tcp_address(socket: &Path) -> Option<&str> {
     let s = socket.to_str()?;

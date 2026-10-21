@@ -10,7 +10,7 @@
 mod engine;
 pub mod whatsapp;
 
-pub use engine::is_running;
+pub use engine::{is_running, show};
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
