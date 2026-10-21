@@ -10,7 +10,7 @@
 mod engine;
 pub mod whatsapp;
 
-pub use engine::{is_running, show};
+pub use engine::{Qr, is_running, open, show};
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -32,6 +32,8 @@ pub enum Event {
     Notify(Notify),
     /// A picture asked for with `Engine::fetch_media`: its bytes, or why not.
     Media { url: String, bytes: std::result::Result<Vec<u8>, String> },
+    /// Logged out: the login page's current QR code (a new one every so often).
+    Qr(Qr),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -67,6 +69,10 @@ impl Engine {
     }
     pub fn close_channel(&self) {
         self.call("open", &[]);
+    }
+    /// Logs this Discord session out; the tab goes back to its login page.
+    pub fn sign_out(&self) {
+        self.call("signOut", &[]);
     }
     /// Sends through Discord's own client (which handles captchas, slowmode
     /// and the rest itself).
@@ -238,7 +244,7 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     let site = engine::Site {
         host: "discord.com",
         agent: AGENT,
-        bindings: &["meshEmit", "meshInvite", "meshMessages", "meshNotify", "meshMedia"],
+        bindings: &["meshEmit", "meshInvite", "meshMessages", "meshNotify", "meshMedia", "meshQr"],
         kickoff: "window.__mesh && window.__mesh.ready() && window.meshEmit(window.__mesh.snapshot())",
     };
     let (tx, mut raw) = mpsc::unbounded_channel();
@@ -275,6 +281,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "meshMessages" => serde_json::from_str(payload).ok().map(Event::Messages),
         "meshNotify" => serde_json::from_str(payload).ok().map(Event::Notify),
         "meshMedia" => engine::media(payload).map(|(url, bytes)| Event::Media { url, bytes }),
+        "meshQr" => engine::qr(payload).map(Event::Qr),
         _ => None,
     }
 }

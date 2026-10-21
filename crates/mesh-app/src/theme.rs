@@ -350,9 +350,13 @@ pub struct Config {
     pub density: Option<Density>,
     #[serde(default)]
     pub extras: Extras,
-    /// The Discord-ToS warning on the Accounts page was acknowledged.
+    /// Networks (registry ids) that have been linked, so one signed out
+    /// elsewhere shows as needing a relink.
     #[serde(default)]
-    pub discord_warning_seen: bool,
+    pub linked: Vec<String>,
+    /// Accounts sync switches that are off, as `<network id>:<key>`.
+    #[serde(default)]
+    pub sync_off: Vec<String>,
 }
 
 /// The Rice page's switches.

@@ -39,6 +39,8 @@ pub enum Event {
     ChatStarted(Result<Chat, String>),
     /// How an archive / unarchive / delete went.
     ChatAction { chat_id: String, result: Result<(), String> },
+    /// Not linked: the page's current QR code to scan (a new one every so often).
+    Qr(engine::Qr),
     /// Lost the tab (closed, not logged in yet); reconnects on its own.
     Disconnected,
 }
@@ -57,6 +59,10 @@ impl Engine {
     }
     pub fn close_chat(&self) {
         self.call("open", &[]);
+    }
+    /// Unlinks this browser from the phone; the tab reloads to a new QR code.
+    pub fn sign_out(&self) {
+        self.call("signOut", &[]);
     }
     /// Sends through WhatsApp Web's own send action; `reply_to` (a message
     /// id) quotes that message.
@@ -274,7 +280,7 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     let site = engine::Site {
         host: "web.whatsapp.com",
         agent: AGENT,
-        bindings: &["waEmit", "waMessages", "waNotify", "waMedia", "waSent", "waFile", "waForwarded", "waFrames", "waPcm", "waContacts", "waChatStarted", "waChatAction"],
+        bindings: &["waEmit", "waMessages", "waNotify", "waMedia", "waSent", "waFile", "waForwarded", "waFrames", "waPcm", "waContacts", "waChatStarted", "waChatAction", "waQr"],
         kickoff: "window.__mesh && window.__mesh.ready() && window.waEmit(window.__mesh.snapshot())",
     };
     let (tx, mut raw) = mpsc::unbounded_channel();
@@ -321,6 +327,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         }
         "waChatAction" => engine::sent(payload).map(|(chat_id, result)| Event::ChatAction { chat_id, result }),
         "waForwarded" => engine::sent(payload).map(|(_, result)| Event::Forwarded(result)),
+        "waQr" => engine::qr(payload).map(Event::Qr),
         _ => None,
     }
 }

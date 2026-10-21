@@ -3,11 +3,11 @@
 // actions, so Mesh can show and send WhatsApp chats without the window.
 // Reports through the waEmit / waMessages / waNotify / waMedia / waSent /
 // waFile / waForwarded / waFrames / waPcm / waContacts / waChatStarted /
-// waChatAction bindings.
+// waChatAction / waQr bindings.
 // See design/WHATSAPP-NATIVE.md for the modules used.
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 14;
+  const version = 15;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   const req = (name) => {
@@ -311,9 +311,33 @@
     }
   };
 
+  // Logged out, the page shows a QR code (a canvas) to link this browser as
+  // a device; pass each new one to Mesh, which shows it on its Accounts page.
+  // The code expires after a while behind a "reload" button: press it, since
+  // nobody sees this tab.
+  let lastQr = null;
+  const reportQr = () => {
+    const canvas = document.querySelector('[data-ref] canvas, canvas[aria-label*="QR"]');
+    if (!canvas) {
+      const reload = [...document.querySelectorAll('[data-ref] button, [data-ref] [role="button"]')][0];
+      if (reload) reload.click();
+      return;
+    }
+    const ref = (canvas.closest("[data-ref]") || canvas).getAttribute("data-ref") || canvas.toDataURL();
+    if (ref === lastQr) return;
+    lastQr = ref;
+    window.waQr(JSON.stringify({ png: canvas.toDataURL("image/png").split(",")[1] }));
+  };
+
   window.__mesh = {
     version,
     ready: () => !!wa,
+    // Unlinks this browser from the phone, as WhatsApp's own "Log out" does;
+    // the page reloads to a fresh QR code.
+    signOut: () => {
+      const socket = req("WAWebSocketModel");
+      if (socket && socket.Socket) socket.Socket.logout();
+    },
     snapshot: () => (wa ? JSON.stringify(snapshot()) : null),
     open: (chatId) => {
       open = chatId || null;
@@ -494,7 +518,10 @@
   // Stores fill in after login; keep looking until they're there.
   const boot = () => {
     wa = find();
-    if (!wa) return setTimeout(boot, 1000);
+    if (!wa) {
+      try { reportQr(); } catch {}
+      return setTimeout(boot, 1000);
+    }
     wa.Msg.on("add", onMessage);
     wa.Msg.on("change", (m) => { if (m && m.id && String(m.id.remote) === open) emitMessages(); });
     for (const e of ["add", "remove", "change:t", "change:unreadCount", "change:archive"]) wa.Chat.on(e, emit);

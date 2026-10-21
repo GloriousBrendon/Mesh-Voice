@@ -132,7 +132,7 @@ pub const NETWORKS: &[NetworkSpec] = &[
         color: "#8fd6cc",
         auth: Auth::Password,
         availability: Availability::Ready,
-        sync: &[sync("dms", "Direct messages"), sync("rooms", "Rooms and spaces")],
+        // ponytail: no Matrix switches until Mesh can hide Matrix DMs/rooms.
         ..BASE
     },
     NetworkSpec {
@@ -273,7 +273,7 @@ mod tests {
         for n in NETWORKS {
             assert_eq!(n.code.len(), 2, "{}", n.id);
             assert!(n.color.starts_with('#') && n.color.len() == 7, "{}", n.id);
-            assert!(!n.sync.is_empty(), "{} has nothing to sync", n.id);
+            assert!(n.id == "mx" || !n.sync.is_empty(), "{} has nothing to sync", n.id);
             assert!(n.auth != Auth::Qr || !n.how.is_empty(), "{} QR needs phone steps", n.id);
         }
         let ready: Vec<_> = NETWORKS.iter().filter(|n| !n.soon()).map(|n| n.id).collect();

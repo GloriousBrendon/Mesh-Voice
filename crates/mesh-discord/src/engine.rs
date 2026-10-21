@@ -140,6 +140,23 @@ pub(crate) fn media(payload: &str) -> Option<(String, std::result::Result<Vec<u8
     Some((media["url"].as_str()?.to_owned(), bytes))
 }
 
+/// A sign-in QR code a logged-out site shows, as the page drew it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Qr {
+    Png(Vec<u8>),
+    Svg(Vec<u8>),
+}
+
+/// A `{png: base64}` or `{svg: markup}` QR report.
+pub(crate) fn qr(payload: &str) -> Option<Qr> {
+    use base64::Engine as _;
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if let Some(svg) = v["svg"].as_str() {
+        return Some(Qr::Svg(svg.as_bytes().to_vec()));
+    }
+    base64::engine::general_purpose::STANDARD.decode(v["png"].as_str()?).ok().map(Qr::Png)
+}
+
 /// A `sendFile` result: the chat/channel id and whether it sent (or why not).
 /// The agent reports `{chat_id|channel_id, ok, error}`.
 pub(crate) fn sent(payload: &str) -> Option<(String, std::result::Result<(), String>)> {
@@ -169,6 +186,12 @@ pub fn is_running(socket: &Path) -> bool {
 /// tab when there's none (to scan a QR code, say). Only for a `host:port`
 /// engine; otherwise it errors and the caller starts the engine instead.
 pub fn show(socket: &Path, host: &str, url: &str) -> Result<()> {
+    open(socket, host, url, true)
+}
+
+/// Opens `url` in a new engine tab unless one for `host` is already there
+/// (which `focus` brings to the front).
+pub fn open(socket: &Path, host: &str, url: &str, focus: bool) -> Result<()> {
     let addr = tcp_address(socket).ok_or("the engine isn't host:port")?;
     let targets: Vec<serde_json::Value> = serde_json::from_str(&devtools(addr, "GET", "/json")?).map_err(|e| e.to_string())?;
     let tab = targets
@@ -176,10 +199,10 @@ pub fn show(socket: &Path, host: &str, url: &str) -> Result<()> {
         .find(|t| t["type"] == "page" && t["url"].as_str().is_some_and(|u| u.contains(host)))
         .and_then(|t| t["id"].as_str());
     match tab {
-        Some(id) => devtools(addr, "GET", &format!("/json/activate/{id}")),
-        None => devtools(addr, "PUT", &format!("/json/new?{url}")),
+        Some(id) if focus => devtools(addr, "GET", &format!("/json/activate/{id}")).map(drop),
+        Some(_) => Ok(()),
+        None => devtools(addr, "PUT", &format!("/json/new?{url}")).map(drop),
     }
-    .map(drop)
 }
 
 /// One request to the DevTools HTTP endpoint; the body back.
@@ -306,6 +329,13 @@ mod tests {
         assert_eq!(tcp_address(Path::new("localhost:9222")), Some("localhost:9222"));
         assert_eq!(tcp_address(Path::new("/run/user/1000/discord-engine.sock")), None);
         assert_eq!(tcp_address(Path::new(r"C:\Users\me\engine.sock")), None);
+    }
+
+    #[test]
+    fn reads_qr_reports() {
+        assert_eq!(qr(r#"{"svg":"<svg/>"}"#), Some(Qr::Svg(b"<svg/>".to_vec())));
+        assert_eq!(qr(r#"{"png":"iVBO"}"#), Some(Qr::Png(vec![0x89, 0x50, 0x4e])));
+        assert_eq!(qr("{}"), None);
     }
 
     #[test]

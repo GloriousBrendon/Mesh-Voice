@@ -1,9 +1,10 @@
 // Runs inside the hidden Discord web client. Reads Discord's own stores and
 // calls its own actions, so Mesh can show and drive voice without the window.
-// Talks back through the `meshEmit` DevTools binding.
+// Talks back through the `meshEmit` DevTools binding (and meshQr while
+// logged out).
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 9;
+  const version = 10;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -202,7 +203,7 @@
   };
 
   const events = ["VOICE_STATE_UPDATES", "SPEAKING", "VOICE_CHANNEL_SELECT", "AUDIO_TOGGLE_SELF_MUTE",
-    "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "GUILD_CREATE", "GUILD_DELETE",
+    "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "LOGOUT", "GUILD_CREATE", "GUILD_DELETE",
     "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE",
     // DM order and unread state.
     "MESSAGE_CREATE", "MESSAGE_ACK"];
@@ -222,9 +223,31 @@
     window.meshNotify(JSON.stringify({ channel_id: m.channel_id, title, body: m.content || "sent an attachment" }));
   };
 
+  // Logged out, the login page shows a QR code (an SVG) for the Discord app
+  // to scan; pass each new one to Mesh for its Accounts page.
+  let lastQr = null;
+  const reportQr = () => {
+    const svg = document.querySelector('[class*="qrCode"] svg');
+    if (!svg) return;
+    const markup = svg.outerHTML;
+    if (markup === lastQr) return;
+    lastQr = markup;
+    window.meshQr(JSON.stringify({ svg: markup }));
+  };
+
   window.__mesh = {
     version,
     ready: () => !!found,
+    // Logs this session out, as Discord's own "Log Out" does; the client
+    // goes back to its login page.
+    signOut: () => {
+      const req = runtime();
+      for (const c of req ? candidates(req) : []) {
+        try {
+          if (typeof c.logout === "function" && typeof c.loginToken === "function") return c.logout();
+        } catch {}
+      }
+    },
     snapshot: () => (found ? JSON.stringify(snapshot()) : null),
     // Guild voice channels: join. DM / group DM: start or join the call (rings).
     join: (channelId) => {
@@ -314,5 +337,9 @@
     emit();
   };
   boot();
+  // Discord's stores load on the login page too, just with nobody in them.
+  setInterval(() => {
+    try { if (!(found && found.s.UserStore.getCurrentUser())) reportQr(); } catch {}
+  }, 1000);
   return "installed";
 })();

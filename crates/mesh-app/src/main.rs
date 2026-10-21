@@ -2,6 +2,7 @@
 // No console window next to the app on Windows (debug builds keep it for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod cache;
 mod rain;
 mod theme;
@@ -81,7 +82,6 @@ struct App {
     layout_from_hyprland: bool,
     density: theme::Density,
     extras: theme::Extras,
-    discord_warning_seen: bool,
     /// When the theme files were last (re)read, "HH:MM", for the Rice page.
     theme_reloaded: String,
     /// Socket of the hidden Discord client (Discord voice), if configured.
@@ -96,6 +96,17 @@ struct App {
     /// its chat list.
     whatsapp: Option<whatsapp::Engine>,
     whatsapp_state: Option<whatsapp::Snapshot>,
+    /// Each signed-out engine site's current QR code, by network id.
+    login_qr: HashMap<&'static str, accounts::LoginQr>,
+    /// The engine snapshots less what the sync switches leave out, while
+    /// any are off (`accounts::refresh_shown`).
+    discord_shown: Option<mesh_discord::Snapshot>,
+    whatsapp_shown: Option<whatsapp::Snapshot>,
+    /// Networks that have been linked (so a sign-out elsewhere reads as
+    /// "needs relink"), and the sync switches that are off (`wa:groups`).
+    linked: Vec<String>,
+    sync_off: Vec<String>,
+    accounts: accounts::Panel,
     /// Whether Mesh's window has focus (no notifications for the chat in view).
     window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
@@ -939,7 +950,18 @@ enum Message {
     HomeFilter(Option<Network>),
     /// Start the hidden Discord client with `discord_engine_command`.
     StartDiscord,
-    OpenWhatsApp,
+    /// Accounts page: show this network (by registry id) in the setup panel.
+    AccountsPick(&'static str),
+    /// Open the Accounts page on a network (the top bar's status dots).
+    AccountsOpen(&'static str),
+    /// Pick a network and start signing it in again.
+    AccountsReconnect(&'static str),
+    AccountsStep(usize),
+    AccountsDone,
+    /// Unlink a network (asks once, then does it).
+    SignOut(Network),
+    /// Flip a sync switch: network id, item key.
+    ToggleSync(&'static str, &'static str),
     /// Show a Discord text channel or DM in the chat pane.
     WebChatSelected(WebChat),
     WindowFocused(bool),
@@ -996,7 +1018,6 @@ enum Message {
     ToggleExtra(Extra),
     /// Copy the generated theme.toml to the clipboard.
     ExportTheme,
-    DiscordWarningSeen,
     OpenAddFriend,
     FriendMode(FriendMode),
     FriendQuery(String),
@@ -1061,7 +1082,6 @@ fn boot() -> (App, Task<Message>) {
             layout_from_hyprland: config.layout_from_hyprland.unwrap_or(true),
             density: config.density.unwrap_or_default(),
             extras: config.extras,
-            discord_warning_seen: config.discord_warning_seen,
             theme_reloaded: Local::now().format("%H:%M").to_string(),
             discord_socket: discord_socket(&config),
             discord_command: config.discord_engine_command.clone(),
@@ -1069,6 +1089,12 @@ fn boot() -> (App, Task<Message>) {
             discord_state: None,
             whatsapp: None,
             whatsapp_state: None,
+            login_qr: HashMap::new(),
+            discord_shown: None,
+            whatsapp_shown: None,
+            linked: config.linked.clone(),
+            sync_off: config.sync_off.clone(),
+            accounts: accounts::Panel::default(),
             window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
@@ -1795,11 +1821,21 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     {
                         load_snapshot_media(session, &snapshot, engine);
                     }
+                    if snapshot.me.is_some() {
+                        state.login_qr.remove("dc");
+                        accounts::remember_linked(state, Network::Discord);
+                    }
                     state.discord_state = Some(snapshot);
+                    accounts::refresh_shown(state);
+                }
+                mesh_discord::Event::Qr(qr) => {
+                    state.login_qr.insert("dc", qr.into());
                 }
                 mesh_discord::Event::Disconnected => {
                     state.discord = None;
                     state.discord_state = None;
+                    state.login_qr.remove("dc");
+                    accounts::refresh_shown(state);
                 }
                 mesh_discord::Event::Messages(messages) => {
                     if let Screen::LoggedIn(session) = &mut state.screen
@@ -1861,7 +1897,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             }
                         }
                     }
+                    state.login_qr.remove("wa");
+                    accounts::remember_linked(state, Network::WhatsApp);
                     state.whatsapp_state = Some(snapshot);
+                    accounts::refresh_shown(state);
+                }
+                whatsapp::Event::Qr(qr) => {
+                    state.login_qr.insert("wa", qr.into());
                 }
                 whatsapp::Event::Messages(messages) => {
                     if let Screen::LoggedIn(session) = &mut state.screen
@@ -1997,6 +2039,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 whatsapp::Event::Disconnected => {
                     state.whatsapp = None;
                     state.whatsapp_state = None;
+                    state.login_qr.remove("wa");
+                    accounts::refresh_shown(state);
                 }
             }
             Task::none()
@@ -2404,26 +2448,73 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        // Re-running the engine command when it's already up only focuses
-        // Discord, so ask the running engine for the WhatsApp tab directly.
-        Message::OpenWhatsApp => {
-            let shown = state
-                .discord_socket
-                .as_ref()
-                .filter(|s| mesh_discord::is_running(s))
-                .map(|s| mesh_discord::show(s, "web.whatsapp.com", "https://web.whatsapp.com/"));
-            let result = match shown {
-                Some(result) => result,
-                None => match &state.discord_command {
-                    Some(cmd) => run_command(cmd).map_err(|e| e.to_string()),
-                    None => Err("no engine configured".into()),
-                },
-            };
-            if let Err(err) = result
+        Message::AccountsOpen(id) => {
+            let task = update(state, Message::OpenSettings(SettingsPage::Accounts));
+            Task::batch([task, update(state, Message::AccountsPick(id))])
+        }
+        Message::AccountsPick(id) => {
+            state.accounts = accounts::Panel { selected: Some(id), ..accounts::Panel::default() };
+            if let Some(network) = Network::from_id(id)
+                && matches!(accounts::link(state, network), accounts::Link::Offline)
+            {
+                return update(state, Message::AccountsReconnect(id));
+            }
+            Task::none()
+        }
+        Message::AccountsReconnect(id) => {
+            state.accounts = accounts::Panel { selected: Some(id), linking: true, ..accounts::Panel::default() };
+            if let Some(network) = Network::from_id(id)
+                && let Err(err) = accounts::start_link(state, network)
                 && let Screen::LoggedIn(session) = &mut state.screen
             {
-                session.status = Some(format!("Couldn't open WhatsApp: {err}"));
+                session.status = Some(format!("Couldn't open {}: {err}", network.spec().name));
             }
+            Task::none()
+        }
+        Message::AccountsStep(step) => {
+            state.accounts.step = step;
+            Task::none()
+        }
+        Message::AccountsDone => {
+            state.accounts.step = 0;
+            state.accounts.linking = false;
+            Task::none()
+        }
+        Message::SignOut(network) => {
+            if !state.accounts.confirm_sign_out {
+                state.accounts.confirm_sign_out = true;
+                return Task::none();
+            }
+            state.accounts.confirm_sign_out = false;
+            let id = network.spec().id;
+            state.linked.retain(|l| l != id);
+            let linked = state.linked.clone();
+            persist(|c| c.linked = linked);
+            match network {
+                Network::Matrix => return update(state, Message::LogOut),
+                Network::Discord => {
+                    if let Some(engine) = &state.discord {
+                        engine.sign_out();
+                    }
+                }
+                Network::WhatsApp => {
+                    if let Some(engine) = &state.whatsapp {
+                        engine.sign_out();
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::ToggleSync(id, key) => {
+            let entry = format!("{id}:{key}");
+            if let Some(i) = state.sync_off.iter().position(|e| *e == entry) {
+                state.sync_off.remove(i);
+            } else {
+                state.sync_off.push(entry);
+            }
+            let off = state.sync_off.clone();
+            persist(|c| c.sync_off = off);
+            accounts::refresh_shown(state);
             Task::none()
         }
         Message::OpenJump => {
@@ -2917,11 +3008,6 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
             ])
         }
-        Message::DiscordWarningSeen => {
-            state.discord_warning_seen = true;
-            persist(|c| c.discord_warning_seen = true);
-            Task::none()
-        }
         Message::ThemeCheck => {
             if theme::stamps(&state.theme_files) != state.theme_stamps {
                 reload_theme(state);
@@ -3193,12 +3279,14 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
     responsive(move |size| {
         let wide = size.width > 1100.0;
         let panes: Element<'_, Message> = if session.show_settings {
-            settings_shell(session, state, wide)
+            settings_shell(session, state, size.width)
         } else {
-            let rail = rail_view(session, state.discord_state.as_ref(), state.whatsapp_state.as_ref(), state.discord_command.is_some(), p, l, x.show_network_tags);
+            // What the Accounts sync switches leave in.
+            let (discord, whatsapp) = (accounts::shown_discord(state), accounts::shown_whatsapp(state));
+            let rail = rail_view(session, discord, whatsapp, state.discord_command.is_some(), p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
-                tile(session, Pane::Channels, channel_pane(session, state.discord_state.as_ref(), state.whatsapp_state.as_ref(), p, l), 248.0, p, l, x),
+                tile(session, Pane::Channels, channel_pane(session, discord, whatsapp, p, l), 248.0, p, l, x),
                 tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l, x),
             ]
             .spacing(l.gaps_out)
@@ -3209,13 +3297,12 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             }
             panes.into()
         };
-        let engine = state.discord_socket.as_ref().map(|_| state.discord.is_some());
         let guild = if session.active_wa_groups {
             Some("WhatsApp groups")
         } else {
             active_guild(session, state.discord_state.as_ref()).map(|g| g.name.as_str())
         };
-        let shell = column![top_bar(session, guild, engine, state.whatsapp.is_some(), p, l, x.translucent_panes), panes]
+        let shell = column![top_bar(session, guild, accounts::link(state, Network::Discord), accounts::link(state, Network::WhatsApp), p, l, x.translucent_panes), panes]
             .spacing(l.gaps_out)
             .padding(l.gaps_out);
         if let Some((shown, full)) = &session.lightbox {
@@ -3562,8 +3649,8 @@ fn room_label(room: &RoomSummary) -> String {
 fn top_bar<'a>(
     session: &'a Session,
     guild: Option<&str>,
-    discord_engine: Option<bool>,
-    whatsapp_up: bool,
+    discord: accounts::Link,
+    whatsapp: accounts::Link,
     p: &theme::Palette,
     l: &theme::Layout,
     translucent: bool,
@@ -3592,29 +3679,29 @@ fn top_bar<'a>(
     }
 
     // Compact per-platform status dots: green = fully connected, yellow =
-    // partly, red = off. Clicking opens the connection (or starts the engine
-    // when its tab is down).
+    // partly (or waiting to be linked), red = off. Clicking opens that
+    // network on the Accounts page, which starts linking it if it's down.
     let mut chips = row![].spacing(6).align_y(iced::Alignment::Center);
     // Matrix: logged in or not.
     let mx = session.my_profile.as_ref().map_or(Health::Off, |p| {
         let _ = p;
         Health::On
     });
-    chips = chips.push(connection_chip(Network::Matrix, mx, Message::OpenSettings(SettingsPage::Accounts), p));
+    chips = chips.push(connection_chip(Network::Matrix, mx, p));
     // Discord: bridge (text in Matrix) + the hidden client (voice, servers).
     let bridge = session.rooms.iter().any(|r| r.network == Network::Discord);
-    let voice = discord_engine == Some(true);
-    let dc = match (bridge, voice) {
-        (true, true) => Health::On,
-        (false, false) => Health::Off,
-        _ => Health::Partial,
+    let health = |link: &accounts::Link| match link {
+        accounts::Link::Linked { .. } => Health::On,
+        accounts::Link::SignedOut | accounts::Link::Connecting => Health::Partial,
+        accounts::Link::Offline => Health::Off,
     };
-    let dc_click = if voice { Message::OpenSettings(SettingsPage::Accounts) } else { Message::StartDiscord };
-    chips = chips.push(connection_chip(Network::Discord, dc, dc_click, p));
+    let dc = match (bridge, health(&discord)) {
+        (false, Health::On) | (true, Health::Off) => Health::Partial,
+        (_, h) => h,
+    };
+    chips = chips.push(connection_chip(Network::Discord, dc, p));
     // WhatsApp: the hidden WhatsApp Web tab.
-    let wa = if whatsapp_up { Health::On } else { Health::Off };
-    let wa_click = if whatsapp_up { Message::OpenSettings(SettingsPage::Accounts) } else { Message::OpenWhatsApp };
-    chips = chips.push(connection_chip(Network::WhatsApp, wa, wa_click, p));
+    chips = chips.push(connection_chip(Network::WhatsApp, health(&whatsapp), p));
 
     let (fill, edge, radius) = (p.background(), p.border_ctrl(), l.control_radius());
     let search = button(
@@ -3678,7 +3765,6 @@ enum Health {
 fn connection_chip<'a>(
     network: Network,
     health: Health,
-    on_press: Message,
     p: &theme::Palette,
 ) -> Element<'a, Message> {
     let dot = match health {
@@ -3692,7 +3778,7 @@ fn connection_chip<'a>(
             .spacing(6)
             .align_y(iced::Alignment::Center),
     )
-    .on_press(on_press)
+    .on_press(Message::AccountsOpen(network.spec().id))
     .padding([5, 10])
     .style(move |_, status| button::Style {
         background: Some(if matches!(status, button::Status::Hovered) { edge } else { fill }.into()),
@@ -5672,14 +5758,18 @@ fn audio_view<'a>(session: &'a Session, palette: &'a theme::Palette) -> Element<
 }
 
 /// The settings layout: nav │ page │ (on the Rice page) preview + export.
-fn settings_shell<'a>(session: &'a Session, state: &'a App, wide: bool) -> Element<'a, Message> {
+fn settings_shell<'a>(session: &'a Session, state: &'a App, width: f32) -> Element<'a, Message> {
     let (p, l, x) = (&state.palette, &state.layout, &state.extras);
+    let wide = width > 1100.0;
     let mut panes = row![
         tile(session, Pane::Channels, settings_nav(session, p, l), 220.0, p, l, x),
-        tile(session, Pane::Chat, settings_page(session, state), 0.0, p, l, x),
+        tile(session, Pane::Chat, settings_page(session, state, width), 0.0, p, l, x),
     ]
     .spacing(l.gaps_out)
     .height(Length::Fill);
+    if session.settings_page == SettingsPage::Accounts {
+        panes = panes.push(ui::pane(accounts::panel(state), true, p, l, x.translucent_panes).height(Length::Fill));
+    }
     if session.settings_page == SettingsPage::Rice && wide {
         panes = panes.push(
             column![
@@ -5732,7 +5822,7 @@ fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         .padding([6, 8])
         .style(flat_button_style(p)),
         ui::section("user", p),
-        item("Accounts & bridges", SettingsPage::Accounts),
+        item("Accounts", SettingsPage::Accounts),
         button(ui::sans("Friends", 14.0, Weight::Normal, p.text()))
             .on_press(Message::OpenAddFriend)
             .width(Length::Fill)
@@ -5758,11 +5848,11 @@ fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
     .into()
 }
 
-fn settings_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
+fn settings_page<'a>(session: &'a Session, state: &'a App, width: f32) -> Element<'a, Message> {
     let p = &state.palette;
     let page: Element<'a, Message> = match session.settings_page {
         SettingsPage::Rice => rice_page(state),
-        SettingsPage::Accounts => accounts_page(session, state),
+        SettingsPage::Accounts => accounts::page(state, if width > 1300.0 { 4 } else { 2 }),
         SettingsPage::Privacy => column![
             page_header("Privacy & E2EE", "Your message keys, backed up so they follow you.", p),
             backup_view(&session.backup, p),
@@ -5940,10 +6030,10 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
     let x = &state.extras;
     let extras = column![
         heading("extras", p),
-        switch_row("Digital rain background", "Animated canvas behind the panes, drawn in your accent and muted text", x.digital_rain, Extra::Rain, p),
-        switch_row("Translucent panes", "Panes at 92% opacity so Hyprland's blur shows through", x.translucent_panes, Extra::Translucent, p),
-        switch_row("Show platform tags", "mx / dc next to names, so you always know where a message goes", x.show_network_tags, Extra::Tags, p),
-        switch_row("Plain-text mode", "No image downloads or previews: just text, links and code", x.plain_text_mode, Extra::PlainText, p),
+        switch_row("Digital rain background", "Animated canvas behind the panes, drawn in your accent and muted text", x.digital_rain, Some(Message::ToggleExtra(Extra::Rain)), p),
+        switch_row("Translucent panes", "Panes at 92% opacity so Hyprland's blur shows through", x.translucent_panes, Some(Message::ToggleExtra(Extra::Translucent)), p),
+        switch_row("Show platform tags", "mx / dc next to names, so you always know where a message goes", x.show_network_tags, Some(Message::ToggleExtra(Extra::Tags)), p),
+        switch_row("Plain-text mode", "No image downloads or previews: just text, links and code", x.plain_text_mode, Some(Message::ToggleExtra(Extra::PlainText)), p),
     ]
     .spacing(2);
 
@@ -6124,7 +6214,7 @@ fn segment<'a>(label: &'a str, on: bool, msg: Message, p: &theme::Palette, l: &t
         .into()
 }
 
-fn switch_row<'a>(title: &'a str, sub: &'a str, on: bool, extra: Extra, p: &theme::Palette) -> Element<'a, Message> {
+fn switch_row<'a>(title: &'a str, sub: &'a str, on: bool, msg: Option<Message>, p: &theme::Palette) -> Element<'a, Message> {
     let (track, knob) = if on { (p.accent(), p.accent_text()) } else { (p.border_ctrl(), p.text_muted()) };
     let switch = container(ui::swatch(knob, 16.0, 16.0, 8.0))
         .width(38)
@@ -6148,7 +6238,7 @@ fn switch_row<'a>(title: &'a str, sub: &'a str, on: bool, extra: Extra, p: &them
             ]
             .align_y(iced::Alignment::Center),
         )
-        .on_press(Message::ToggleExtra(extra))
+        .on_press_maybe(msg)
         .padding([10, 0])
         .style(|_, _| button::Style::default()),
         ui::hline(p),
@@ -6304,115 +6394,6 @@ fn keybinds_page<'a>(p: &theme::Palette) -> Element<'a, Message> {
         page_header("Keybinds", "Keyboard first. These work everywhere in Mesh.", p),
         rows,
         text("Rebinding isn't supported yet.").size(12).color(p.text_muted()),
-    ]
-    .spacing(20)
-    .into()
-}
-
-fn accounts_page<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
-    let (p, l) = (&state.palette, &state.layout);
-    let (name, mxid) = session
-        .my_profile
-        .as_ref()
-        .map(|me| (me.display_name.clone(), me.user_id.to_string()))
-        .unwrap_or_default();
-    let (fill, edge) = (p.panel_dim(), p.border());
-    let badge_fill = theme::mix(p.accent(), p.surface(), 0.8);
-    let primary = container(ui::mono("PRIMARY", 10.0, p.accent()))
-        .padding([1, 5])
-        .style(move |_| container::Style {
-            background: Some(badge_fill.into()),
-            border: iced::border::rounded(4),
-            ..container::Style::default()
-        });
-    let backup = match session.backup.status {
-        Some(BackupStatus::Enabled) => ("key backup on", p.success()),
-        Some(BackupStatus::Incomplete) => ("key backup needs your recovery key", p.warning()),
-        Some(BackupStatus::Disabled) => ("no key backup", p.warning()),
-        _ => ("checking key backup…", p.text_muted()),
-    };
-    let account = container(
-        row![
-            container(ui::mono_bold(initials(&my_server(session)), 13.0, p.text_bright()))
-                .center_x(40)
-                .center_y(40)
-                .style({
-                    let tile = p.surface_alt();
-                    move |_| container::Style {
-                        background: Some(tile.into()),
-                        border: iced::border::rounded(8),
-                        ..container::Style::default()
-                    }
-                }),
-            column![
-                row![ui::mono(mxid, 13.0, p.text_bright()), primary].spacing(8).align_y(iced::Alignment::Center),
-                row![
-                    ui::mono(format!("{name} · {}", my_server(session)), 11.0, p.text_muted()),
-                    ui::mono("· syncing", 11.0, p.success()),
-                    ui::mono(format!("· {}", backup.0), 11.0, backup.1),
-                ]
-                .spacing(6),
-            ]
-            .spacing(4)
-            .width(Length::Fill),
-            button(text("Log out").size(13))
-                .on_press(Message::LogOut)
-                .padding([6, 12])
-                .style(flat_button_style(p)),
-        ]
-        .spacing(12)
-        .align_y(iced::Alignment::Center),
-    )
-    .padding([12, 14])
-    .style(move |_| container::Style {
-        background: Some(fill.into()),
-        border: iced::border::rounded(8).color(edge).width(1),
-        ..container::Style::default()
-    });
-
-    let add_account = ui::not_yet(
-        container(ui::mono("+ add a homeserver", 12.0, p.text_muted())).padding([10, 14]),
-        "Multiple accounts aren't supported yet.",
-        p,
-    );
-
-    let bridged = session.rooms.iter().filter(|r| r.network == Network::Discord).count();
-    let bridge_line = if bridged > 0 {
-        format!("mautrix-discord on {} · {bridged} bridged rooms", my_server(session))
-    } else {
-        format!("No bridged Discord rooms seen yet. DM your bridge bot on {} and send `login-qr` to link an account.", my_server(session))
-    };
-    let mut discord = column![
-        heading("discord through a bridge", p),
-        row![ui::mono(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)), text(bridge_line).size(13).color(p.text())].spacing(8),
-    ]
-    .spacing(8);
-    if !state.discord_warning_seen {
-        let (warn_fill, warn) = (theme::mix(p.warning(), p.surface(), 0.88), p.warning());
-        discord = discord.push(
-            container(
-                column![
-                    ui::sans("Discord doesn't allow third-party clients", 14.0, Weight::Semibold, warn),
-                    text("A personal account linked through a bridge can be flagged or banned by Discord. Use an account you can afford to lose.")
-                        .size(13)
-                        .color(p.text()),
-                    ui::primary_button(ui::sans("Got it", 13.0, Weight::Semibold, p.accent_text()), Some(Message::DiscordWarningSeen), p, l),
-                ]
-                .spacing(8),
-            )
-            .padding([12, 14])
-            .style(move |_| container::Style {
-                background: Some(warn_fill.into()),
-                border: iced::border::rounded(8).color(warn).width(1),
-                ..container::Style::default()
-            }),
-        );
-    }
-
-    column![
-        page_header("Accounts & bridges", "Where your messages go, and through what.", p),
-        column![heading("matrix homeservers", p), account, add_account].spacing(8),
-        discord,
     ]
     .spacing(20)
     .into()
