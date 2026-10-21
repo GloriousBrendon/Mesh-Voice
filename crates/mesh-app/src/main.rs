@@ -107,6 +107,8 @@ struct App {
     linked: Vec<String>,
     sync_off: Vec<String>,
     accounts: accounts::Panel,
+    /// The call's video, by track: the latest frame of each camera.
+    video: HashMap<String, VideoTile>,
     /// Whether Mesh's window has focus (no notifications for the chat in view).
     window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
@@ -141,6 +143,19 @@ struct NewChat {
     busy: bool,
     error: Option<String>,
 }
+
+/// One camera in a call: its latest frame, already decoded (a handle from
+/// pixels draws in the same frame, so swapping frames never blanks).
+struct VideoTile {
+    frame: iced::widget::image::Handle,
+    /// Ours (the self view), drawn small.
+    local: bool,
+    /// When the last frame came; a camera that stops sending goes away.
+    at: std::time::Instant,
+}
+
+/// A camera that sent nothing for this long is off (or the call ended).
+const VIDEO_STALE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// A GIF as one sprite sheet (its frames in a grid), drawn a frame at a time
 /// by cropping. One image rather than one per frame, because iced evicts
@@ -941,6 +956,10 @@ enum Message {
     /// Join a Discord voice channel, or call a Discord DM.
     DiscordJoin(String),
     DiscordLeave,
+    /// Camera on or off in the Discord call.
+    ToggleVideo,
+    /// Drop video from cameras that stopped sending.
+    VideoPrune,
     /// Show a Discord server (by id) from the hidden client.
     GuildSelected(String),
     /// Expand or collapse a rail folder.
@@ -1095,6 +1114,7 @@ fn boot() -> (App, Task<Message>) {
             linked: config.linked.clone(),
             sync_off: config.sync_off.clone(),
             accounts: accounts::Panel::default(),
+            video: HashMap::new(),
             window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
@@ -1792,6 +1812,16 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 Message::CallActionFinished,
             )
         }
+        Message::ToggleVideo => {
+            if let (Some(engine), Some(snapshot)) = (&state.discord, &state.discord_state) {
+                engine.set_video(!snapshot.voice.self_video);
+            }
+            Task::none()
+        }
+        Message::VideoPrune => {
+            state.video.retain(|_, tile| tile.at.elapsed() < VIDEO_STALE);
+            Task::none()
+        }
         // In Discord voice, mute/deafen act on that call.
         Message::ToggleMute if in_discord_voice(state) => {
             if let Some(engine) = &state.discord {
@@ -1831,7 +1861,15 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 mesh_discord::Event::Qr(qr) => {
                     state.login_qr.insert("dc", qr.into());
                 }
+                mesh_discord::Event::Video(mesh_discord::Video::Frame { id, local, width, height, rgba }) => {
+                    let frame = iced::widget::image::Handle::from_rgba(width, height, rgba);
+                    state.video.insert(id, VideoTile { frame, local, at: std::time::Instant::now() });
+                }
+                mesh_discord::Event::Video(mesh_discord::Video::Ended { id }) => {
+                    state.video.remove(&id);
+                }
                 mesh_discord::Event::Disconnected => {
+                    state.video.clear();
                     state.discord = None;
                     state.discord_state = None;
                     state.login_qr.remove("dc");
@@ -3092,6 +3130,13 @@ fn subscription(state: &App) -> Subscription<Message> {
             iced::time::every(std::time::Duration::from_millis(MEDIA_TICK_MS)).map(|_| Message::MediaTick)
         } else {
             Subscription::none()
+        },
+        // Cameras that stop sending (no "ended" from a remote that just turns
+        // its camera off) go away within a couple of seconds.
+        if state.video.is_empty() {
+            Subscription::none()
+        } else {
+            iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::VideoPrune)
         },
         // Hot-reload the rice: an mtime poll is cheap and works everywhere.
         iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::ThemeCheck),
@@ -4587,7 +4632,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         col = col.push(container(call_bar(call, p)).padding([8, 16]));
     }
     if let Some(snapshot) = state.discord_state.as_ref().filter(|s| s.voice.connected()) {
-        col = col.push(container(discord_call_bar(session, &snapshot.voice, p, l)).padding([8, 16]));
+        col = col.push(container(discord_call_bar(session, &snapshot.voice, &state.video, p, l)).padding([8, 16]));
     }
     if let Some(prompt) = &session.verification {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
@@ -4816,6 +4861,7 @@ fn member_pane<'a>(session: &'a Session, p: &theme::Palette, tags: bool) -> Elem
 fn discord_call_bar<'a>(
     session: &'a Session,
     voice: &'a mesh_discord::Voice,
+    video: &'a HashMap<String, VideoTile>,
     p: &theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
@@ -4829,30 +4875,39 @@ fn discord_call_bar<'a>(
         p.warning()
     };
     let (fill, edge) = (p.surface_alt(), p.border());
-    container(
-        column![
-            row![
-                ui::icon(ui::Icon::Voice, 17.0, status),
-                ui::mono_bold(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)),
-                ui::sans(voice.channel_name.as_deref().unwrap_or("call"), 14.0, Weight::Semibold, p.text_bright())
-                    .width(Length::Fill),
-                ui::icon_button(
-                    if voice.self_mute { ui::Icon::MicOff } else { ui::Icon::Mic },
-                    Some(Message::ToggleMute),
-                    voice.self_mute,
-                    p,
-                    l,
-                ),
-                ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l),
-            ]
-            .spacing(10)
-            .align_y(iced::Alignment::Center),
-            scrollable(people).direction(iced::widget::scrollable::Direction::Horizontal(
-                iced::widget::scrollable::Scrollbar::new().width(2).scroller_width(2),
-            )),
+    let mut body = column![
+        row![
+            ui::icon(ui::Icon::Voice, 17.0, status),
+            ui::mono_bold(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)),
+            ui::sans(voice.channel_name.as_deref().unwrap_or("call"), 14.0, Weight::Semibold, p.text_bright())
+                .width(Length::Fill),
+            ui::icon_button(
+                if voice.self_mute { ui::Icon::MicOff } else { ui::Icon::Mic },
+                Some(Message::ToggleMute),
+                voice.self_mute,
+                p,
+                l,
+            ),
+            ui::icon_button(
+                if voice.self_video { ui::Icon::Video } else { ui::Icon::VideoOff },
+                Some(Message::ToggleVideo),
+                !voice.self_video,
+                p,
+                l,
+            ),
+            ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordLeave), true, p, l),
         ]
-        .spacing(8),
-    )
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+        scrollable(people).direction(iced::widget::scrollable::Direction::Horizontal(
+            iced::widget::scrollable::Scrollbar::new().width(2).scroller_width(2),
+        )),
+    ]
+    .spacing(8);
+    if let Some(tiles) = video_tiles(video, p) {
+        body = body.push(tiles);
+    }
+    container(body)
     .padding(12)
     .width(Length::Fill)
     .style(move |_| container::Style {
@@ -4861,6 +4916,31 @@ fn discord_call_bar<'a>(
         ..container::Style::default()
     })
     .into()
+}
+
+/// The call's cameras: everyone else's large, ours small at the end.
+fn video_tiles<'a>(video: &'a HashMap<String, VideoTile>, p: &theme::Palette) -> Option<Element<'a, Message>> {
+    let live = || video.values().filter(|t| t.at.elapsed() < VIDEO_STALE);
+    if live().next().is_none() {
+        return None;
+    }
+    let edge = p.border();
+    let tile = |t: &'a VideoTile, height: f32| {
+        container(iced::widget::image(t.frame.clone()).height(height).content_fit(iced::ContentFit::Contain))
+            .clip(true)
+            .style(move |_| container::Style {
+                border: iced::border::rounded(8).color(edge).width(1),
+                ..container::Style::default()
+            })
+    };
+    let mut tiles = row![].spacing(8).align_y(iced::Alignment::End);
+    for t in live().filter(|t| !t.local) {
+        tiles = tiles.push(tile(t, 240.0));
+    }
+    for t in live().filter(|t| t.local) {
+        tiles = tiles.push(tile(t, 110.0));
+    }
+    Some(container(tiles).center_x(Length::Fill).into())
 }
 
 fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Message> {

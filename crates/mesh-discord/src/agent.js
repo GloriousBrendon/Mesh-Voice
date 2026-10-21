@@ -1,10 +1,10 @@
 // Runs inside the hidden Discord web client. Reads Discord's own stores and
 // calls its own actions, so Mesh can show and drive voice without the window.
 // Talks back through the `meshEmit` DevTools binding (and meshQr while
-// logged out).
+// logged out, meshVideo during video calls).
 (() => {
   // Bump when the API below changes, so a running page takes the new agent.
-  const version = 10;
+  const version = 11;
   if (window.__mesh && window.__mesh.version >= version) return "already";
 
   // Discord loads several webpack runtimes into one chunk global; the live
@@ -139,6 +139,7 @@
         connection: String((s.RTCConnectionStore.getState && s.RTCConnectionStore.getState()) || ""),
         self_mute: !!s.MediaEngineStore.isSelfMute(),
         self_deaf: !!s.MediaEngineStore.isSelfDeaf(),
+        self_video: !!(s.MediaEngineStore.isVideoEnabled && s.MediaEngineStore.isVideoEnabled()),
         members: current ? members(current, currentChannel && currentChannel.guild_id) : [],
       },
       guilds,
@@ -203,7 +204,7 @@
   };
 
   const events = ["VOICE_STATE_UPDATES", "SPEAKING", "VOICE_CHANNEL_SELECT", "AUDIO_TOGGLE_SELF_MUTE",
-    "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "LOGOUT", "GUILD_CREATE", "GUILD_DELETE",
+    "AUDIO_TOGGLE_SELF_DEAF", "RTC_CONNECTION_STATE", "CONNECTION_OPEN", "LOGOUT", "MEDIA_ENGINE_SET_VIDEO_ENABLED", "GUILD_CREATE", "GUILD_DELETE",
     "CHANNEL_CREATE", "CHANNEL_DELETE", "CALL_CREATE", "CALL_UPDATE", "CALL_DELETE",
     // DM order and unread state.
     "MESSAGE_CREATE", "MESSAGE_ACK"];
@@ -222,6 +223,85 @@
     const title = (m.author.global_name || m.author.username) + where;
     window.meshNotify(JSON.stringify({ channel_id: m.channel_id, title, body: m.content || "sent an attachment" }));
   };
+
+  // Video calls: catch every video track of the call (the other side's, as
+  // WebRTC receives them, and our camera, as Discord asks for it) and send
+  // Mesh a JPEG of each about 15 times a second. Hooked on the prototypes,
+  // so it works however Discord holds the constructors; once per page.
+  const videoFps = 15, videoWidth = 640;
+  const sendVideo = (payload) => window.meshVideo && window.meshVideo(JSON.stringify(payload));
+  const watchVideo = (track, local) => {
+    if (!track || track.kind !== "video" || track.readyState === "ended") return;
+    const seen = (window.__meshVideoTracks = window.__meshVideoTracks || new Set());
+    if (seen.has(track.id)) return;
+    seen.add(track.id);
+    // A clone, so stopping ours never touches Discord's own.
+    const copy = track.clone();
+    const reader = new MediaStreamTrackProcessor({ track: copy }).readable.getReader();
+    const canvas = new OffscreenCanvas(1, 1), ctx = canvas.getContext("2d");
+    let last = 0, sending = false;
+    const done = () => {
+      seen.delete(track.id);
+      copy.stop();
+      sendVideo({ id: track.id, ended: true });
+    };
+    (async () => {
+      for (;;) {
+        const { value: frame, done: over } = await reader.read();
+        if (over) break;
+        // stop() on Discord's track doesn't fire "ended", and our clone would
+        // keep the camera on: follow the original's state instead.
+        if (track.readyState === "ended") { frame.close(); break; }
+        const now = performance.now();
+        // Drop frames while one's still on its way, and past the frame rate
+        // (with slack, or a 15 fps camera loses every other frame).
+        if (sending || now - last < 1000 / videoFps - 10) { frame.close(); continue; }
+        last = now;
+        const scale = Math.min(1, videoWidth / frame.displayWidth);
+        canvas.width = Math.round(frame.displayWidth * scale);
+        canvas.height = Math.round(frame.displayHeight * scale);
+        ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        frame.close();
+        sending = true;
+        canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 })
+          .then((blob) => new Promise((ok, fail) => {
+            const r = new FileReader();
+            r.onload = () => ok(String(r.result).split(",")[1]);
+            r.onerror = fail;
+            r.readAsDataURL(blob);
+          }))
+          .then((jpeg) => sendVideo({ id: track.id, local, jpeg }))
+          .catch(() => {})
+          .finally(() => { sending = false; });
+      }
+      done();
+    })().catch(done);
+  };
+  if (!window.__meshVideoHooked && window.RTCPeerConnection && window.MediaStreamTrackProcessor) {
+    window.__meshVideoHooked = true;
+    const pc = RTCPeerConnection.prototype, setRemote = pc.setRemoteDescription;
+    pc.setRemoteDescription = function (...args) {
+      const result = setRemote.apply(this, args);
+      Promise.resolve(result).then(() => {
+        for (const r of this.getReceivers()) watchVideo(r.track, false);
+      }).catch(() => {});
+      return result;
+    };
+    // Discord wraps getUserMedia on navigator.mediaDevices itself, from
+    // whatever the prototype had when it loaded: hook both, so it's caught
+    // whether we got here first (a reload) or not (a page already running).
+    const hookCamera = (owner) => {
+      const getUserMedia = owner.getUserMedia;
+      owner.getUserMedia = function (...args) {
+        return getUserMedia.apply(this, args).then((stream) => {
+          for (const t of stream.getVideoTracks()) watchVideo(t, true);
+          return stream;
+        });
+      };
+    };
+    hookCamera(MediaDevices.prototype);
+    if (Object.prototype.hasOwnProperty.call(navigator.mediaDevices, "getUserMedia")) hookCamera(navigator.mediaDevices);
+  }
 
   // Logged out, the login page shows a QR code (an SVG) for the Discord app
   // to scan; pass each new one to Mesh for its Accounts page.
@@ -262,6 +342,8 @@
     leave: () => found.channel.disconnect(),
     toggleMute: () => found.audio.toggleSelfMute(),
     toggleDeaf: () => found.audio.toggleSelfDeaf(),
+    // Camera on or off ("true" / "false"), as Discord's own camera button.
+    setVideo: (on) => found.audio.setVideoEnabled(on === "true"),
     // Shows a text channel or DM in Mesh: loads its latest messages and
     // streams them (and every change) back; `null` stops.
     open: (channelId) => {

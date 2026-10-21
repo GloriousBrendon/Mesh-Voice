@@ -43,6 +43,8 @@ pub enum Icon {
     UserPlus,
     Matrix,
     Discord,
+    Video,
+    VideoOff,
 }
 
 impl Icon {
@@ -63,6 +65,8 @@ impl Icon {
             Icon::Hash => include_bytes!("../icons/hash.svg"),
             Icon::At => include_bytes!("../icons/at-sign.svg"),
             Icon::Voice => include_bytes!("../icons/volume-2.svg"),
+            Icon::Video => include_bytes!("../icons/video.svg"),
+            Icon::VideoOff => include_bytes!("../icons/video-off.svg"),
             Icon::Close => include_bytes!("../icons/x.svg"),
             Icon::Search => include_bytes!("../icons/search.svg"),
             Icon::UserPlus => include_bytes!("../icons/user-plus.svg"),

@@ -10,7 +10,7 @@
 mod engine;
 pub mod whatsapp;
 
-pub use engine::{Qr, is_running, open, show};
+pub use engine::{Qr, Video, is_running, open, show};
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -34,6 +34,8 @@ pub enum Event {
     Media { url: String, bytes: std::result::Result<Vec<u8>, String> },
     /// Logged out: the login page's current QR code (a new one every so often).
     Qr(Qr),
+    /// A video call frame (someone's camera, or ours), or its end.
+    Video(Video),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
 }
@@ -57,6 +59,10 @@ impl Engine {
     }
     pub fn toggle_deaf(&self) {
         self.call("toggleDeaf", &[]);
+    }
+    /// Turns our camera on or off, in the call or for the next one.
+    pub fn set_video(&self, on: bool) {
+        self.call("setVideo", &[if on { "true" } else { "false" }]);
     }
     /// Joins a server from an invite link or code; answers with `Event::Invite`.
     pub fn accept_invite(&self, link: &str) {
@@ -190,6 +196,9 @@ pub struct Voice {
     pub connection: String,
     pub self_mute: bool,
     pub self_deaf: bool,
+    /// Our camera is on.
+    #[serde(default)]
+    pub self_video: bool,
     pub members: Vec<Member>,
 }
 
@@ -244,7 +253,7 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     let site = engine::Site {
         host: "discord.com",
         agent: AGENT,
-        bindings: &["meshEmit", "meshInvite", "meshMessages", "meshNotify", "meshMedia", "meshQr"],
+        bindings: &["meshEmit", "meshInvite", "meshMessages", "meshNotify", "meshMedia", "meshQr", "meshVideo"],
         kickoff: "window.__mesh && window.__mesh.ready() && window.meshEmit(window.__mesh.snapshot())",
     };
     let (tx, mut raw) = mpsc::unbounded_channel();
@@ -282,6 +291,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "meshNotify" => serde_json::from_str(payload).ok().map(Event::Notify),
         "meshMedia" => engine::media(payload).map(|(url, bytes)| Event::Media { url, bytes }),
         "meshQr" => engine::qr(payload).map(Event::Qr),
+        "meshVideo" => engine::video(payload).map(Event::Video),
         _ => None,
     }
 }

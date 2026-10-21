@@ -27,6 +27,7 @@ async fn main() {
             }
             mesh_discord::Event::Snapshot(_) => {}
             mesh_discord::Event::Qr(_) => println!("logged out: showing a QR code"),
+            mesh_discord::Event::Video(_) => {}
             mesh_discord::Event::Invite(result) => {
                 println!("invite: {result:?}");
                 if result != mesh_discord::Invite::Waiting {

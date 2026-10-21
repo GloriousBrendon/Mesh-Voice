@@ -157,6 +157,40 @@ pub(crate) fn qr(payload: &str) -> Option<Qr> {
     base64::engine::general_purpose::STANDARD.decode(v["png"].as_str()?).ok().map(Qr::Png)
 }
 
+/// One frame of a call's video, decoded, or the end of that video.
+#[derive(Debug, Clone)]
+pub enum Video {
+    Frame {
+        /// The track it's from: one per person's camera.
+        id: String,
+        /// Our own camera (the self view).
+        local: bool,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    Ended { id: String },
+}
+
+/// A `{id, local, jpeg: base64}` or `{id, ended: true}` video report.
+pub(crate) fn video(payload: &str) -> Option<Video> {
+    use base64::Engine as _;
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let id = v["id"].as_str()?.to_owned();
+    if v["ended"].as_bool() == Some(true) {
+        return Some(Video::Ended { id });
+    }
+    let jpeg = base64::engine::general_purpose::STANDARD.decode(v["jpeg"].as_str()?).ok()?;
+    let frame = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).ok()?.into_rgba8();
+    Some(Video::Frame {
+        id,
+        local: v["local"].as_bool().unwrap_or(false),
+        width: frame.width(),
+        height: frame.height(),
+        rgba: frame.into_raw(),
+    })
+}
+
 /// A `sendFile` result: the chat/channel id and whether it sent (or why not).
 /// The agent reports `{chat_id|channel_id, ok, error}`.
 pub(crate) fn sent(payload: &str) -> Option<(String, std::result::Result<(), String>)> {
@@ -329,6 +363,20 @@ mod tests {
         assert_eq!(tcp_address(Path::new("localhost:9222")), Some("localhost:9222"));
         assert_eq!(tcp_address(Path::new("/run/user/1000/discord-engine.sock")), None);
         assert_eq!(tcp_address(Path::new(r"C:\Users\me\engine.sock")), None);
+    }
+
+    #[test]
+    fn reads_video_reports() {
+        use base64::Engine as _;
+        let mut jpeg = Vec::new();
+        image::RgbImage::new(4, 2)
+            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .unwrap();
+        let payload = serde_json::json!({ "id": "t1", "local": true, "jpeg": base64::engine::general_purpose::STANDARD.encode(&jpeg) });
+        let Some(Video::Frame { id, local, width, height, rgba }) = video(&payload.to_string()) else { panic!("no frame") };
+        assert_eq!((id.as_str(), local, width, height, rgba.len()), ("t1", true, 4, 2, 4 * 2 * 4));
+        assert!(matches!(video(r#"{"id":"t1","ended":true}"#), Some(Video::Ended { id }) if id == "t1"));
+        assert!(video(r#"{"id":"t1","jpeg":"bm90IGEganBlZw=="}"#).is_none());
     }
 
     #[test]
