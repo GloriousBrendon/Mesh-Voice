@@ -252,6 +252,7 @@ pub struct Member {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Guild {
     pub id: String,
+    #[serde(default)]
     pub name: String,
     pub icon: Option<String>,
     #[serde(default)]

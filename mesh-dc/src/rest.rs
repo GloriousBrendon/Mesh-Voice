@@ -177,7 +177,11 @@ pub fn snapshot(s: &State) -> Value {
         .iter()
         .map(|ch| {
             let id = ch.get("id").and_then(Value::as_str).unwrap_or("");
-            let recipients: Vec<Value> = ch.get("recipients").and_then(Value::as_array).into_iter().flatten().filter_map(|r| r.get("id").and_then(Value::as_str)).map(|rid| user_obj(rid, s)).collect();
+            // User objects, or (a user account's READY) just their ids, with the
+            // users themselves in READY's `users`.
+            let ids = ch.get("recipients").and_then(Value::as_array).into_iter().flatten().filter_map(|r| r.get("id").and_then(Value::as_str));
+            let bare = ch.get("recipient_ids").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+            let recipients: Vec<Value> = ids.chain(bare).map(|rid| user_obj(rid, s)).collect();
             let name = ch
                 .get("name")
                 .and_then(Value::as_str)
@@ -294,6 +298,7 @@ mod tests {
         s.channels.insert("100".into(), json!({ "id": "100", "name": "general", "type": 0, "guild_id": "10", "position": 1 }));
         s.channels.insert("101".into(), json!({ "id": "101", "name": "Voice", "type": 2, "guild_id": "10", "position": 2 }));
         s.dm_channels.push(json!({ "id": "500", "type": 1, "recipients": [{ "id": "2" }], "last_message_id": "900" }));
+        s.dm_channels.push(json!({ "id": "501", "type": 1, "recipient_ids": ["2"], "last_message_id": "901" }));
         s.users.insert("2".into(), json!({ "id": "2", "username": "friend", "avatar": null }));
 
         let snap = snapshot(&s);
@@ -303,6 +308,7 @@ mod tests {
         assert_eq!(parsed.guilds[0].text_channels[0].name, "general");
         assert_eq!(parsed.guilds[0].voice_channels[0].name, "Voice");
         assert_eq!(parsed.dms[0].recipient_id.as_deref(), Some("2"));
+        assert!(parsed.dms.iter().all(|d| d.recipient_id.as_deref() == Some("2")), "recipient_ids DMs resolve too");
     }
 
     #[test]

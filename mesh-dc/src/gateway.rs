@@ -377,7 +377,15 @@ async fn dispatch(t: &str, d: &Value, state: &tokio::sync::Mutex<State>, events:
 fn index_guild(s: &mut State, g: &Value) {
     let Some(gid) = g.get("id").and_then(Value::as_str) else { return };
     let mut slim = g.clone();
-    slim.as_object_mut().map(|o| o.remove("channels"));
+    if let Some(o) = slim.as_object_mut() {
+        o.remove("channels");
+        // A user account's READY keeps name, icon and the rest under `properties`.
+        if let Some(props) = o.remove("properties").and_then(|p| p.as_object().cloned()) {
+            for (k, v) in props {
+                o.entry(k).or_insert(v);
+            }
+        }
+    }
     s.guilds.insert(gid.to_owned(), slim);
     for ch in g.get("channels").and_then(Value::as_array).into_iter().flatten() {
         if let Some(id) = ch.get("id").and_then(Value::as_str) {
