@@ -7331,6 +7331,10 @@ fn main() -> iced::Result {
         .theme(theme)
         .subscription(subscription)
         .title("Mesh")
+        .window(iced::window::Settings {
+            icon: iced::window::icon::from_file_data(include_bytes!("../assets/mesh.png"), None).ok(),
+            ..iced::window::Settings::default()
+        })
         .run()
 }
 

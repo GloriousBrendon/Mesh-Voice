@@ -23,3 +23,7 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
 toml = "1.1.2"
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
+
+# The exe's icon and version info (Explorer, taskbar, Task Manager).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

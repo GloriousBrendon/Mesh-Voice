@@ -29,3 +29,7 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "ti
 lto = "thin"
 codegen-units = 4
 strip = true
+
+# The exe's icon and version info (Task Manager shows "Mesh WhatsApp").
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
