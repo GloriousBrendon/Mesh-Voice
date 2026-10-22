@@ -27,3 +27,9 @@ tracing-subscriber = { version = "0.3.23", default-features = false }
 # The exe's icon and version info (Explorer, taskbar, Task Manager).
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# Theme-colored title bar (DWM); already in the tree through winit.
+[target.'cfg(windows)'.dependencies]
+# Notification-area icon; Linux needs none (and would pull in GTK).
+tray-icon = { version = "0.26.1", default-features = false }
+windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }

@@ -43,6 +43,7 @@ pub enum Icon {
     UserPlus,
     Matrix,
     Discord,
+    WhatsApp,
     Video,
     VideoOff,
     ScreenShare,
@@ -76,6 +77,7 @@ impl Icon {
             Icon::UserPlus => include_bytes!("../icons/user-plus.svg"),
             Icon::Matrix => include_bytes!("../icons/brand-matrix.svg"),
             Icon::Discord => include_bytes!("../icons/brand-discord.svg"),
+            Icon::WhatsApp => include_bytes!("../icons/brand-whatsapp.svg"),
         }
     }
 }

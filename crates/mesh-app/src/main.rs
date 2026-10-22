@@ -6,6 +6,8 @@ mod accounts;
 mod cache;
 mod rain;
 mod theme;
+mod titlebar;
+mod tray;
 mod ui;
 
 use chrono::{DateTime, Local, TimeZone};
@@ -94,6 +96,8 @@ struct App {
     /// The native Discord helper (`mesh-dc`) beside Mesh's own binary, when it's
     /// there; Discord then runs in it instead of the engine browser.
     discord_native: Option<PathBuf>,
+    /// Mesh has a notification-area icon (Windows), so closing hides to it.
+    tray: bool,
     /// What it runs under (`discord_native_wrapper`), if anything.
     discord_native_wrapper: Vec<String>,
     /// Its email + password sign-in form.
@@ -910,6 +914,12 @@ enum VerifyStage {
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// The notification-area icon was clicked (Windows).
+    Tray(tray::Action),
+    /// The window's close button: hide to the tray if there is one, else quit.
+    CloseRequested(iced::window::Id),
+    /// The main window's raw id (its HWND on Windows), for the title bar.
+    WindowReady(u64),
     /// The native Discord sign-in form.
     DcSignInLogin(String),
     DcSignInPassword(String),
@@ -1184,6 +1194,7 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             whatsapp_native: whatsapp_native.clone(),
             discord_native,
+            tray: tray::create(),
             discord_native_wrapper: config.discord_native_wrapper.clone().unwrap_or_default(),
             dc_sign_in: accounts::DcSignIn::default(),
             discord: None,
@@ -1204,7 +1215,13 @@ fn boot() -> (App, Task<Message>) {
             screen,
             rain_time: 0.0,
         },
-        task,
+        Task::batch([
+            task,
+            // The title bar takes the theme's colors once the window exists.
+            iced::window::latest()
+                .and_then(iced::window::raw_id::<Message>)
+                .map(Message::WindowReady),
+        ]),
     )
 }
 
@@ -1963,6 +1980,22 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Some(engine) = &state.discord {
                 engine.toggle_deaf();
             }
+            Task::none()
+        }
+        Message::Tray(tray::Action::Quit) => iced::exit(),
+        Message::Tray(tray::Action::Show) => iced::window::latest().and_then(|id| {
+            Task::batch([iced::window::set_mode(id, iced::window::Mode::Windowed), iced::window::gain_focus(id)])
+        }),
+        Message::CloseRequested(id) => {
+            if state.tray {
+                iced::window::set_mode(id, iced::window::Mode::Hidden)
+            } else {
+                iced::exit()
+            }
+        }
+        Message::WindowReady(raw_id) => {
+            titlebar::set_window(raw_id);
+            titlebar::paint(&state.palette);
             Task::none()
         }
         Message::DcSignInLogin(value) => {
@@ -3303,6 +3336,7 @@ fn persist(change: impl FnOnce(&mut theme::Config)) {
 fn reload_theme(state: &mut App) {
     state.palette = theme::palette_for_choice(&state.theme_choice, &theme_path());
     state.iced_theme = state.palette.to_iced_theme();
+    titlebar::paint(&state.palette);
     state.layout = theme::layout_for_config(&config_path());
     state.layout_from_hyprland = theme::load_config(&config_path())
         .layout_from_hyprland
@@ -3318,6 +3352,8 @@ fn theme(state: &App) -> IcedTheme {
 
 fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
+        iced::window::close_requests().map(Message::CloseRequested),
+        if state.tray { Subscription::run(tray::events) } else { Subscription::none() },
         match (&state.discord_native, &state.discord_socket) {
             (Some(exe), _) => Subscription::run_with((exe.clone(), state.discord_native_wrapper.clone()), discord_native_events),
             (None, Some(socket)) => Subscription::run_with(socket.clone(), discord_events),
@@ -4058,6 +4094,15 @@ enum Health {
     Off,
 }
 
+/// A network's logo.
+fn net_icon(network: Network) -> ui::Icon {
+    match network {
+        Network::Discord => ui::Icon::Discord,
+        Network::Matrix => ui::Icon::Matrix,
+        Network::WhatsApp => ui::Icon::WhatsApp,
+    }
+}
+
 /// A compact, clickable platform status: a dot (green/yellow/red) and its tag.
 fn connection_chip<'a>(
     network: Network,
@@ -4071,7 +4116,11 @@ fn connection_chip<'a>(
     };
     let (fill, edge, radius) = (p.panel_dim(), p.border_ctrl(), 999.0);
     button(
-        row![ui::swatch(dot, 7.0, 7.0, 3.5), ui::mono_bold(network.tag(), 12.0, net_color(network, p))]
+        row![
+            ui::swatch(dot, 7.0, 7.0, 3.5),
+            ui::icon(net_icon(network), 14.0, net_color(network, p)),
+            ui::mono_bold(network.tag(), 12.0, net_color(network, p))
+        ]
             .spacing(6)
             .align_y(iced::Alignment::Center),
     )
@@ -4229,11 +4278,7 @@ fn rail_folder<'a>(
     p: &theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
-    let (icon, color) = match network {
-        Network::Discord => (ui::Icon::Discord, net_color(Network::Discord, p)),
-        Network::Matrix => (ui::Icon::Matrix, net_color(Network::Matrix, p)),
-        Network::WhatsApp => (ui::Icon::Phone, net_color(Network::WhatsApp, p)),
-    };
+    let (icon, color) = (net_icon(network), net_color(network, p));
     let head = column![
         rail_tile(ui::icon(icon, 22.0, color), false, Some(Message::ToggleFolder(network)), p, l),
         ui::mono(format!("{} {}", network.tag(), if open { "▾" } else { "▸" }), 10.0, p.text_muted()),
@@ -4399,7 +4444,7 @@ fn channel_pane<'a>(
         for (icon, label, color, filter) in [
             (ui::Icon::Matrix, "Matrix", net_color(Network::Matrix, p), Network::Matrix),
             (ui::Icon::Discord, "Discord", net_color(Network::Discord, p), Network::Discord),
-            (ui::Icon::Phone, "WhatsApp", p.success(), Network::WhatsApp),
+            (ui::Icon::WhatsApp, "WhatsApp", p.success(), Network::WhatsApp),
         ] {
             chips = chips.push(filter_chip(Some(filter), icon, label, color, session.home_filter, p, l));
         }
@@ -7336,6 +7381,8 @@ fn main() -> iced::Result {
         .title("Mesh")
         .window(iced::window::Settings {
             icon: iced::window::icon::from_file_data(include_bytes!("../assets/mesh.png"), None).ok(),
+            // Closing hides to the tray (Windows) or quits: see `CloseRequested`.
+            exit_on_close_request: false,
             ..iced::window::Settings::default()
         })
         .run()
