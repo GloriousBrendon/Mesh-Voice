@@ -1,6 +1,6 @@
 # Plan: `identity` (Mesh)
 
-Status: **DRAFT, awaiting approval.** Implements
+Status: **APPROVED 2026-10-22.** Implements
 [SPEC-identity.md](SPEC-identity.md) (approved 2026-10-22).
 
 The plan and its task checklist live together here, not in `tasks/`. The
@@ -312,13 +312,11 @@ otherwise:
 - after Task 2, Tasks 3, 4 and 8 are independent;
 - Task 15 is independent of Tasks 12–14.
 
-## Open questions
+## Resolved questions (2026-10-22)
 
-- **P1. What does Mesh show as in Mesh-Voice?** The app itself is called
-  Mesh, so a network also named "Mesh" next to Matrix, Discord and WhatsApp
-  may read oddly. I propose the registry id `mh`, the name **Mesh** and the
-  chip `mesh`, since everything else in the app is Mesh-branded anyway. Or do
-  you prefer another name for the network (say "Mesh P2P")?
-- **P2. Checkpoint stops.** I've marked B (keystore) and D (two machines) as
-  hard stops for your review, and A and C as short reports I carry on from.
-  Is that the right amount of stopping?
+- **P1. Name.** The network is **Mesh**: the app's own native network, with
+  Discord, WhatsApp and the other bridges as add-ons. It gets the tag `mesh`,
+  and comes first among networks in the Accounts page. The helper binary is
+  **Mesh-Node** (`mesh-node`).
+- **P2. Checkpoints.** As planned: hard stops at B and D, short reports at A
+  and C, and no going beyond the plan.
