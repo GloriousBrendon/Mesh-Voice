@@ -76,10 +76,34 @@ discord_engine_command = 'start "" msedge --remote-debugging-port=9222 --user-da
 
 WhatsApp chats then show on Home (the `whatsapp` chip filters to them), open
 in the chat pane, send, show photos and notify; see design/WHATSAPP-NATIVE.md.
-WhatsApp calls aren't wired yet.
+WhatsApp calls work too.
 
 Any local program can use that port to drive the Discord and WhatsApp
 sessions in it, so only run it on a PC you trust.
+
+### Native WhatsApp and Discord (no browser)
+
+Two helper programs replace the engine browser: `mesh-wa` (WhatsApp, on
+[whatsapp-rust](https://github.com/oxidezap/whatsapp-rust)) and `mesh-dc`
+(Discord: gateway, REST and voice with DAVE). Each is its own cargo project;
+build them with `cargo build --release` in `mesh-wa/` and `mesh-dc/` (they need
+`cmake` and `clang`, plus ALSA headers on Linux) and put the binaries next to
+Mesh's own. Mesh uses a helper when it finds it there and the engine browser
+otherwise. Link WhatsApp from the QR code on the Accounts page; sign in to
+Discord there with email and password (or its QR code). Not native yet: video
+and screen sharing.
+
+On Linux, where Discord goes through a VPN, have `mesh-dc` run inside the
+VPN's network namespace too, or it connects from your own IP. In
+`~/.config/mesh/config.toml`, give the command Mesh should put in front of the
+helper (it must work without a password prompt: Mesh has no terminal):
+
+```toml
+discord_native_wrapper = ["sudo", "-n", "ip", "netns", "exec", "vpn", "sudo", "-n", "-u", "you"]
+```
+
+If the wrapper can't start, Discord stays offline; it never falls back to a
+direct connection.
 
 ## Build & run
 

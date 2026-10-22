@@ -333,10 +333,19 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
 /// engine browser: the same bindings, as `{"binding":..,"payload":".."}` lines,
 /// and commands in as `{"fn":..,"args":[..]}`. Mirrors `whatsapp::run_native`.
 /// Restarts the helper by itself while `events` is open.
-pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSender<Event>) {
+/// `wrapper`, when not empty, is a command line the helper runs under (e.g.
+/// one entering a VPN's network namespace): `wrapper… exe --data <dir>`.
+pub async fn run_native(exe: PathBuf, wrapper: Vec<String>, data: PathBuf, events: mpsc::UnboundedSender<Event>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     while !events.is_closed() {
-        let mut cmd = tokio::process::Command::new(&exe);
+        let mut cmd = match wrapper.split_first() {
+            Some((program, args)) => {
+                let mut cmd = tokio::process::Command::new(program);
+                cmd.args(args).arg(&exe);
+                cmd
+            }
+            None => tokio::process::Command::new(&exe),
+        };
         cmd.arg("--data").arg(&data).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW

@@ -94,6 +94,8 @@ struct App {
     /// The native Discord helper (`mesh-dc`) beside Mesh's own binary, when it's
     /// there; Discord then runs in it instead of the engine browser.
     discord_native: Option<PathBuf>,
+    /// What it runs under (`discord_native_wrapper`), if anything.
+    discord_native_wrapper: Vec<String>,
     /// Its email + password sign-in form.
     dc_sign_in: accounts::DcSignIn,
     /// Handle to drive it, while connected.
@@ -1182,6 +1184,7 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             whatsapp_native: whatsapp_native.clone(),
             discord_native,
+            discord_native_wrapper: config.discord_native_wrapper.clone().unwrap_or_default(),
             dc_sign_in: accounts::DcSignIn::default(),
             discord: None,
             discord_state: None,
@@ -3316,7 +3319,7 @@ fn theme(state: &App) -> IcedTheme {
 fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
         match (&state.discord_native, &state.discord_socket) {
-            (Some(exe), _) => Subscription::run_with(exe.clone(), discord_native_events),
+            (Some(exe), _) => Subscription::run_with((exe.clone(), state.discord_native_wrapper.clone()), discord_native_events),
             (None, Some(socket)) => Subscription::run_with(socket.clone(), discord_events),
             (None, None) => Subscription::none(),
         },
@@ -3441,12 +3444,12 @@ fn discord_native() -> Option<PathBuf> {
 }
 
 /// Streams the native Discord helper's events (restarting it by itself).
-fn discord_native_events(exe: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
-    let exe = exe.clone();
+fn discord_native_events((exe, wrapper): &(PathBuf, Vec<String>)) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let (exe, wrapper) = (exe.clone(), wrapper.clone());
     iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
         use iced::futures::SinkExt;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(mesh_discord::run_native(exe, data_dir().join("discord"), tx));
+        tokio::spawn(mesh_discord::run_native(exe, wrapper, data_dir().join("discord"), tx));
         while let Some(event) = rx.recv().await {
             if output.send(Message::Discord(event)).await.is_err() {
                 break;

@@ -345,6 +345,12 @@ pub struct Config {
     pub discord_engine_socket: Option<String>,
     /// Command that starts that client when its socket isn't there yet.
     pub discord_engine_command: Option<String>,
+    /// What the native Discord helper (`mesh-dc`) runs under, as a command
+    /// line Mesh appends the helper and its arguments to: e.g. something that
+    /// enters the VPN's network namespace, so Discord's chat, voice and media
+    /// all go through it, as with the engine browser. Fails closed: if it
+    /// can't start, Discord stays offline rather than going direct.
+    pub discord_native_wrapper: Option<Vec<String>>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
     pub density: Option<Density>,
