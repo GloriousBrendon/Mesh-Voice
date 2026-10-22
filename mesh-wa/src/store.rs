@@ -1,10 +1,14 @@
 //! Chats and their recent messages, kept in memory and saved as one JSON file.
 //! Field names match Mesh's `mesh-discord/src/whatsapp.rs` structs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use whatsapp_rust::buffa::{Message as _, MessageField};
 use whatsapp_rust::prelude::*;
 
 const KEEP_PER_CHAT: usize = 200;
@@ -25,11 +29,19 @@ pub struct Message {
     pub content: String,
     pub system: bool,
     pub timestamp_ms: u64,
-    // Always null / empty for now; kept so the shape matches Mesh's.
-    pub image: Option<serde_json::Value>,
-    pub file: Option<serde_json::Value>,
+    /// Mesh's `Image` (photo, sticker, GIF).
+    pub image: Option<Value>,
+    /// Mesh's `FileMeta` (video, voice note, audio, document).
+    pub file: Option<Value>,
     pub quote: Option<Quote>,
-    pub reactions: Vec<serde_json::Value>,
+    /// Filled from `reacts` when shown.
+    pub reactions: Vec<Value>,
+    /// The media part of the message, protobuf as base64, for downloading or forwarding it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<String>,
+    /// Reactions: sender jid -> emoji.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reacts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -78,6 +90,9 @@ pub struct Store {
     pub push: HashMap<String, String>,
     /// `<lid>@lid` -> `<number>@s.whatsapp.net`, so one person is one chat.
     pub lid_pn: HashMap<String, String>,
+    /// Profile picture URLs, by jid. Not saved: they expire, so each run asks again.
+    #[serde(skip)]
+    pub avatars: HashMap<String, String>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -149,12 +164,37 @@ impl Store {
         self.chats.get(chat_id)?.messages.iter().find(|m| m.id == msg_id)
     }
 
+    /// A message and its chat, by message id alone (Mesh's media keys carry only that).
+    // ponytail: scans every chat; an id -> chat index if that ever shows up in a profile.
+    pub fn find_any(&self, msg_id: &str) -> Option<(&str, &Message)> {
+        self.chats.iter().find_map(|(id, c)| c.messages.iter().find(|m| m.id == msg_id).map(|m| (id.as_str(), m)))
+    }
+
+    /// Sets (or, with an empty emoji, takes back) `who`'s reaction. Returns whether the message is here.
+    pub fn react(&mut self, chat_id: &str, msg_id: &str, who: &str, emoji: &str) -> bool {
+        let Some(m) = self.chats.get_mut(chat_id).and_then(|c| c.messages.iter_mut().find(|m| m.id == msg_id)) else {
+            return false;
+        };
+        if emoji.is_empty() {
+            m.reacts.remove(who);
+        } else {
+            m.reacts.insert(who.to_owned(), emoji.to_owned());
+        }
+        true
+    }
+
     /// The last messages of a chat, oldest first, with authors named as we know them now.
     pub fn recent(&self, chat_id: &str) -> Vec<Message> {
         let msgs = self.chats.get(chat_id).map(|c| c.messages.as_slice()).unwrap_or_default();
         let mut recent = msgs[msgs.len().saturating_sub(SHOWN)..].to_vec();
-        for m in recent.iter_mut().filter(|m| !m.author_id.is_empty()) {
-            m.author = self.name_of(&m.author_id);
+        for m in recent.iter_mut() {
+            if !m.author_id.is_empty() {
+                m.author = self.name_of(&m.author_id);
+                m.avatar = self.avatars.get(&m.author_id).cloned();
+            }
+            m.reactions = pills(&m.reacts, &self.me);
+            m.media = None;
+            m.reacts.clear();
         }
         recent
     }
@@ -168,7 +208,7 @@ impl Store {
             unread: data.unread,
             last_ms: data.last_ms,
             muted: data.muted,
-            avatar: None,
+            avatar: self.avatars.get(id).cloned(),
         }
     }
 
@@ -188,14 +228,16 @@ impl Store {
     /// People whose name or number contains `query`.
     pub fn search(&self, query: &str) -> Vec<Contact> {
         let q = query.trim().to_lowercase();
+        // A national number's leading 0 stands in for the country code.
         let digits: String = q.chars().filter(char::is_ascii_digit).collect();
+        let digits = digits.strip_prefix('0').unwrap_or(&digits);
         let mut ids: Vec<&String> = self.contacts.keys().chain(self.push.keys()).chain(self.chats.keys()).collect();
         ids.sort();
         ids.dedup();
         ids.into_iter()
             .filter(|id| id.ends_with("@s.whatsapp.net") && **id != self.me)
             .map(|id| Contact { id: id.clone(), name: self.name_of(id), number: id.split('@').next().unwrap_or_default().to_owned() })
-            .filter(|c| q.is_empty() || c.name.to_lowercase().contains(&q) || (!digits.is_empty() && c.number.contains(&digits)))
+            .filter(|c| q.is_empty() || c.name.to_lowercase().contains(&q) || (digits.len() >= 3 && c.number.contains(digits)))
             .take(30)
             .collect()
     }
@@ -207,56 +249,210 @@ pub fn number_label(jid: &str) -> String {
     if jid.ends_with("@s.whatsapp.net") { format!("+{user}") } else { user.to_owned() }
 }
 
+/// Reaction pills, one per emoji: `{key, count, mine}`.
+fn pills(reacts: &BTreeMap<String, String>, me: &str) -> Vec<Value> {
+    let mut pills: Vec<(&str, u64, bool)> = Vec::new();
+    for (who, emoji) in reacts {
+        match pills.iter_mut().find(|p| p.0 == emoji) {
+            Some(p) => {
+                p.1 += 1;
+                p.2 |= who == me;
+            }
+            None => pills.push((emoji, 1, who == me)),
+        }
+    }
+    pills.into_iter().map(|(key, count, mine)| json!({ "key": key, "count": count, "mine": mine })).collect()
+}
+
+/// What Mesh shows for a message.
+#[derive(Debug, Default, PartialEq)]
+pub struct Body {
+    /// The text, caption, or a "[Location]"-style label.
+    pub content: String,
+    pub image: Option<Value>,
+    pub file: Option<Value>,
+    /// See [`Message::media`].
+    pub media: Option<String>,
+    /// "Photo", "Voice note"…, for quoting or notifying a captionless one.
+    pub kind: &'static str,
+}
+
+impl Body {
+    /// The content, or the kind when there's no text.
+    pub fn line(&self) -> String {
+        if self.content.is_empty() { self.kind.to_owned() } else { self.content.clone() }
+    }
+}
+
+/// `voice-note.ogg`, `video.mp4`: a name for a media file without one.
+fn file_name(kind: &str, mimetype: Option<&str>) -> String {
+    let mime = mimetype.unwrap_or_default().split(';').next().unwrap_or_default();
+    let ext = mime.split('/').nth(1).map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty()).unwrap_or_else(|| "bin".into());
+    format!("{}.{ext}", kind.to_lowercase().replace(' ', "-"))
+}
+
+/// Mesh's `FileMeta`.
+struct FileMeta<'a> {
+    name: String,
+    kind: &'a str,
+    size: Option<u64>,
+    seconds: Option<u32>,
+    waveform: &'a [u8],
+    thumb: Option<&'a [u8]>,
+    width: Option<u32>,
+    height: Option<u32>,
+}
+
+impl FileMeta<'_> {
+    fn new(name: String, kind: &str, size: Option<u64>) -> FileMeta<'_> {
+        FileMeta { name, kind, size, seconds: None, waveform: &[], thumb: None, width: None, height: None }
+    }
+
+    fn json(self) -> Value {
+        json!({
+            "name": self.name, "kind": self.kind, "size": self.size, "duration": self.seconds.map(f64::from),
+            "waveform": self.waveform,
+            "thumb": self.thumb.filter(|t| t.starts_with(&[0xff, 0xd8])).map(|t| B64.encode(t)),
+            "width": self.width, "height": self.height,
+        })
+    }
+}
+
 /// What to show for a message, or `None` for ones that aren't shown (reactions, receipts,
 /// protocol messages, key distribution).
-pub fn content(msg: &wa::Message) -> Option<String> {
+pub fn body(msg: &wa::Message) -> Option<Body> {
     let base = msg.get_base_message();
     if let Some(text) = base.text_content() {
-        return Some(text.to_owned());
+        return Some(Body { content: text.to_owned(), ..Default::default() });
     }
-    let caption = |label: &str, caption: Option<&str>| match caption.filter(|c| !c.is_empty()) {
-        Some(c) => format!("{label} {c}"),
-        None => label.to_owned(),
+    let text = |s: &Option<String>| s.clone().unwrap_or_default();
+    let label = |label: &str, extra: Option<&str>| match extra.filter(|c| !c.is_empty()) {
+        Some(c) => format!("[{label}] {c}"),
+        None => format!("[{label}]"),
     };
-    if let Some(m) = base.image_message.as_option() {
-        return Some(caption("[Photo]", m.caption.as_deref()));
-    }
-    if let Some(m) = base.video_message.as_option().or(base.ptv_message.as_option()) {
-        return Some(caption("[Video]", m.caption.as_deref()));
-    }
-    if let Some(m) = base.audio_message.as_option() {
-        return Some(if m.ptt == Some(true) { "[Voice message]" } else { "[Audio]" }.into());
-    }
-    if let Some(m) = base.document_message.as_option() {
-        let name = m.file_name.as_deref().or(m.title.as_deref()).unwrap_or_default();
-        let label = format!("[Document] {name}");
-        return Some(match m.caption.as_deref().filter(|c| !c.is_empty()) {
-            Some(c) => format!("{label}\n{c}"),
-            None => label.trim_end().to_owned(),
-        });
-    }
-    if base.sticker_message.is_set() {
-        return Some("[Sticker]".into());
-    }
-    if base.location_message.is_set() || base.live_location_message.is_set() {
-        return Some("[Location]".into());
-    }
-    if let Some(m) = base.contact_message.as_option() {
-        return Some(caption("[Contact]", m.display_name.as_deref()));
-    }
-    if base.contacts_array_message.is_set() {
-        return Some("[Contacts]".into());
-    }
-    if let Some(m) = base.poll_creation_message.as_option().or(base.poll_creation_message_v3.as_option()) {
-        return Some(caption("[Poll]", m.name.as_deref()));
-    }
-    None
+    // The media part kept for later, without thumbnails or the reply context.
+    let mut part = wa::Message::default();
+    let body = if let Some(m) = base.image_message.as_option() {
+        let mut keep = m.clone();
+        (keep.jpeg_thumbnail, keep.context_info) = (None, MessageField::none());
+        part.image_message = MessageField::some(keep);
+        let image = json!({ "width": m.width, "height": m.height, "sticker": false });
+        Body { content: text(&m.caption), image: Some(image), kind: "Photo", ..Default::default() }
+    } else if let Some(m) = base.sticker_message.as_option() {
+        let mut keep = m.clone();
+        (keep.png_thumbnail, keep.context_info) = (None, MessageField::none());
+        part.sticker_message = MessageField::some(keep);
+        let image = json!({ "width": m.width.unwrap_or(512), "height": m.height.unwrap_or(512), "sticker": true });
+        Body { image: Some(image), kind: "Sticker", ..Default::default() }
+    } else if let Some(m) = base.video_message.as_option().or(base.ptv_message.as_option()) {
+        let mut keep = m.clone();
+        (keep.jpeg_thumbnail, keep.context_info) = (None, MessageField::none());
+        part.video_message = MessageField::some(keep);
+        if m.gif_playback == Some(true) {
+            // A GIF is a short silent mp4: Mesh loops its frames inline.
+            let image = json!({ "width": m.width, "height": m.height, "sticker": false, "gif": true });
+            Body { content: text(&m.caption), image: Some(image), kind: "GIF", ..Default::default() }
+        } else {
+            let file = FileMeta {
+                seconds: m.seconds,
+                thumb: m.jpeg_thumbnail.as_deref(),
+                width: m.width,
+                height: m.height,
+                ..FileMeta::new(file_name("Video", m.mimetype.as_deref()), "Video", m.file_length)
+            };
+            Body { content: text(&m.caption), file: Some(file.json()), kind: "Video", ..Default::default() }
+        }
+    } else if let Some(m) = base.audio_message.as_option() {
+        let mut keep = m.clone();
+        keep.context_info = MessageField::none();
+        part.audio_message = MessageField::some(keep);
+        let kind = if m.ptt == Some(true) { "Voice note" } else { "Audio" };
+        let file = FileMeta {
+            seconds: m.seconds,
+            waveform: m.waveform.as_deref().unwrap_or_default(),
+            ..FileMeta::new(file_name(kind, m.mimetype.as_deref()), kind, m.file_length)
+        };
+        Body { file: Some(file.json()), kind, ..Default::default() }
+    } else if let Some(m) = base.document_message.as_option() {
+        let mut keep = m.clone();
+        (keep.jpeg_thumbnail, keep.context_info) = (None, MessageField::none());
+        part.document_message = MessageField::some(keep);
+        let name = m.file_name.clone().or_else(|| m.title.clone()).filter(|n| !n.is_empty());
+        let name = name.unwrap_or_else(|| file_name("Document", m.mimetype.as_deref()));
+        let file = FileMeta::new(name, "Document", m.file_length);
+        Body { content: text(&m.caption), file: Some(file.json()), kind: "Document", ..Default::default() }
+    } else {
+        let content = if base.location_message.is_set() || base.live_location_message.is_set() {
+            "[Location]".into()
+        } else if let Some(m) = base.contact_message.as_option() {
+            label("Contact", m.display_name.as_deref())
+        } else if base.contacts_array_message.is_set() {
+            "[Contacts]".into()
+        } else if let Some(m) = base.poll_creation_message.as_option().or(base.poll_creation_message_v3.as_option()) {
+            label("Poll", m.name.as_deref())
+        } else {
+            return None;
+        };
+        return Some(Body { content, ..Default::default() });
+    };
+    Some(Body { media: Some(B64.encode(part.encode_to_vec())), ..body })
+}
+
+/// A message's kept media part back (see [`Message::media`]).
+pub fn media(m: &Message) -> Option<wa::Message> {
+    let bytes = B64.decode(m.media.as_deref()?).ok()?;
+    wa::Message::decode_from_slice(&bytes).ok()
 }
 
 /// The quoted message's author jid and text, if `msg` is a reply.
 pub fn quoted(msg: &wa::Message) -> Option<(String, String)> {
     let ctx = msg.get_base_message().context_info()?;
     ctx.stanza_id.as_ref()?;
-    let text = ctx.quoted_message.as_option().and_then(content).unwrap_or_default();
-    Some((ctx.participant.clone().unwrap_or_default(), text))
+    let text = ctx.quoted_message.as_option().and_then(body).map(|b| b.line()).unwrap_or_default();
+    Some((ctx.participant.clone().unwrap_or_default(), text.chars().take(200).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_messages_carry_meshes_metadata() {
+        let mut ptt = wa::message::AudioMessage::default();
+        (ptt.ptt, ptt.seconds, ptt.waveform) = (Some(true), Some(7), Some(vec![0, 50, 100]));
+        (ptt.mimetype, ptt.direct_path) = (Some("audio/ogg; codecs=opus".into()), Some("/v/t62/x".into()));
+        let mut msg = wa::Message::default();
+        msg.audio_message = MessageField::some(ptt);
+        let b = body(&msg).unwrap();
+        assert_eq!((b.content.as_str(), b.kind, b.line().as_str()), ("", "Voice note", "Voice note"));
+        let file = b.file.as_ref().unwrap();
+        assert_eq!((file["name"].as_str(), file["duration"].as_f64(), file["waveform"][1].as_u64()), (Some("voice-note.ogg"), Some(7.0), Some(50)));
+        // The kept part decodes back, ready to download.
+        let kept = media(&Message { media: b.media, ..Default::default() }).unwrap();
+        assert_eq!(kept.audio_message.as_option().and_then(|a| a.direct_path.as_deref()), Some("/v/t62/x"));
+
+        let mut gif = wa::message::VideoMessage::default();
+        (gif.gif_playback, gif.width, gif.caption) = (Some(true), Some(320), Some("lol".into()));
+        let mut msg = wa::Message::default();
+        msg.video_message = MessageField::some(gif);
+        let b = body(&msg).unwrap();
+        let image = b.image.as_ref().unwrap();
+        assert_eq!((b.content.as_str(), image["gif"].as_bool(), image["width"].as_u64()), ("lol", Some(true), Some(320)));
+        assert_eq!(file_name("Document", None), "document.bin");
+    }
+
+    #[test]
+    fn reactions_group_by_emoji() {
+        let mut store = Store { me: "1@s.whatsapp.net".into(), ..Default::default() };
+        store.add("2@g.us", Message { id: "m".into(), ..Default::default() });
+        for (who, emoji) in [("1@s.whatsapp.net", "👍"), ("3@s.whatsapp.net", "👍"), ("4@s.whatsapp.net", "😂")] {
+            assert!(store.react("2@g.us", "m", who, emoji));
+        }
+        assert!(!store.react("9@g.us", "m", "4@s.whatsapp.net", ""));
+        store.react("2@g.us", "m", "4@s.whatsapp.net", "");
+        let shown = &store.recent("2@g.us")[0];
+        assert_eq!(shown.reactions, vec![json!({ "key": "👍", "count": 2, "mine": true })]);
+        assert!(shown.reacts.is_empty() && shown.media.is_none());
+        assert_eq!(store.find_any("m").map(|(chat, _)| chat), Some("2@g.us"));
+    }
 }

@@ -5,19 +5,26 @@
 
 mod audio;
 mod calls;
+mod media;
 mod store;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use whatsapp_rust::buffa::MessageField;
+use whatsapp_rust::download::{Downloadable, MediaType};
+use whatsapp_rust::media::{DocumentOptions, ImageOptions, VideoOptions, document_message, image_message, video_message};
 use whatsapp_rust::prelude::*;
+use whatsapp_rust::{ProfilePictureRequest, ProfilePictureTarget, ProfilePictureType, UploadOptions};
 use whatsapp_rust::wacore::net::HttpRequest;
 use whatsapp_rust::wacore_binary::JidExt as _;
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
@@ -151,7 +158,9 @@ async fn main() -> anyhow::Result<()> {
         seq: 0,
         emit_due: false,
         save_due: false,
+        messages_due: false,
         asked_groups: HashSet::new(),
+        asked_pics: HashSet::new(),
         calls_tx,
         internal_tx,
     };
@@ -178,6 +187,9 @@ async fn main() -> anyhow::Result<()> {
                     app.emit_due = false;
                     app.emit_snapshot();
                 }
+                if std::mem::take(&mut app.messages_due) && let Some(id) = app.open.clone() {
+                    app.emit_messages(&id);
+                }
                 if app.save_due && ticks.is_multiple_of(2) {
                     app.save_due = false;
                     app.store.save();
@@ -193,8 +205,22 @@ async fn main() -> anyhow::Result<()> {
 // ---------- the app ----------
 
 enum Internal {
-    Sent { chat_id: String, text: String, quote: Option<Quote>, result: Result<String, String> },
+    /// A message we sent (text, file or forward), or why not; `binding` is the report Mesh waits on.
+    Sent { chat_id: String, message: Box<wa::Message>, quote: Option<Quote>, binding: &'static str, result: Result<String, String> },
     GroupNames(Vec<(String, String)>),
+    /// A profile picture URL, by jid.
+    Avatar(String, String),
+    /// The chat `startChat` found, or why not.
+    ChatStarted(Result<String, String>),
+    /// How an archive / unarchive / delete went.
+    ChatAction { chat_id: String, action: ChatAction, result: Result<(), String> },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChatAction {
+    Archive,
+    Unarchive,
+    Delete,
 }
 
 struct App {
@@ -206,14 +232,23 @@ struct App {
     seq: u64,
     emit_due: bool,
     save_due: bool,
+    /// The open chat's messages changed (pictures arrived); send them again on the next tick.
+    messages_due: bool,
     asked_groups: HashSet<String>,
+    asked_pics: HashSet<String>,
     calls_tx: UnboundedSender<Update>,
     internal_tx: UnboundedSender<Internal>,
 }
 
+/// How many chats get their profile pictures looked up, from the top of the list.
+const PICTURED: usize = 40;
+
 impl App {
-    fn emit_snapshot(&self) {
-        emit("waEmit", &self.store.snapshot());
+    fn emit_snapshot(&mut self) {
+        let snap = self.store.snapshot();
+        let ids: Vec<String> = snap.chats.iter().take(PICTURED).map(|c| c.id.clone()).collect();
+        emit("waEmit", &snap);
+        self.ask_avatars(ids);
     }
 
     fn emit_messages(&self, chat_id: &str) {
@@ -227,6 +262,10 @@ impl App {
     fn changed(&mut self) {
         self.emit_due = true;
         self.save_due = true;
+    }
+
+    fn is_open(&self, chat_id: &str) -> bool {
+        self.open.as_deref() == Some(chat_id)
     }
 
     async fn on_event(&mut self, event: &Event) {
@@ -327,17 +366,32 @@ impl App {
         if !from_me && !m.info.push_name.is_empty() {
             self.store.push.insert(author_id.clone(), m.info.push_name.to_string());
         }
-        let Some(content) = store::content(&m.message) else {
+        // A reaction lands on its message.
+        if let Some(r) = m.message.get_base_message().reaction_message.as_option() {
+            let target = r.key.as_option().and_then(|k| k.id.as_deref()).unwrap_or_default();
+            if self.store.react(&chat_id, target, &author_id, r.text.as_deref().unwrap_or_default()) {
+                self.save_due = true;
+                if self.is_open(&chat_id) {
+                    self.emit_messages(&chat_id);
+                }
+            }
+            return;
+        }
+        let Some(body) = store::body(&m.message) else {
             debug!("skipping a message with nothing to show");
             return;
         };
+        let notice = body.line();
         let quote = store::quoted(&m.message).map(|(who, text)| Quote { author: if who.is_empty() { String::new() } else { self.store.name_of(&bare(&who)) }, text });
         let msg = Message {
             id: m.info.id.to_string(),
             author: self.store.name_of(&author_id),
             author_id,
-            content: content.clone(),
+            content: body.content,
             timestamp_ms: m.info.timestamp.timestamp_millis().max(0) as u64,
+            image: body.image,
+            file: body.file,
+            media: body.media,
             quote,
             ..Default::default()
         };
@@ -345,9 +399,9 @@ impl App {
         if !self.store.add(&chat_id, msg) {
             return;
         }
-        let is_open = self.open.as_deref() == Some(chat_id.as_str());
+        let is_open = self.is_open(&chat_id);
         let data = self.store.chat(&chat_id);
-        if from_me || is_open {
+        if from_me {
             data.unread = 0;
         } else {
             data.unread += 1;
@@ -356,13 +410,15 @@ impl App {
         self.changed();
         if is_open {
             self.emit_messages(&chat_id);
+            // On screen in Mesh, so seen the moment it lands (as WhatsApp Web does when focused).
+            self.mark_read(&chat_id, false);
         }
         if src.is_group {
             self.fetch_group_names(Some(&chat_id));
         }
         if live && !m.info.is_offline && !from_me && !muted {
             let title = if src.is_group { format!("{author} in {}", self.store.name_of(&chat_id)) } else { author };
-            emit("waNotify", &json!({ "chat_id": chat_id, "title": title, "body": content }));
+            emit("waNotify", &json!({ "chat_id": chat_id, "title": title, "body": notice }));
         }
     }
 
@@ -400,31 +456,48 @@ impl App {
             }
             let group = id.ends_with("@g.us");
             let me = s.me.clone();
+            // Who sent a message (or a reaction), from its key.
+            let who = |s: &Store, from_me: bool, participant: Option<&str>| {
+                if from_me {
+                    me.clone()
+                } else if group {
+                    s.canon(&bare(participant.unwrap_or_default()))
+                } else {
+                    id.clone()
+                }
+            };
             let mut msgs = Vec::new();
             for hm in &conv.messages {
                 let Some(wmi) = hm.message.as_option() else { continue };
                 let Some(key) = wmi.key.as_option() else { continue };
                 let (Some(msg_id), Some(body)) = (key.id.clone(), wmi.message.as_option()) else { continue };
-                let Some(content) = store::content(body) else { continue };
+                let Some(shown) = store::body(body) else { continue };
                 let from_me = key.from_me == Some(true);
-                let author_id = if from_me {
-                    me.clone()
-                } else if group {
-                    s.canon(&bare(wmi.participant.as_deref().or(key.participant.as_deref()).unwrap_or_default()))
-                } else {
-                    id.clone()
-                };
+                let author_id = who(s, from_me, wmi.participant.as_deref().or(key.participant.as_deref()));
                 if let Some(name) = wmi.push_name.as_ref().filter(|n| !from_me && !n.is_empty()) {
                     s.push.insert(author_id.clone(), name.clone());
                 }
                 let quote = store::quoted(body).map(|(who, text)| Quote { author: if who.is_empty() { String::new() } else { s.name_of(&bare(&who)) }, text });
+                let reacts = wmi
+                    .reactions
+                    .iter()
+                    .filter_map(|r| {
+                        let k = r.key.as_option()?;
+                        let emoji = r.text.clone().filter(|t| !t.is_empty())?;
+                        Some((who(s, k.from_me == Some(true), k.participant.as_deref()), emoji))
+                    })
+                    .collect();
                 msgs.push(Message {
                     id: msg_id,
                     author: s.name_of(&author_id),
                     author_id,
-                    content,
+                    content: shown.content,
                     timestamp_ms: wmi.message_timestamp.unwrap_or_default() * 1000,
+                    image: shown.image,
+                    file: shown.file,
+                    media: shown.media,
                     quote,
+                    reacts,
                     ..Default::default()
                 });
             }
@@ -474,6 +547,30 @@ impl App {
         });
     }
 
+    /// Profile pictures (small ones), once a run each: they come back as `Internal::Avatar`.
+    // ponytail: one lookup at a time per batch; WhatsApp rate-limits these (429s just get logged).
+    fn ask_avatars(&mut self, ids: Vec<String>) {
+        let ids: Vec<String> = ids.into_iter().filter(|id| !id.is_empty() && self.asked_pics.insert(id.clone())).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let (client, tx) = (self.client.clone(), self.internal_tx.clone());
+        tokio::spawn(async move {
+            for id in ids {
+                let Ok(jid) = id.parse::<Jid>() else { continue };
+                let target = if jid.is_group() { ProfilePictureTarget::Group(&jid) } else { ProfilePictureTarget::Contact(&jid) };
+                match client.pictures().lookup(ProfilePictureRequest::new(target, ProfilePictureType::Preview)).await {
+                    Ok(found) => {
+                        if let Some(pic) = found.into_found() {
+                            let _ = tx.send(Internal::Avatar(id, pic.url));
+                        }
+                    }
+                    Err(e) => debug!("no picture for {id}: {e}"),
+                }
+            }
+        });
+    }
+
     fn on_internal(&mut self, msg: Internal) {
         match msg {
             Internal::GroupNames(names) => {
@@ -482,20 +579,58 @@ impl App {
                 }
                 self.changed();
             }
-            Internal::Sent { chat_id, text, quote, result } => match result {
+            Internal::Avatar(id, url) => {
+                self.store.avatars.insert(id, url);
+                self.emit_due = true;
+                self.messages_due = self.open.is_some();
+            }
+            Internal::Sent { chat_id, message, quote, binding, result } => match result {
                 Ok(id) => {
-                    let msg = Message { id, author_id: self.store.me.clone(), author: "You".into(), content: text, timestamp_ms: now_ms(), quote, ..Default::default() };
+                    let body = store::body(&message).unwrap_or_default();
+                    let msg = Message {
+                        id,
+                        author_id: self.store.me.clone(),
+                        author: "You".into(),
+                        content: body.content,
+                        timestamp_ms: now_ms(),
+                        image: body.image,
+                        file: body.file,
+                        media: body.media,
+                        quote,
+                        ..Default::default()
+                    };
                     self.store.add(&chat_id, msg);
                     self.store.chat(&chat_id).unread = 0;
                     self.save_due = true;
-                    emit("waSent", &json!({ "chat_id": chat_id, "ok": true }));
-                    if self.open.as_deref() == Some(chat_id.as_str()) {
+                    emit(binding, &json!({ "chat_id": chat_id, "ok": true }));
+                    if self.is_open(&chat_id) {
                         self.emit_messages(&chat_id);
                     }
                     self.emit_snapshot();
                 }
-                Err(error) => emit("waSent", &json!({ "chat_id": chat_id, "error": error })),
+                Err(error) => emit(binding, &json!({ "chat_id": chat_id, "ok": false, "error": error })),
             },
+            Internal::ChatStarted(Ok(id)) => {
+                let chat = self.store.chat(&id);
+                if chat.last_ms == 0 {
+                    chat.last_ms = now_ms();
+                }
+                self.changed();
+                emit("waChatStarted", &json!({ "chat": self.store.chat_view(&id) }));
+            }
+            Internal::ChatStarted(Err(error)) => emit("waChatStarted", &json!({ "error": error })),
+            Internal::ChatAction { chat_id, action, result } => {
+                if result.is_ok() {
+                    match action {
+                        ChatAction::Archive | ChatAction::Unarchive => self.store.chat(&chat_id).archived = action == ChatAction::Archive,
+                        ChatAction::Delete => {
+                            self.store.chats.remove(&chat_id);
+                        }
+                    }
+                    self.changed();
+                }
+                emit("waChatAction", &json!({ "chat_id": chat_id, "ok": result.is_ok(), "error": result.err() }));
+            }
         }
     }
 
@@ -503,7 +638,6 @@ impl App {
 
     async fn on_command(&mut self, cmd: Cmd) {
         let arg = |i: usize| cmd.args.get(i).cloned().unwrap_or_default();
-        let not_yet = "not in native mode yet";
         match cmd.func.as_str() {
             "open" => {
                 let id = arg(0);
@@ -511,12 +645,14 @@ impl App {
                     self.open = None;
                     return;
                 }
-                if let Some(chat) = self.store.chats.get_mut(&id) {
-                    chat.unread = 0;
-                    self.changed();
-                }
                 self.emit_messages(&id);
-                self.open = Some(id);
+                self.open = Some(id.clone());
+                // Opening a chat marks it read, here and on the phone, as WhatsApp Web does.
+                self.mark_read(&id, true);
+                let mut pics = vec![id.clone()];
+                pics.extend(self.store.recent(&id).into_iter().map(|m| m.author_id).filter(|a| *a != self.store.me));
+                pics.dedup();
+                self.ask_avatars(pics);
             }
             "send" => self.send(arg(0), arg(1), arg(2)),
             "signOut" => {
@@ -529,31 +665,17 @@ impl App {
                 emit("waContacts", &json!({ "query": q, "contacts": self.store.search(&q) }));
             }
             "startChat" => self.start_chat(&arg(0)),
-            "fetchMedia" => {
-                let url = arg(0);
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    let client = self.client.clone();
-                    tokio::spawn(async move {
-                        use base64::Engine as _;
-                        let payload = match client.http_client().execute(HttpRequest::get(url.clone())).await {
-                            Ok(r) if (200..300).contains(&r.status_code) => json!({ "url": url, "data": base64::engine::general_purpose::STANDARD.encode(&r.body) }),
-                            Ok(r) => json!({ "url": url, "error": format!("HTTP {}", r.status_code) }),
-                            Err(e) => json!({ "url": url, "error": e.to_string() }),
-                        };
-                        emit("waMedia", &payload);
-                    });
-                } else {
-                    emit("waMedia", &json!({ "url": url, "error": not_yet }));
-                }
-            }
-            "saveMedia" => emit("waFile", &json!({ "id": arg(0), "error": not_yet })),
-            "sendFile" => emit("waSent", &json!({ "chat_id": arg(0), "error": not_yet })),
-            "forward" => emit("waForwarded", &json!({ "chat_id": "", "error": not_yet })),
-            "voicePcm" => emit("waPcm", &json!({ "id": arg(0), "error": not_yet })),
-            "archive" | "unarchive" | "deleteChat" => emit("waChatAction", &json!({ "chat_id": arg(0), "error": not_yet })),
-            "react" => info!("reactions aren't in native mode yet"),
-            "callStart" => self.call_start(&arg(0)),
-            "callAccept" => self.call_accept(),
+            "fetchMedia" => self.fetch_media(arg(0)),
+            "saveMedia" => self.save_media(arg(0)),
+            "voicePcm" => self.voice_pcm(arg(0)),
+            "sendFile" => self.send_file(arg(0), arg(1), arg(2), &arg(3), arg(4)),
+            "forward" => self.forward(&arg(0), arg(1)),
+            "react" => self.react(&arg(0), &arg(1)),
+            "archive" => self.chat_action(arg(0), ChatAction::Archive),
+            "unarchive" => self.chat_action(arg(0), ChatAction::Unarchive),
+            "deleteChat" => self.chat_action(arg(0), ChatAction::Delete),
+            "callStart" => self.call_start(&arg(0), arg(1) == "true"),
+            "callAccept" => self.call_accept(arg(0) == "true"),
             "callDecline" => {
                 if let Some(incoming) = self.call.as_mut().and_then(|c| c.incoming.take()) {
                     let client = self.client.clone();
@@ -585,71 +707,359 @@ impl App {
                 }
                 self.emit_call();
             }
-            "callCamera" | "callScreen" => emit("waCall", &json!({ "error": "video isn't in native WhatsApp yet" })),
+            // Turning ours off is what we already do.
+            "callCamera" | "callScreen" if arg(0) != "true" => self.emit_call(),
+            "callCamera" => emit("waCall", &json!({ "error": "native WhatsApp can't send your camera yet (you see theirs)" })),
+            "callScreen" => emit("waCall", &json!({ "error": "native WhatsApp can't share your screen yet" })),
             other => warn!("unknown command {other}"),
         }
+    }
+
+    /// Sends read receipts for the chat's unread messages from others; `sync` also marks the chat
+    /// read on the phone and other devices.
+    // ponytail: receipts go to the jids we file people under (their number), not the LID a
+    // message may have come from; WhatsApp maps them, but that's untested.
+    fn mark_read(&mut self, chat_id: &str, sync: bool) {
+        let me = self.store.me.clone();
+        let Some(chat) = self.store.chats.get_mut(chat_id) else { return };
+        let unread = std::mem::take(&mut chat.unread) as usize;
+        if unread == 0 {
+            return;
+        }
+        self.changed();
+        let Ok(jid) = chat_id.parse::<Jid>() else { return };
+        let Some(chat) = self.store.chats.get(chat_id) else { return };
+        let mut by_sender: HashMap<String, Vec<String>> = HashMap::new();
+        for m in chat.messages.iter().rev().filter(|m| m.author_id != me && !m.system).take(unread.min(50)) {
+            by_sender.entry(m.author_id.clone()).or_default().push(m.id.clone());
+        }
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            for (sender, ids) in by_sender {
+                let sender = sender.parse::<Jid>().ok().filter(|_| jid.is_group());
+                let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                if let Err(e) = client.mark_as_read(&jid, sender.as_ref(), &ids).await {
+                    warn!("read receipts failed: {e}");
+                }
+            }
+            if sync && let Err(e) = client.chat_actions().mark_chat_as_read(&jid, true, None).await {
+                warn!("marking the chat read failed: {e}");
+            }
+        });
     }
 
     fn send(&mut self, chat_id: String, text: String, reply_to: String) {
         let jid = match chat_id.parse::<Jid>() {
             Ok(jid) => jid,
-            Err(e) => return emit("waSent", &json!({ "chat_id": chat_id, "error": e.to_string() })),
+            Err(e) => return emit("waSent", &json!({ "chat_id": chat_id, "ok": false, "error": e.to_string() })),
         };
         let quoted = self.store.find(&chat_id, &reply_to).cloned();
         let (message, quote) = match quoted.as_ref().and_then(|q| Some((q, q.author_id.parse::<Jid>().ok()?))) {
             Some((q, author)) => {
-                let ctx = build_quote_context_with_info(q.id.clone(), &author, &jid, &jid, &wa::Message::text(q.content.clone()));
-                (wa::Message::text_with_context(text.clone(), ctx), Some(Quote { author: self.store.name_of(&q.author_id), text: q.content.clone() }))
+                let shown = if q.content.is_empty() { q.file.as_ref().and_then(|f| f["kind"].as_str()).unwrap_or("Photo").to_owned() } else { q.content.clone() };
+                let ctx = build_quote_context_with_info(q.id.clone(), &author, &jid, &jid, &wa::Message::text(shown.clone()));
+                (wa::Message::text_with_context(text, ctx), Some(Quote { author: self.store.name_of(&q.author_id), text: shown }))
             }
-            None => (wa::Message::text(text.clone()), None),
+            None => (wa::Message::text(text), None),
+        };
+        self.send_built(chat_id, message, quote, "waSent");
+    }
+
+    /// Sends `message`; reports through `binding` once it's out (see `Internal::Sent`).
+    fn send_built(&self, chat_id: String, message: wa::Message, quote: Option<Quote>, binding: &'static str) {
+        let jid = match chat_id.parse::<Jid>() {
+            Ok(jid) => jid,
+            Err(e) => return emit(binding, &json!({ "chat_id": chat_id, "ok": false, "error": e.to_string() })),
         };
         let (client, tx) = (self.client.clone(), self.internal_tx.clone());
         tokio::spawn(async move {
-            let result = client.send_message(jid, message).await.map(|r| r.message_id.to_string()).map_err(|e| e.to_string());
-            let _ = tx.send(Internal::Sent { chat_id, text, quote, result });
+            let result = client.send_message(jid, message.clone()).await.map(|r| r.message_id.to_string()).map_err(|e| e.to_string());
+            let _ = tx.send(Internal::Sent { chat_id, message: Box::new(message), quote, binding, result });
         });
     }
 
+    /// Uploads a file and sends it: images as photos, videos as videos, the rest as documents.
+    fn send_file(&self, chat_id: String, filename: String, mimetype: String, data: &str, caption: String) {
+        let bytes = match B64.decode(data) {
+            Ok(bytes) => bytes,
+            Err(e) => return emit("waSent", &json!({ "chat_id": chat_id, "ok": false, "error": e.to_string() })),
+        };
+        let (client, tx) = (self.client.clone(), self.internal_tx.clone());
+        tokio::spawn(async move {
+            let built = async {
+                let caption = Some(caption).filter(|c| !c.is_empty());
+                let kind = if mimetype.starts_with("image/") {
+                    MediaType::Image
+                } else if mimetype.starts_with("video/") {
+                    MediaType::Video
+                } else {
+                    MediaType::Document
+                };
+                let preview = match kind {
+                    MediaType::Image => {
+                        let bytes = bytes.clone();
+                        tokio::task::spawn_blocking(move || media::preview(&bytes)).await.ok().flatten()
+                    }
+                    _ => None,
+                };
+                let upload = client.upload(bytes, kind, UploadOptions::new()).await.map_err(|e| format!("upload failed: {e}"))?;
+                Ok::<_, String>(match kind {
+                    MediaType::Image => {
+                        let mut opts = ImageOptions::default().with_mimetype(&mimetype);
+                        opts.caption = caption;
+                        if let Some((thumb, _, _)) = &preview {
+                            opts = opts.with_jpeg_thumbnail(thumb.clone());
+                        }
+                        let mut msg = image_message(upload, opts);
+                        if let (Some(img), Some((_, w, h))) = (msg.image_message.as_option_mut(), preview) {
+                            (img.width, img.height) = (Some(w), Some(h));
+                        }
+                        msg
+                    }
+                    MediaType::Video => {
+                        let mut opts = VideoOptions::default().with_mimetype(&mimetype);
+                        opts.caption = caption;
+                        video_message(upload, opts)
+                    }
+                    _ => {
+                        let mut opts = DocumentOptions::default().with_mimetype(&mimetype).with_file_name(&filename).with_title(&filename);
+                        opts.caption = caption;
+                        document_message(upload, opts)
+                    }
+                })
+            }
+            .await;
+            match built {
+                Ok(message) => {
+                    let jid = match chat_id.parse::<Jid>() {
+                        Ok(jid) => jid,
+                        Err(e) => return emit("waSent", &json!({ "chat_id": chat_id, "ok": false, "error": e.to_string() })),
+                    };
+                    let result = client.send_message(jid, message.clone()).await.map(|r| r.message_id.to_string()).map_err(|e| e.to_string());
+                    let _ = tx.send(Internal::Sent { chat_id, message: Box::new(message), quote: None, binding: "waSent", result });
+                }
+                Err(error) => emit("waSent", &json!({ "chat_id": chat_id, "ok": false, "error": error })),
+            }
+        });
+    }
+
+    /// Forwards a message, keeping its caption; media goes as it is on WhatsApp's servers.
+    fn forward(&self, msg_id: &str, to: String) {
+        let Some((_, m)) = self.store.find_any(msg_id) else {
+            return emit("waForwarded", &json!({ "chat_id": to, "ok": false, "error": "couldn't find that message" }));
+        };
+        let mut ctx = wa::ContextInfo::default();
+        (ctx.is_forwarded, ctx.forwarding_score) = (Some(true), Some(1));
+        let message = match store::media(m) {
+            Some(mut media) => {
+                let ctx = || MessageField::some(ctx.clone());
+                if let Some(x) = media.image_message.as_option_mut() {
+                    x.context_info = ctx();
+                } else if let Some(x) = media.video_message.as_option_mut() {
+                    x.context_info = ctx();
+                } else if let Some(x) = media.audio_message.as_option_mut() {
+                    x.context_info = ctx();
+                } else if let Some(x) = media.document_message.as_option_mut() {
+                    x.context_info = ctx();
+                } else if let Some(x) = media.sticker_message.as_option_mut() {
+                    x.context_info = ctx();
+                }
+                media
+            }
+            None => wa::Message::text_with_context(m.content.clone(), ctx),
+        };
+        self.send_built(to, message, None, "waForwarded");
+    }
+
+    /// Reacts to a message (an empty emoji takes ours back).
+    // ponytail: a group sender's key carries the jid we file them under, which may not be the
+    // LID the message came from.
+    fn react(&mut self, msg_id: &str, emoji: &str) {
+        let Some((chat_id, m)) = self.store.find_any(msg_id) else { return warn!("no message {msg_id} to react to") };
+        let (chat_id, author_id, me) = (chat_id.to_owned(), m.author_id.clone(), self.store.me.clone());
+        let Ok(chat) = chat_id.parse::<Jid>() else { return };
+        let mut key = wa::MessageKey::default();
+        (key.remote_jid, key.from_me, key.id) = (Some(chat_id.clone()), Some(author_id == me), Some(msg_id.to_owned()));
+        if chat.is_group() && author_id != me {
+            key.participant = Some(author_id);
+        }
+        let (client, emoji_s) = (self.client.clone(), emoji.to_owned());
+        tokio::spawn(async move {
+            if let Err(e) = client.send_reaction_raw(chat, key, &emoji_s).await {
+                warn!("reaction failed: {e}");
+            }
+        });
+        self.store.react(&chat_id, msg_id, &me, emoji);
+        self.save_due = true;
+        if self.is_open(&chat_id) {
+            self.emit_messages(&chat_id);
+        }
+    }
+
+    fn chat_action(&mut self, chat_id: String, action: ChatAction) {
+        let jid = match chat_id.parse::<Jid>() {
+            Ok(jid) => jid,
+            Err(e) => return emit("waChatAction", &json!({ "chat_id": chat_id, "ok": false, "error": e.to_string() })),
+        };
+        if action == ChatAction::Delete && jid.is_group() {
+            return emit("waChatAction", &json!({ "chat_id": chat_id, "ok": false, "error": "WhatsApp wouldn't delete it (leave the group first)" }));
+        }
+        let (client, tx) = (self.client.clone(), self.internal_tx.clone());
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = match action {
+                ChatAction::Archive => actions.archive_chat(&jid, None).await,
+                ChatAction::Unarchive => actions.unarchive_chat(&jid, None).await,
+                ChatAction::Delete => actions.delete_chat(&jid, false, None).await,
+            };
+            let _ = tx.send(Internal::ChatAction { chat_id, action, result: result.map_err(|e| e.to_string()) });
+        });
+    }
+
+    /// Opens (or makes) the chat with a jid or a phone number, checking the number is on WhatsApp.
     fn start_chat(&mut self, who: &str) {
         let who = who.trim();
-        let digits = who.strip_prefix('+').unwrap_or(who);
-        let id = if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-            Jid::pn(digits).to_string()
-        } else if self.store.chats.contains_key(who) || who.contains('@') {
-            self.store.canon(who)
-        } else {
-            return emit("waChatStarted", &json!({ "error": format!("{who} isn't a phone number") }));
-        };
-        let chat = self.store.chat(&id);
-        if chat.last_ms == 0 {
-            chat.last_ms = now_ms();
+        if who.contains('@') || self.store.chats.contains_key(who) {
+            let id = self.store.canon(who);
+            return self.on_internal(Internal::ChatStarted(Ok(id)));
         }
-        self.changed();
-        emit("waChatStarted", &json!({ "chat": self.store.chat_view(&id) }));
+        let Some(digits) = phone_digits(who, &self.store.me) else {
+            return emit("waChatStarted", &json!({ "error": "that doesn't look like a phone number" }));
+        };
+        let (client, tx) = (self.client.clone(), self.internal_tx.clone());
+        tokio::spawn(async move {
+            let found = client.contacts().is_on_whatsapp(&[Jid::pn(&digits)]).await;
+            let result = match found {
+                Ok(found) => found.into_iter().find(|r| r.is_registered).map(|r| r.jid.to_non_ad().to_string()).ok_or_else(|| format!("+{digits} isn't on WhatsApp")),
+                Err(e) => Err(format!("couldn't check +{digits}: {e}")),
+            };
+            let _ = tx.send(Internal::ChatStarted(result));
+        });
+    }
+
+    // ---------- media ----------
+
+    /// A message's media part, as kept in the store.
+    fn media_of(&self, id: &str) -> Result<wa::Message, String> {
+        self.store.find_any(id).and_then(|(_, m)| store::media(m)).ok_or_else(|| "no such message".into())
+    }
+
+    /// `wa-msg:<id>` (a message's picture, 480 px), `wa-big:<id>` (1600 px, full screen),
+    /// `wa-gif:<id>` (a GIF's frames, through `waFrames`), or a URL (profile pictures).
+    fn fetch_media(&self, url: String) {
+        let client = self.client.clone();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            tokio::spawn(async move {
+                let payload = match client.http_client().execute(HttpRequest::get(url.clone())).await {
+                    Ok(r) if (200..300).contains(&r.status_code) => json!({ "url": url, "data": B64.encode(&r.body) }),
+                    Ok(r) => json!({ "url": url, "error": format!("HTTP {}", r.status_code) }),
+                    Err(e) => json!({ "url": url, "error": e.to_string() }),
+                };
+                emit("waMedia", &payload);
+            });
+            return;
+        }
+        let (scheme, id) = url.split_once(':').unwrap_or_default();
+        let media = self.media_of(id);
+        let scheme = scheme.to_owned();
+        tokio::spawn(async move {
+            let bytes = match media {
+                Ok(m) => download(&client, &m).await.map(|b| (b, m.sticker_message.is_set())),
+                Err(e) => Err(e),
+            };
+            let payload = match scheme.as_str() {
+                "wa-gif" => {
+                    let frames = match bytes {
+                        Ok((mp4, _)) => blocking(move || media::gif_frames(&mp4)).await,
+                        Err(e) => Err(e),
+                    };
+                    let payload = match frames {
+                        Ok(frames) => json!({ "url": url, "delay_ms": 1000 / media::GIF_FPS, "frames": frames.iter().map(|f| B64.encode(f)).collect::<Vec<_>>() }),
+                        Err(error) => json!({ "url": url, "error": error }),
+                    };
+                    return emit("waFrames", &payload);
+                }
+                "wa-msg" | "wa-big" => {
+                    let width = if scheme == "wa-big" { 1600 } else { 480 };
+                    let shrunk = match bytes {
+                        Ok((pic, sticker)) => blocking(move || media::shrink(&pic, sticker, width)).await,
+                        Err(e) => Err(e),
+                    };
+                    match shrunk {
+                        Ok(data) => json!({ "url": url, "data": B64.encode(data) }),
+                        Err(error) => json!({ "url": url, "error": error }),
+                    }
+                }
+                _ => json!({ "url": url, "error": "unknown media key" }),
+            };
+            emit("waMedia", &payload);
+        });
+    }
+
+    /// A message's attachment in full, for Mesh to open (`waFile`).
+    fn save_media(&self, id: String) {
+        let filename = self.store.find_any(&id).and_then(|(_, m)| m.file.as_ref()?["name"].as_str().map(str::to_owned));
+        let filename = filename.unwrap_or_else(|| "file".into());
+        let (media, client) = (self.media_of(&id), self.client.clone());
+        tokio::spawn(async move {
+            let bytes = match media {
+                Ok(m) => download(&client, &m).await,
+                Err(e) => Err(e),
+            };
+            emit("waFile", &match bytes {
+                Ok(data) => json!({ "id": id, "filename": filename, "data": B64.encode(data) }),
+                Err(error) => json!({ "id": id, "error": error }),
+            });
+        });
+    }
+
+    /// A voice note as 48 kHz mono 16-bit PCM, little-endian, for Mesh to play (`waPcm`).
+    fn voice_pcm(&self, id: String) {
+        let (media, client) = (self.media_of(&id), self.client.clone());
+        tokio::spawn(async move {
+            let pcm = match media {
+                Ok(m) => match download(&client, &m).await {
+                    Ok(ogg) => blocking(move || media::voice_pcm(&ogg)).await,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            emit("waPcm", &match pcm {
+                Ok(samples) => json!({ "id": id, "data": B64.encode(samples.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>()) }),
+                Err(error) => json!({ "id": id, "error": error }),
+            });
+        });
     }
 
     // ---------- calls ----------
 
     fn on_incoming_call(&mut self, call: &IncomingCall) {
         match &call.action {
-            CallAction::Offer { call_id, group_jid, .. } => {
-                if call.offline || group_jid.is_some() {
-                    info!("ignoring a {} call offer", if call.offline { "stale" } else { "group" });
+            CallAction::Offer { call_id, group_jid, is_video, .. } => {
+                if call.offline {
+                    info!("ignoring a stale call offer");
                     return;
                 }
                 if self.call.is_some() {
                     info!("already in a call; leaving {call_id} to ring out");
                     return;
                 }
-                let peer = self.store.canon(&call.from.to_non_ad().to_string());
+                // A group call shows as its group's.
+                let peer = match group_jid {
+                    Some(group) => group.to_non_ad().to_string(),
+                    None => self.store.canon(&call.from.to_non_ad().to_string()),
+                };
                 let mut name = self.store.name_of(&peer);
-                if name.starts_with(|c: char| c == '+' || c.is_ascii_digit())
+                if group_jid.is_none()
+                    && name.starts_with(|c: char| c == '+' || c.is_ascii_digit())
                     && let Some(notify) = call.notify.clone().filter(|n| !n.is_empty())
                 {
                     name = notify;
                 }
                 self.seq += 1;
-                self.call = Some(Call { seq: self.seq, info: calls::info(call_id, &peer, name, "incoming"), incoming: Some(Box::new(call.clone())), handle: None });
+                let mut info = calls::info(call_id, &peer, name, "incoming");
+                (info.video, info.group) = (*is_video, group_jid.is_some());
+                self.call = Some(Call { seq: self.seq, info, incoming: Some(Box::new(call.clone())), handle: None });
                 self.emit_call();
             }
             CallAction::Terminate { call_id, .. } => self.drop_ringing(call_id),
@@ -669,29 +1079,31 @@ impl App {
         self.emit_call();
     }
 
-    fn call_start(&mut self, chat_id: &str) {
+    fn call_start(&mut self, chat_id: &str, video: bool) {
         if self.call.is_some() {
             return emit("waCall", &json!({ "error": "already in a call" }));
         }
         let peer = match chat_id.parse::<Jid>() {
-            Ok(jid) if !jid.is_group() => jid,
-            Ok(_) => return emit("waCall", &json!({ "error": "group calls aren't in native WhatsApp yet" })),
+            Ok(jid) => jid,
             Err(e) => return emit("waCall", &json!({ "error": e.to_string() })),
         };
         self.seq += 1;
         let name = self.store.name_of(chat_id);
-        self.call = Some(Call { seq: self.seq, info: calls::info("", chat_id, name, "outgoing"), incoming: None, handle: None });
+        let mut info = calls::info("", chat_id, name, "outgoing");
+        (info.video, info.group) = (video, peer.is_group());
+        self.call = Some(Call { seq: self.seq, info, incoming: None, handle: None });
         self.emit_call();
-        calls::dial(self.client.clone(), peer, self.seq, self.calls_tx.clone());
+        calls::dial(self.client.clone(), peer, video, self.seq, self.calls_tx.clone());
     }
 
-    fn call_accept(&mut self) {
+    fn call_accept(&mut self, video: bool) {
         let Some(call) = self.call.as_mut() else {
             return emit("waCall", &json!({ "error": "no call to answer" }));
         };
         let Some(incoming) = call.incoming.take() else { return };
         call.info.phase = "connecting".into();
-        calls::answer(self.client.clone(), incoming, call.seq, self.calls_tx.clone());
+        call.info.video &= video;
+        calls::answer(self.client.clone(), incoming, call.info.video, call.seq, self.calls_tx.clone());
         self.emit_call();
     }
 
@@ -723,6 +1135,42 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// International digits for what someone typed; a national number (0…) takes our own country
+/// code. ponytail: assumes it's as long as ours; type +code otherwise.
+fn phone_digits(input: &str, me: &str) -> Option<String> {
+    let mut digits: String = input.chars().filter(char::is_ascii_digit).collect();
+    if let Some(national) = digits.strip_prefix('0').filter(|_| !input.trim_start().starts_with('+')) {
+        let mine = me.split('@').next().unwrap_or_default();
+        let code = &mine[..(mine.len() + 1).saturating_sub(digits.len()).min(mine.len())];
+        digits = format!("{code}{national}");
+    }
+    (digits.len() >= 8).then_some(digits)
+}
+
+/// Runs CPU work (decoding, resizing) off the async threads.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+
+/// Downloads and decrypts a message's media. Old media expires from WhatsApp's servers (it then
+/// lives only on the phone), which shows up as an error here.
+async fn download(client: &Client, m: &wa::Message) -> Result<Vec<u8>, String> {
+    let item: &dyn Downloadable = if let Some(x) = m.image_message.as_option() {
+        x
+    } else if let Some(x) = m.video_message.as_option() {
+        x
+    } else if let Some(x) = m.audio_message.as_option() {
+        x
+    } else if let Some(x) = m.document_message.as_option() {
+        x
+    } else if let Some(x) = m.sticker_message.as_option() {
+        x
+    } else {
+        return Err("nothing to download".into());
+    };
+    client.download(item, Default::default()).await.map_err(|e| format!("download failed: {e}"))
 }
 
 fn hang_up(client: Arc<Client>, call: Call) {
@@ -771,5 +1219,13 @@ mod tests {
         assert_eq!((snap.chats[0].name.as_str(), snap.chats[0].group), ("Family", true));
         assert_eq!(snap.chats[1].name, "+4");
         assert_eq!(snap.archived.len(), 1);
+    }
+
+    #[test]
+    fn reads_phone_numbers() {
+        let me = "27821234567@s.whatsapp.net";
+        assert_eq!(phone_digits("082 765 4321", me).as_deref(), Some("27827654321"));
+        assert_eq!(phone_digits("+44 7700 900123", me).as_deref(), Some("447700900123"));
+        assert_eq!(phone_digits("12345", me), None);
     }
 }

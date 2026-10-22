@@ -91,6 +91,9 @@ struct App {
     /// The native WhatsApp helper beside Mesh's own binary, when it's there;
     /// WhatsApp then runs in it instead of the engine browser.
     whatsapp_native: Option<PathBuf>,
+    /// The native Discord helper (`mesh-dc`) beside Mesh's own binary, when it's
+    /// there; Discord then runs in it instead of the engine browser.
+    discord_native: Option<PathBuf>,
     /// Handle to drive it, while connected.
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
@@ -1102,8 +1105,11 @@ fn boot() -> (App, Task<Message>) {
     let theme_files = theme::watched_files(&theme_choice, &theme_path());
 
     let whatsapp_native = whatsapp_native();
-    // Start the hidden Discord client (once) if it isn't running yet.
-    if let (Some(socket), Some(cmd)) = (discord_socket(&config), &config.discord_engine_command)
+    let discord_native = discord_native();
+    // Start the hidden Discord client (once) if it isn't running yet, unless the
+    // native helper has replaced it.
+    if discord_native.is_none()
+        && let (Some(socket), Some(cmd)) = (discord_socket(&config), &config.discord_engine_command)
         && !mesh_discord::is_running(&socket)
         && let Err(err) = run_command(cmd)
     {
@@ -1117,9 +1123,13 @@ fn boot() -> (App, Task<Message>) {
             .iter()
             .filter_map(|id| mesh_core::networks::spec(id))
             .filter(|spec| !(spec.id == "wa" && whatsapp_native.is_some()))
+            .filter(|spec| !(spec.id == "dc" && discord_native.is_some()))
             .filter_map(|spec| Some((spec.engine?, spec.login_url?)))
             .collect();
         std::thread::spawn(move || {
+            if sites.is_empty() {
+                return;
+            }
             for _ in 0..30 {
                 if mesh_discord::is_running(&socket) {
                     // Let a browser that's just starting list its own tabs first.
@@ -1164,6 +1174,7 @@ fn boot() -> (App, Task<Message>) {
             discord_socket: discord_socket(&config),
             discord_command: config.discord_engine_command.clone(),
             whatsapp_native: whatsapp_native.clone(),
+            discord_native,
             discord: None,
             discord_state: None,
             whatsapp: None,
@@ -3261,9 +3272,10 @@ fn theme(state: &App) -> IcedTheme {
 
 fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
-        match &state.discord_socket {
-            Some(socket) => Subscription::run_with(socket.clone(), discord_events),
-            None => Subscription::none(),
+        match (&state.discord_native, &state.discord_socket) {
+            (Some(exe), _) => Subscription::run_with(exe.clone(), discord_native_events),
+            (None, Some(socket)) => Subscription::run_with(socket.clone(), discord_events),
+            (None, None) => Subscription::none(),
         },
         match (&state.whatsapp_native, &state.discord_socket) {
             (Some(exe), _) => Subscription::run_with(exe.clone(), whatsapp_native_events),
@@ -3377,6 +3389,27 @@ fn whatsapp_events(socket: &PathBuf) -> impl iced::futures::Stream<Item = Messag
 fn whatsapp_native() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "mesh-wa.exe" } else { "mesh-wa" });
     exe.is_file().then_some(exe)
+}
+
+/// `mesh-dc` next to Mesh's own binary, if it was installed with it.
+fn discord_native() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "mesh-dc.exe" } else { "mesh-dc" });
+    exe.is_file().then_some(exe)
+}
+
+/// Streams the native Discord helper's events (restarting it by itself).
+fn discord_native_events(exe: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let exe = exe.clone();
+    iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        use iced::futures::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(mesh_discord::run_native(exe, data_dir().join("discord"), tx));
+        while let Some(event) = rx.recv().await {
+            if output.send(Message::Discord(event)).await.is_err() {
+                break;
+            }
+        }
+    })
 }
 
 /// Streams the native WhatsApp helper's events (restarting it by itself).

@@ -63,8 +63,10 @@ pub(crate) fn link(state: &App, network: Network) -> Link {
                 },
                 None => Link::SignedOut,
             },
-            (None, Some(_)) if state.login_qr.contains_key("dc") => Link::SignedOut,
+            _ if state.login_qr.contains_key("dc") => Link::SignedOut,
             (None, Some(_)) => Link::Connecting,
+            // The native helper is always running; it just hasn't reported yet.
+            (None, None) if state.discord_native.is_some() => Link::Connecting,
             (None, None) => Link::Offline,
         },
         Network::WhatsApp => match (&state.whatsapp_state, &state.whatsapp) {
@@ -147,8 +149,11 @@ pub(crate) fn start_link(state: &App, network: Network) -> Result<(), String> {
     let (Some(host), Some(url)) = (spec.engine, spec.login_url) else {
         return Ok(());
     };
-    // The native helper is always up and shows its QR code when unlinked.
+    // The native helpers are always up and show their QR code when unlinked.
     if network == Network::WhatsApp && state.whatsapp_native.is_some() {
+        return Ok(());
+    }
+    if network == Network::Discord && state.discord_native.is_some() {
         return Ok(());
     }
     match &state.discord_socket {

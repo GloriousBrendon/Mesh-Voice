@@ -309,6 +309,70 @@ pub async fn run(socket: PathBuf, events: mpsc::UnboundedSender<Event>) {
     }
 }
 
+/// Drives the native Discord helper (`mesh-dc.exe`) over stdio instead of the
+/// engine browser: the same bindings, as `{"binding":..,"payload":".."}` lines,
+/// and commands in as `{"fn":..,"args":[..]}`. Mirrors `whatsapp::run_native`.
+/// Restarts the helper by itself while `events` is open.
+pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSender<Event>) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    while !events.is_closed() {
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.arg("--data").arg(&data).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::warn!("could not start {}: {err}", exe.display());
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+        let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return };
+        let (commands, mut command_rx) = mpsc::unbounded_channel();
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let mut connected = false;
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break };
+                    let Some((name, payload)) = native_line(&line) else { continue };
+                    let event = if name == "dcReady" {
+                        connected = true;
+                        Event::Connected(Engine { commands: commands.clone() })
+                    } else {
+                        match binding_event(&name, &payload) {
+                            Some(event) => event,
+                            None => continue,
+                        }
+                    };
+                    if events.send(event).is_err() {
+                        return;
+                    }
+                }
+                command = command_rx.recv() => {
+                    let Some(engine::Command::Call { function, args }) = command else { continue };
+                    let line = serde_json::json!({ "fn": function, "args": args }).to_string() + "\n";
+                    if stdin.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = child.kill().await;
+        if connected && events.send(Event::Disconnected).is_err() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
+}
+
+/// A helper stdout line's (binding, payload).
+fn native_line(line: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    Some((v["binding"].as_str()?.to_owned(), v["payload"].as_str()?.to_owned()))
+}
+
 /// The event an agent binding call carries, if it's one we know.
 fn binding_event(name: &str, payload: &str) -> Option<Event> {
     match name {
