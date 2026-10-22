@@ -47,7 +47,7 @@ on the Windows PC and the Linux box.
 
 ### Phase 1: Foundation
 
-- [ ] **Task 1: Scaffold Mesh-Node**
+- [x] **Task 1: Scaffold Mesh-Node** (Mesh-Node `1c74969`)
   - What: a cargo workspace with `crates/mesh-identity` (library) and
     `crates/mesh-node` (binary that prints its version), plus `.gitignore`, a
     short README (private, what it is, how to build) and `rustfmt.toml`
@@ -59,7 +59,7 @@ on the Windows PC and the Linux box.
   - Files: `Cargo.toml`, `crates/mesh-identity/{Cargo.toml,src/lib.rs}`,
     `crates/mesh-node/{Cargo.toml,src/main.rs}`, `README.md`.
   - Size S. Depends on nothing.
-- [ ] **Task 2: IDs, keys and links** (`id.rs`)
+- [x] **Task 2: IDs, keys and links** (`id.rs`; the `mesh://code/…` link moved to Task 9, where codes are defined)
   - What: `RootKey` and `DeviceKey` (generate, sign, zeroize), `MeshId`
     (bech32m `mesh1…`), and `mesh://id/…` and `mesh://code/…` links.
   - Accept:
@@ -70,7 +70,7 @@ on the Windows PC and the Linux box.
   - Verify: `cargo test -p mesh-identity id`.
   - Files: `src/id.rs`, `src/lib.rs`, `tests/vectors.rs`.
   - Size S. Depends on Task 1.
-- [ ] **Task 3: Device certificates and device list** (`device.rs`)
+- [x] **Task 3: Device certificates and device list** (`device.rs`)
   - What: `DeviceCert` and `DeviceList` with hand-written, domain-separated
     signed layouts; verification; the higher-`seq`-wins rule; revocation.
   - Accept:
@@ -87,7 +87,7 @@ short note to you, no stop needed unless something surprised me.
 
 ### Phase 2: Keystore (security-critical; done early)
 
-- [ ] **Task 4: Password policy and username normalization** (`password.rs`)
+- [x] **Task 4: Password policy and username normalization** (`password.rs`)
   - What: the D11 check (at least 10 characters, `zxcvbn` score 3 or more,
     not containing the username) returning a verdict and zxcvbn's hint;
     `normalize(username)`.
@@ -97,7 +97,7 @@ short note to you, no stop needed unless something surprised me.
   - Verify: `cargo test -p mesh-identity password`.
   - Files: `src/password.rs`.
   - Size XS. Depends on Task 1.
-- [ ] **Task 5: Keystore create, unlock and lock** (`keystore.rs`)
+- [x] **Task 5: Keystore create, unlock and lock** (`keystore.rs`)
   - What:
     - `MKS1` header with no ID or username;
     - Argon2id (64 MiB, t = 3, p = 1) over `normalize(username) || 0 || password`;
@@ -119,20 +119,21 @@ short note to you, no stop needed unless something surprised me.
     (under 1 s on the Linux box).
   - Files: `src/keystore.rs`, `tests/vectors.rs`.
   - Size M. Depends on Tasks 2–4.
-- [ ] **Task 6: Change password, backup export and import**
+- [x] **Task 6: Change password, backup export and import**
   - What: `change_password` (re-wraps the data key only); `export` (fresh
     salt, protected by username and password); `import` (backup credentials,
     then a new password under D11, a new device key and certificate signed
     with the restored root).
   - Accept:
     - after a change, the old password fails and the new one works, and the
-      payload bytes are unchanged apart from the wrap;
+      data key is unchanged (the contents are re-encrypted, since both layers
+      authenticate the header);
     - an import gives the same ID with a different device key;
     - D11 is enforced on the new password.
   - Verify: `cargo test -p mesh-identity keystore`.
   - Files: `src/keystore.rs`.
   - Size S. Depends on Task 5.
-- [ ] **Task 7: Keep unlocked (OS keyring)**
+- [x] **Task 7: Keep unlocked (OS keyring)**
   - What: the D12 toggle: save the data key under service `mesh-node` and a
     random per-install entry name; open without asking while the entry
     exists; delete it on off; report "unavailable" with the reason when
