@@ -10,6 +10,7 @@ pub enum Action {
     Show,
     Quit,
     /// There's no tray to go back to (Linux: no StatusNotifierWatcher), so closing quits.
+    #[cfg_attr(windows, allow(dead_code))]
     Gone,
 }
 
