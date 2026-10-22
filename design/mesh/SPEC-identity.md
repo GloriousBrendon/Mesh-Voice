@@ -1,6 +1,6 @@
 # Spec: `identity` (Mesh)
 
-Status: **REVISED 2026-10-22 with Brendon's answers to Q1–Q6; awaiting approval.** Module 1 of the build order in
+Status: **APPROVED 2026-10-22.** Plan: [PLAN-identity.md](PLAN-identity.md). Module 1 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Carries over
 `GloriousBrendon/Mesh` `docs/IDENTITY_AND_KEY_MANAGEMENT.md` §1–4 where it
 still holds (noted inline).
@@ -202,12 +202,12 @@ Dependencies, each justified, all RustCrypto or widely audited:
 
 | Crate | For |
 |---|---|
-| `ed25519-dalek` 2 | Keys and signatures. iroh uses the same crate, so keys pass straight through. |
+| `ed25519-dalek` 3 | Keys and signatures. iroh 1.x uses the same major version, so device keys pass straight through. |
 | `argon2` | Keystore and friend-code key derivation. |
 | `chacha20poly1305` | XChaCha20-Poly1305 for the keystore and code records. |
 | `blake3` | Safety number and other derivations. |
 | `bech32` | The `mesh1…` ID with its checksum. |
-| `spake2` | Device-link key exchange (D8). |
+| `spake2` 0.4 | Device-link key exchange (D8). 0.4.0 is the latest stable release (2023); 0.5 is still a pre-release (see the plan's risks). |
 | `zeroize` | Wiping secrets from memory. |
 | `zxcvbn` | The password strength check (D11). Its word lists add about 1 MB to the binary, which is the price of a real check rather than ad-hoc rules. |
 | `keyring` | The OS keyring for "keep unlocked" (D12): Credential Manager on Windows, Secret Service on Linux. |
