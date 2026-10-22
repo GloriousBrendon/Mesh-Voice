@@ -353,6 +353,8 @@ pub struct Config {
     pub discord_native_wrapper: Option<Vec<String>>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
+    /// A picture behind the panes (shows in the gaps, and faintly through translucent panes).
+    pub background_image: Option<String>,
     /// Use the desktop's fonts (fontconfig, Linux) instead of the bundled ones (default on).
     pub font_from_system: Option<bool>,
     pub density: Option<Density>,
@@ -367,11 +369,38 @@ pub struct Config {
     pub sync_off: Vec<String>,
 }
 
+/// The animated backgrounds (see rain.rs).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Animation {
+    /// Falling glyphs.
+    #[default]
+    Rain,
+    /// Drifting nodes, linked when close.
+    Mesh,
+    /// Slow parallax stars that twinkle.
+    Stars,
+}
+
+impl Animation {
+    pub const ALL: [Animation; 3] = [Animation::Rain, Animation::Mesh, Animation::Stars];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Animation::Rain => "rain",
+            Animation::Mesh => "mesh",
+            Animation::Stars => "stars",
+        }
+    }
+}
+
 /// The Rice page's switches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Extras {
+    /// An animated background (which one: `animation`). Named for the first one.
     pub digital_rain: bool,
+    pub animation: Animation,
     /// Panes at 92% opacity so Hyprland's blur shows through.
     pub translucent_panes: bool,
     pub show_network_tags: bool,
@@ -383,6 +412,7 @@ impl Default for Extras {
     fn default() -> Self {
         Self {
             digital_rain: true,
+            animation: Animation::Rain,
             translucent_panes: true,
             show_network_tags: true,
             plain_text_mode: false,
@@ -437,6 +467,7 @@ pub fn export_toml(choice: &str, palette: &Palette, layout: &Layout, from_hyprla
          density     = \"{}\"\n\n\
          [extras]\n\
          digital_rain      = {}\n\
+         animation         = \"{}\"\n\
          translucent_panes = {}\n\
          show_network_tags = {}\n\
          plain_text_mode   = {}\n",
@@ -451,6 +482,7 @@ pub fn export_toml(choice: &str, palette: &Palette, layout: &Layout, from_hyprla
         layout.rounding,
         density.label(),
         extras.digital_rain,
+        extras.animation.label(),
         extras.translucent_panes,
         extras.show_network_tags,
         extras.plain_text_mode,
@@ -604,7 +636,7 @@ fn or_derive(value: &Option<String>, derive: impl FnOnce() -> Color) -> Color {
     value.as_deref().map(parse_hex).unwrap_or_else(derive)
 }
 
-fn parse_hex(hex: &str) -> Color {
+pub fn parse_hex(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     let channel = |i: usize| {
         hex.get(i..i + 2)
@@ -612,6 +644,104 @@ fn parse_hex(hex: &str) -> Color {
             .unwrap_or(0)
     };
     Color::from_rgb8(channel(0), channel(2), channel(4))
+}
+
+/// `#rrggbb` (with or without `#`, any case) normalized, or `None` if it isn't one.
+pub fn valid_hex(s: &str) -> Option<String> {
+    let hex = s.trim().trim_start_matches('#');
+    (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("#{}", hex.to_ascii_lowercase()))
+}
+
+/// Hue (0–360), saturation and lightness (0–1).
+pub fn to_hsl(c: Color) -> [f32; 3] {
+    let (max, min) = (c.r.max(c.g).max(c.b), c.r.min(c.g).min(c.b));
+    let (l, d) = ((max + min) / 2.0, max - min);
+    if d == 0.0 {
+        return [0.0, 0.0, l];
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == c.r {
+        ((c.g - c.b) / d).rem_euclid(6.0)
+    } else if max == c.g {
+        (c.b - c.r) / d + 2.0
+    } else {
+        (c.r - c.g) / d + 4.0
+    };
+    [h * 60.0, s.min(1.0), l]
+}
+
+pub fn from_hsl([h, s, l]: [f32; 3]) -> Color {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match (h.rem_euclid(360.0) / 60.0) as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    Color::from_rgb(r + m, g + m, b + m)
+}
+
+impl Palette {
+    /// The colors the Rice page edits: the five base ones, then the derived ones.
+    pub const KEYS: [&'static str; 11] =
+        ["background", "surface", "surface_alt", "accent", "text", "text_bright", "text_muted", "accent_text", "border", "border_ctrl", "panel_dim"];
+
+    /// A color by its theme.toml key (derived ones as shown).
+    pub fn get(&self, key: &str) -> Color {
+        match key {
+            "background" => self.background(),
+            "surface" => self.surface(),
+            "surface_alt" => self.surface_alt(),
+            "accent" => self.accent(),
+            "text_bright" => self.text_bright(),
+            "text_muted" => self.text_muted(),
+            "accent_text" => self.accent_text(),
+            "border" => self.border(),
+            "border_ctrl" => self.border_ctrl(),
+            "panel_dim" => self.panel_dim(),
+            _ => self.text(),
+        }
+    }
+
+    /// Sets a color by its theme.toml key; `None` puts a derived one back to derived.
+    pub fn set(&mut self, key: &str, hex: Option<String>) {
+        let base = |slot: &mut String| {
+            if let Some(hex) = hex.clone() {
+                *slot = hex;
+            }
+        };
+        match key {
+            "background" => base(&mut self.background),
+            "surface" => base(&mut self.surface),
+            "surface_alt" => base(&mut self.surface_alt),
+            "accent" => base(&mut self.accent),
+            "text" => base(&mut self.text),
+            "text_bright" => self.text_bright = hex,
+            "text_muted" => self.text_muted = hex,
+            "accent_text" => self.accent_text = hex,
+            "border" => self.border = hex,
+            "border_ctrl" => self.border_ctrl = hex,
+            "panel_dim" => self.panel_dim = hex,
+            _ => {}
+        }
+    }
+}
+
+/// Writes `palette` as theme.toml's `[colors]`, keeping its other tables
+/// (`[layout]`, `[extras]`, comments aside) and dropping old top-level colors.
+pub fn save_palette(path: &Path, palette: &Palette) -> anyhow::Result<()> {
+    let mut file: toml::Table = std::fs::read_to_string(path).ok().and_then(|s| s.parse().ok()).unwrap_or_default();
+    file.retain(|key, value| value.is_table() || !Palette::KEYS.iter().any(|k| *k == key));
+    file.insert("colors".into(), toml::Value::try_from(palette)?);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, toml::to_string_pretty(&file)?)?;
+    Ok(())
 }
 
 pub fn to_hex(c: Color) -> String {
@@ -670,6 +800,36 @@ fn ensure_contrast(mut fg: Color, bg: Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hsl_round_trips_and_hex_validates() {
+        for hex in ["#d88f92", "#080c10", "#ffffff", "#000000", "#3a7bd5", "#a8b0be"] {
+            assert_eq!(to_hex(from_hsl(to_hsl(parse_hex(hex)))), hex);
+        }
+        assert_eq!(to_hsl(Color::from_rgb(1.0, 0.0, 0.0)), [0.0, 1.0, 0.5]);
+        assert_eq!(valid_hex(" D88F92 ").as_deref(), Some("#d88f92"));
+        assert_eq!(valid_hex("#d88f9"), None);
+        assert_eq!(valid_hex("#zz8f92"), None);
+    }
+
+    #[test]
+    fn saving_colors_keeps_other_tables() {
+        let path = std::env::temp_dir().join(format!("mesh-theme-{}.toml", std::process::id()));
+        // The old top-level format, plus a hand-written [layout].
+        std::fs::write(&path, "background = \"#000000\"\nsurface = \"#010101\"\nsurface_alt = \"#020202\"\naccent = \"#111111\"\ntext = \"#cccccc\"\n[layout]\ngaps_in = 7\n").unwrap();
+        let mut palette = Palette::load_or_default(&path);
+        assert_eq!(palette.accent, "#111111");
+        palette.set("accent", Some("#ff0000".into()));
+        palette.set("border", Some("#222222".into()));
+        save_palette(&path, &palette).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let loaded = Palette::load_or_default(&path);
+        assert_eq!((loaded.accent.as_str(), loaded.border.as_deref(), loaded.background.as_str()), ("#ff0000", Some("#222222"), "#000000"));
+        assert!(saved.contains("gaps_in = 7") && !saved.starts_with("background"), "{saved}");
+        palette.set("border", None);
+        assert_eq!(palette.border, None);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn save_choice_keeps_other_keys() {

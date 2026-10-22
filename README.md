@@ -40,9 +40,13 @@ Missing files fall back to the defaults in [design/DESIGN.md](design/DESIGN.md).
 Settings → **Rice** (gear icon in the user panel) switches between "Follow my
 rice", the built-in presets (Catppuccin Mocha, Nord, Gruvbox Dark) and "Custom
 theme.toml", shows every colour token (and which are derived), the layout
-values, the message density, and four switches: digital rain, translucent
-panes, network tags and plain-text mode (no image downloads). "Export theme"
-copies the current look as a theme.toml to the clipboard. Custom theme.toml is
+values, the message density, the background (an animation: digital rain, a
+drifting mesh or stars, or none; and a background image of your own) and three
+switches: translucent panes, network tags and plain-text mode (no image
+downloads). With "Custom theme.toml" chosen, click any colour to change it
+(hex, hue, saturation, lightness): theme.toml is saved as you go, and a first
+custom theme starts from the colours you had. "Export theme" copies the current
+look as a theme.toml to the clipboard. Custom theme.toml is
 read from `~/.config/mesh/theme.toml` (`%APPDATA%\mesh\theme.toml` on
 Windows), see [theme.example.toml](theme.example.toml). The choice persists in
 `~/.config/mesh/config.toml` (`%APPDATA%\mesh\config.toml` on Windows).

@@ -1,11 +1,11 @@
-//! An animated "digital rain" background, drawn on an [`iced`] canvas and
-//! layered behind the UI. Colors come from the active [`theme::Palette`] so it
-//! matches the user's rice; only the motion is fixed.
+//! Animated backgrounds ("digital rain", a drifting mesh, stars), drawn on an
+//! [`iced`] canvas and layered behind the UI. Colors come from the active
+//! [`theme::Palette`] so they match the user's rice; only the motion is fixed.
 //!
-//! The effect is a pure function of elapsed `time`, so there's no per-frame
-//! state to keep — the app just advances `time` on a tick and redraws.
+//! Each is a pure function of elapsed `time`, so there's no per-frame state to
+//! keep — the app just advances `time` on a tick and redraws.
 
-use iced::widget::canvas::{Canvas, Frame, Geometry, Program, Text};
+use iced::widget::canvas::{Canvas, Frame, Geometry, Path, Program, Stroke, Text};
 use iced::{Color, Element, Length, Pixels, Point, Rectangle, Renderer, Theme, mouse};
 
 use crate::Message;
@@ -20,16 +20,92 @@ const GLYPHS: &[char] = &[
 const COL_WIDTH: f32 = 14.0;
 const CELL_HEIGHT: f32 = 16.0;
 
-/// Builds the full-window rain background element for the given palette + time.
-pub fn background<'a>(palette: &theme::Palette, time: f32) -> Element<'a, Message> {
-    Canvas::new(Rain {
-        time,
-        head: palette.accent(),
-        trail: palette.text_muted(),
-    })
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+/// The full-window animated background for the given palette + time.
+pub fn background<'a>(palette: &theme::Palette, time: f32, animation: theme::Animation) -> Element<'a, Message> {
+    let (accent, muted) = (palette.accent(), palette.text_muted());
+    let canvas: Element<'a, Message> = match animation {
+        theme::Animation::Rain => Canvas::new(Rain { time, head: accent, trail: muted }).width(Length::Fill).height(Length::Fill).into(),
+        theme::Animation::Mesh => Canvas::new(Mesh { time, node: accent, link: muted }).width(Length::Fill).height(Length::Fill).into(),
+        theme::Animation::Stars => Canvas::new(Stars { time, bright: accent, dim: muted }).width(Length::Fill).height(Length::Fill).into(),
+    };
+    canvas
+}
+
+/// Distance at which mesh nodes stop being linked.
+const LINK: f32 = 150.0;
+
+/// Nodes drifting across the window (wrapping at the edges), linked by lines
+/// that fade with distance: the app's name, drawn.
+struct Mesh {
+    time: f32,
+    node: Color,
+    link: Color,
+}
+
+impl Program<Message> for Mesh {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width.max(1.0), bounds.height.max(1.0));
+        // About one node per 160x160 px, capped: links are checked pairwise.
+        let count = ((w * h) / 26_000.0).clamp(12.0, 110.0) as u32;
+        let nodes: Vec<Point> = (0..count)
+            .map(|i| {
+                let unit = |salt: u32| (hash(i.wrapping_mul(7919) ^ salt) % 10_000) as f32 / 10_000.0;
+                // 4–16 px a second, in any direction.
+                let (speed, angle) = (4.0 + unit(0x51) * 12.0, unit(0xa3) * std::f32::consts::TAU);
+                let x = (unit(0x17) * w + angle.cos() * speed * self.time).rem_euclid(w);
+                let y = (unit(0x2b) * h + angle.sin() * speed * self.time).rem_euclid(h);
+                Point::new(x, y)
+            })
+            .collect();
+        for (i, a) in nodes.iter().enumerate() {
+            for b in &nodes[i + 1..] {
+                let d = a.distance(*b);
+                if d < LINK {
+                    let fade = 1.0 - d / LINK;
+                    frame.stroke(&Path::line(*a, *b), Stroke::default().with_width(1.0).with_color(Color { a: fade * 0.5, ..self.link }));
+                }
+            }
+        }
+        for (i, p) in nodes.iter().enumerate() {
+            // A slow pulse, out of step from node to node.
+            let pulse = 0.55 + 0.35 * (self.time * 1.3 + i as f32).sin();
+            frame.fill(&Path::circle(*p, 2.2), Color { a: pulse, ..self.node });
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Three layers of stars drifting left at different speeds, twinkling.
+struct Stars {
+    time: f32,
+    bright: Color,
+    dim: Color,
+}
+
+impl Program<Message> for Stars {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width.max(1.0), bounds.height.max(1.0));
+        let per_layer = ((w * h) / 9_000.0).clamp(30.0, 400.0) as u32;
+        for (layer, (speed, size)) in [(3.0, 0.8), (7.0, 1.2), (14.0, 1.8)].into_iter().enumerate() {
+            for i in 0..per_layer {
+                let seed = (layer as u32) << 20 | i;
+                let unit = |salt: u32| (hash(seed.wrapping_mul(2654435761) ^ salt) % 10_000) as f32 / 10_000.0;
+                let x = (unit(0x11) * w - speed * self.time).rem_euclid(w);
+                let y = unit(0x22) * h;
+                let twinkle = 0.45 + 0.4 * (self.time * (0.6 + unit(0x33) * 2.0) + unit(0x44) * 6.3).sin();
+                // One star in twelve in the accent color.
+                let color = if hash(seed ^ 0x55) % 12 == 0 { self.bright } else { self.dim };
+                frame.fill(&Path::circle(Point::new(x, y), size), Color { a: twinkle * (0.5 + layer as f32 * 0.2), ..color });
+            }
+        }
+        vec![frame.into_geometry()]
+    }
 }
 
 struct Rain {

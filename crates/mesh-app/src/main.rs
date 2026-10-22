@@ -14,7 +14,7 @@ use chrono::{DateTime, Local, TimeZone};
 use iced::font::Weight;
 use iced::widget::{
     Space, button, column, container, mouse_area, pick_list, responsive, row, scrollable, stack,
-    text, text_input,
+    slider, text, text_input,
 };
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
@@ -79,6 +79,10 @@ fn watch_updates(client: Arc<MeshClient>) -> Task<Message> {
 struct App {
     palette: theme::Palette,
     theme_choice: String,
+    /// The Rice page's open color editor (Custom theme only).
+    color_edit: Option<ColorEdit>,
+    /// `background_image`, loaded.
+    background: Option<(PathBuf, iced::widget::image::Handle)>,
     iced_theme: IcedTheme,
     layout: theme::Layout,
     layout_from_hyprland: bool,
@@ -346,10 +350,18 @@ enum SettingsPage {
     Voice,
 }
 
+/// A color being edited: its theme.toml key, the hex field as typed, and HSL
+/// kept here so the hue stays put while the color is grey.
+#[derive(Debug, Clone)]
+struct ColorEdit {
+    key: &'static str,
+    hex: String,
+    hsl: [f32; 3],
+}
+
 /// The Rice page's switches.
 #[derive(Debug, Clone, Copy)]
 enum Extra {
-    Rain,
     Translucent,
     Tags,
     PlainText,
@@ -961,6 +973,13 @@ enum Message {
     ToggleSettings,
     OpenDiscordVoice,
     ThemeChosen(String),
+    /// Opens the editor for a theme.toml color (again: closes it).
+    EditColor(Option<&'static str>),
+    ColorHex(String),
+    /// Hue (0), saturation (1) or lightness (2).
+    ColorHsl(usize, f32),
+    /// A derived color back to derived.
+    ColorReset,
     LogOut,
     PlaceCall,
     AcceptCall,
@@ -1094,6 +1113,11 @@ enum Message {
     JoinServerSubmit,
     DensityChosen(theme::Density),
     ToggleExtra(Extra),
+    /// The animated background, or `None` for none.
+    AnimationChosen(Option<theme::Animation>),
+    PickBackground,
+    BackgroundPicked(Option<PathBuf>),
+    ClearBackground,
     /// Copy the generated theme.toml to the clipboard.
     ExportTheme,
     OpenAddFriend,
@@ -1189,6 +1213,8 @@ fn boot() -> (App, Task<Message>) {
         App {
             palette,
             theme_choice,
+            color_edit: None,
+            background: config.background_image.as_ref().map(PathBuf::from).filter(|p| p.is_file()).map(|p| (p.clone(), iced::widget::image::Handle::from_path(p))),
             iced_theme,
             layout: theme::layout_for_config(&config_path()),
             layout_from_hyprland: config.layout_from_hyprland.unwrap_or(true),
@@ -2654,8 +2680,57 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if let Err(err) = theme::save_choice(&config_path(), &choice) {
                 tracing::warn!("failed to persist theme choice: {err}");
             }
+            // A first custom theme starts from the colors on screen, not the defaults.
+            if choice == theme::CUSTOM && !theme_path().exists() {
+                let current = theme::Palette {
+                    background: theme::to_hex(state.palette.background()),
+                    surface: theme::to_hex(state.palette.surface()),
+                    surface_alt: theme::to_hex(state.palette.surface_alt()),
+                    accent: theme::to_hex(state.palette.accent()),
+                    text: theme::to_hex(state.palette.text()),
+                    ..theme::Palette::default()
+                };
+                if let Err(err) = theme::save_palette(&theme_path(), &current) {
+                    tracing::warn!("failed to write theme.toml: {err}");
+                }
+            }
             state.theme_choice = choice;
+            state.color_edit = None;
             reload_theme(state);
+            Task::none()
+        }
+        Message::EditColor(key) => {
+            let open = state.color_edit.as_ref().map(|e| e.key);
+            state.color_edit = key.filter(|k| open != Some(*k)).map(|key| {
+                let color = state.palette.get(key);
+                ColorEdit { key, hex: theme::to_hex(color), hsl: theme::to_hsl(color) }
+            });
+            Task::none()
+        }
+        Message::ColorHex(hex) => {
+            let Some(edit) = &mut state.color_edit else { return Task::none() };
+            let valid = theme::valid_hex(&hex);
+            edit.hex = hex;
+            if let Some(valid) = valid {
+                edit.hsl = theme::to_hsl(theme::parse_hex(&valid));
+                let key = edit.key;
+                set_color(state, key, Some(valid));
+            }
+            Task::none()
+        }
+        Message::ColorHsl(channel, value) => {
+            let Some(edit) = &mut state.color_edit else { return Task::none() };
+            edit.hsl[channel] = value;
+            edit.hex = theme::to_hex(theme::from_hsl(edit.hsl));
+            let (key, hex) = (edit.key, edit.hex.clone());
+            set_color(state, key, Some(hex));
+            Task::none()
+        }
+        Message::ColorReset => {
+            let Some(key) = state.color_edit.as_ref().map(|e| e.key) else { return Task::none() };
+            set_color(state, key, None);
+            let color = state.palette.get(key);
+            state.color_edit = Some(ColorEdit { key, hex: theme::to_hex(color), hsl: theme::to_hsl(color) });
             Task::none()
         }
         Message::FocusPane(pane) => {
@@ -2906,7 +2981,6 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
         Message::ToggleExtra(extra) => {
             let x = &mut state.extras;
             let flag = match extra {
-                Extra::Rain => &mut x.digital_rain,
                 Extra::Translucent => &mut x.translucent_panes,
                 Extra::Tags => &mut x.show_network_tags,
                 Extra::PlainText => &mut x.plain_text_mode,
@@ -2919,6 +2993,38 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 Screen::LoggedIn(session) if !extras.plain_text_mode => load_images(session),
                 _ => Task::none(),
             }
+        }
+        Message::AnimationChosen(animation) => {
+            state.extras.digital_rain = animation.is_some();
+            if let Some(animation) = animation {
+                state.extras.animation = animation;
+            }
+            let extras = state.extras;
+            persist(|c| c.extras = extras);
+            Task::none()
+        }
+        Message::PickBackground => Task::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .set_title("Background image")
+                    .add_filter("Images", &["png", "jpg", "jpeg"])
+                    .pick_file()
+                    .await
+                    .map(|f| f.path().to_path_buf())
+            },
+            Message::BackgroundPicked,
+        ),
+        Message::BackgroundPicked(Some(path)) => {
+            let saved = path.to_string_lossy().into_owned();
+            persist(|c| c.background_image = Some(saved));
+            state.background = Some((path.clone(), iced::widget::image::Handle::from_path(path)));
+            Task::none()
+        }
+        Message::BackgroundPicked(None) => Task::none(),
+        Message::ClearBackground => {
+            persist(|c| c.background_image = None);
+            state.background = None;
+            Task::none()
         }
         Message::ExportTheme => {
             let toml = theme::export_toml(
@@ -3386,6 +3492,15 @@ fn persist(change: impl FnOnce(&mut theme::Config)) {
     }
 }
 
+/// Changes one theme.toml color and restyles from the saved file.
+fn set_color(state: &mut App, key: &str, hex: Option<String>) {
+    state.palette.set(key, hex);
+    if let Err(err) = theme::save_palette(&theme_path(), &state.palette) {
+        tracing::warn!("failed to write theme.toml: {err}");
+    }
+    reload_theme(state);
+}
+
 /// Re-reads the palette and layout from the current theme choice's files.
 fn reload_theme(state: &mut App) {
     state.palette = theme::palette_for_choice(&state.theme_choice, &theme_path());
@@ -3595,12 +3710,16 @@ fn view(state: &App, _: iced::window::Id) -> Element<'_, Message> {
         Screen::LoggedIn(session) => session_view(session, state),
     };
 
-    // The animated digital-rain background sits behind every screen.
-    if state.extras.digital_rain {
-        stack![rain::background(&state.palette, state.rain_time), content].into()
-    } else {
-        content
+    // The background image, then the animation, sit behind every screen.
+    let mut layers = stack![];
+    if let Some((_, image)) = &state.background {
+        // Dimmed into the window background, so text over translucent panes stays readable.
+        layers = layers.push(iced::widget::image(image.clone()).content_fit(iced::ContentFit::Cover).opacity(0.55_f32).width(Length::Fill).height(Length::Fill));
     }
+    if state.extras.digital_rain {
+        layers = layers.push(rain::background(&state.palette, state.rain_time, state.extras.animation));
+    }
+    layers.push(content).into()
 }
 
 fn center_text(label: &str) -> Element<'_, Message> {
@@ -6540,10 +6659,19 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
         ("$accent", "accent", p.accent(), "Focused pane border, active indicators, primary buttons"),
         ("$text", "text", p.text(), "Body text"),
     ];
+    // Custom theme: click a color to edit it.
+    let editable = choice == theme::CUSTOM;
+    let edit_msg = |key: &'static str| editable.then_some(Message::EditColor(Some(key)));
+    let editor = |key: &str, derived: bool| -> Option<Element<'a, Message>> {
+        state.color_edit.as_ref().filter(|e| e.key == key).map(|e| color_editor(e, derived, p, l))
+    };
     let mut table = column![];
     for (rice_key, field, color, used_for) in base {
         let key = if rice_keys { rice_key } else { field };
-        table = table.push(token_row(key.to_string(), color, used_for.to_string(), source, net_color(Network::Matrix, p), p));
+        table = table.push(token_row(key.to_string(), color, used_for.to_string(), source, net_color(Network::Matrix, p), edit_msg(field), p));
+        if let Some(open) = editor(field, false) {
+            table = table.push(open);
+        }
     }
     let muted_contrast = theme::contrast(p.text_muted(), p.surface_alt());
     let derived = [
@@ -6556,7 +6684,10 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
     ];
     for (key, set, color, used_for) in derived {
         let (tag, tag_color) = if set.is_some() { ("set", p.text_muted()) } else { ("derived", p.warning()) };
-        table = table.push(token_row(key.to_string(), color, used_for, tag, tag_color, p));
+        table = table.push(token_row(key.to_string(), color, used_for, tag, tag_color, edit_msg(key), p));
+        if let Some(open) = editor(key, true) {
+            table = table.push(open);
+        }
     }
     let edge = p.border();
     let tokens = column![
@@ -6572,9 +6703,13 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
             border: iced::border::rounded(8).color(edge).width(1),
             ..container::Style::default()
         }),
-        text("Muted text is derived and nudged until it reaches 4.5:1 contrast, so a dark rice never turns into unreadable grey.")
-            .size(12)
-            .color(p.text_muted()),
+        text(if editable {
+            "Click a color to change it; theme.toml is saved as you go. Derived colors follow the base ones until you set them."
+        } else {
+            "Muted text is derived and nudged until it reaches 4.5:1 contrast, so a dark rice never turns into unreadable grey."
+        })
+        .size(12)
+        .color(p.text_muted()),
     ]
     .spacing(8);
 
@@ -6623,7 +6758,7 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
     let x = &state.extras;
     let extras = column![
         heading("extras", p),
-        switch_row("Digital rain background", "Animated canvas behind the panes, drawn in your accent and muted text", x.digital_rain, Some(Message::ToggleExtra(Extra::Rain)), p),
+        background_rows(state, p, l),
         switch_row("Translucent panes", "Panes at 92% opacity so Hyprland's blur shows through", x.translucent_panes, Some(Message::ToggleExtra(Extra::Translucent)), p),
         switch_row("Show platform tags", "mx / dc next to names, so you always know where a message goes", x.show_network_tags, Some(Message::ToggleExtra(Extra::Tags)), p),
         switch_row("Plain-text mode", "No image downloads or previews: just text, links and code", x.plain_text_mode, Some(Message::ToggleExtra(Extra::PlainText)), p),
@@ -6638,6 +6773,46 @@ fn rice_page<'a>(state: &'a App) -> Element<'a, Message> {
         extras,
     ]
     .spacing(20)
+    .into()
+}
+
+/// The Rice page's background: which animation, and a picture behind it all.
+fn background_rows<'a>(state: &'a App, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let x = &state.extras;
+    let mut animations = row![segment("off", !x.digital_rain, Message::AnimationChosen(None), p, l)].spacing(2);
+    for animation in theme::Animation::ALL {
+        animations = animations.push(segment(animation.label(), x.digital_rain && x.animation == animation, Message::AnimationChosen(Some(animation)), p, l));
+    }
+    let (fill, ctrl) = (p.background(), p.border_ctrl());
+    let picker = container(animations).padding(3).style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(ctrl).width(1),
+        ..container::Style::default()
+    });
+    let image_name = state.background.as_ref().and_then(|(path, _)| path.file_name()).map(|n| n.to_string_lossy().into_owned());
+    let mut image_actions = row![button(ui::mono("choose…", 12.0, p.text())).on_press(Message::PickBackground).padding([6, 10]).style(flat_button_style(p))].spacing(4);
+    if image_name.is_some() {
+        image_actions = image_actions.push(button(ui::mono("remove", 12.0, p.text())).on_press(Message::ClearBackground).padding([6, 10]).style(flat_button_style(p)));
+    }
+    let line = |title: &'a str, sub: String, control: Element<'a, Message>| {
+        column![
+            row![
+                column![ui::sans(title, 14.0, Weight::Normal, p.text_bright()), text(sub).size(12).color(p.text_muted())].width(Length::Fill),
+                control,
+            ]
+            .align_y(iced::Alignment::Center)
+            .padding([10, 0]),
+            ui::hline(p),
+        ]
+    };
+    column![
+        line("Background animation", "Behind the panes, drawn in your accent and muted text".into(), picker.into()),
+        line(
+            "Background image",
+            image_name.map_or("None · shows in the gaps, and faintly through translucent panes".into(), |n| format!("{n} · shows in the gaps, and faintly through translucent panes")),
+            image_actions.into(),
+        ),
+    ]
     .into()
 }
 
@@ -6691,6 +6866,7 @@ fn token_row<'a>(
     used_for: String,
     tag: &'a str,
     tag_color: iced::Color,
+    on_press: Option<Message>,
     p: &theme::Palette,
 ) -> Element<'a, Message> {
     let edge = p.border_ctrl();
@@ -6699,8 +6875,8 @@ fn token_row<'a>(
         border: iced::border::rounded(5).color(edge).width(1),
         ..container::Style::default()
     });
-    column![
-        ui::hline(p),
+    let hover = p.surface_alt();
+    let line = button(
         row![
             ui::mono(key, 12.0, p.text_bright()).width(120),
             chip,
@@ -6709,9 +6885,55 @@ fn token_row<'a>(
             ui::mono(tag, 12.0, tag_color),
         ]
         .spacing(12)
-        .padding([8, 14])
         .align_y(iced::Alignment::Center),
+    )
+    .on_press_maybe(on_press)
+    .width(Length::Fill)
+    .padding([8, 14])
+    .style(move |_, status| button::Style {
+        background: matches!(status, button::Status::Hovered).then_some(hover.into()),
+        ..button::Style::default()
+    });
+    column![ui::hline(p), line].into()
+}
+
+/// Hex field and HSL sliders for one theme.toml color.
+fn color_editor<'a>(edit: &'a ColorEdit, derived: bool, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let [hue, sat, light] = edit.hsl;
+    let channel = |label: &'a str, range: std::ops::RangeInclusive<f32>, value: f32, step: f32, shown: String, i: usize| {
+        row![
+            ui::mono(label, 12.0, p.text_muted()).width(90),
+            slider(range, value, move |v| Message::ColorHsl(i, v)).step(step),
+            ui::mono(shown, 12.0, p.text()).width(48),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+    };
+    let valid = theme::valid_hex(&edit.hex).is_some();
+    let mut actions = row![
+        text_input("#rrggbb", &edit.hex).on_input(Message::ColorHex).font(*ui::MONO).size(13).width(120),
+        ui::swatch(theme::from_hsl(edit.hsl), 28.0, 28.0, 6.0),
+        ui::mono(if valid { "" } else { "not a #rrggbb color" }, 12.0, p.warning()).width(Length::Fill),
     ]
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
+    if derived {
+        actions = actions.push(button(ui::mono("back to derived", 12.0, p.text())).on_press(Message::ColorReset).padding([6, 10]).style(flat_button_style(p)));
+    }
+    actions = actions.push(ui::primary_button(ui::mono("done", 12.0, p.accent_text()), Some(Message::EditColor(None)), p, l));
+    let fill = p.background();
+    container(
+        column![
+            actions,
+            channel("hue", 0.0..=360.0, hue, 1.0, format!("{hue:.0}°"), 0),
+            channel("saturation", 0.0..=1.0, sat, 0.005, format!("{:.0}%", sat * 100.0), 1),
+            channel("lightness", 0.0..=1.0, light, 0.005, format!("{:.0}%", light * 100.0), 2),
+        ]
+        .spacing(8),
+    )
+    .padding([12, 14])
+    .width(Length::Fill)
+    .style(move |_| container::Style { background: Some(fill.into()), ..container::Style::default() })
     .into()
 }
 
