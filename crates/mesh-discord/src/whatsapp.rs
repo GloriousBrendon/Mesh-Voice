@@ -391,21 +391,20 @@ pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSend
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return };
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let mut connected = false;
+        // Connected as soon as it runs: unlinked, it shows its QR code, which
+        // Mesh only displays for a connected network.
+        if events.send(Event::Connected(Engine { commands: commands.clone() })).is_err() {
+            return;
+        }
         loop {
             tokio::select! {
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
                     let Some((name, payload)) = native_line(&line) else { continue };
-                    let event = if name == "waReady" {
-                        connected = true;
-                        Event::Connected(Engine { commands: commands.clone() })
-                    } else {
-                        match binding_event(&name, &payload) {
-                            Some(event) => event,
-                            None => continue,
-                        }
-                    };
+                    if name == "waReady" {
+                        continue;
+                    }
+                    let Some(event) = binding_event(&name, &payload) else { continue };
                     if events.send(event).is_err() {
                         return;
                     }
@@ -420,7 +419,7 @@ pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSend
             }
         }
         let _ = child.kill().await;
-        if connected && events.send(Event::Disconnected).is_err() {
+        if events.send(Event::Disconnected).is_err() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;

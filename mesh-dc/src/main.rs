@@ -106,9 +106,12 @@ enum SessionEnd {
     SignedOut,
 }
 
-/// Runs the QR flow, emitting `meshQr`, until a token is stored. Returns false
+/// Runs the QR flow, emitting `meshQr`, and takes `login`/`loginCode`
+/// (email + password, then a 2FA code), until a token is stored. Returns false
 /// if stdin closes first (Mesh quit).
 async fn show_qr_until_linked(dir: &Path, cmds: &mut mpsc::UnboundedReceiver<String>) -> bool {
+    // The 2FA ticket from a password sign-in, while one is pending.
+    let mut ticket: Option<String> = None;
     loop {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let auth = tokio::spawn(login::remote_auth(tx));
@@ -125,8 +128,29 @@ async fn show_qr_until_linked(dir: &Path, cmds: &mut mpsc::UnboundedReceiver<Str
                 },
                 line = cmds.recv() => match line {
                     None => { auth.abort(); return false; }
-                    // Only signOut matters while logged out; nothing else applies.
-                    Some(_) => {}
+                    // Signing in by password; nothing else applies while logged out.
+                    Some(line) => {
+                        let step = match parse_cmd(&line) {
+                            Some(Cmd { func, args }) if func == "login" && args.len() == 2 => login::password(&args[0], &args[1]).await,
+                            Some(Cmd { func, args }) if func == "loginCode" && args.len() == 1 => match &ticket {
+                                Some(t) => login::code(t, &args[0]).await,
+                                None => login::Password::Failed("Sign in with your email and password first.".into()),
+                            },
+                            _ => continue,
+                        };
+                        match step {
+                            login::Password::Token(token) => {
+                                login::save_token(dir, &token);
+                                auth.abort();
+                                return true;
+                            }
+                            login::Password::Code { ticket: t } => {
+                                ticket = Some(t);
+                                emit("meshLogin", &json!({ "state": "code" }));
+                            }
+                            login::Password::Failed(error) => emit("meshLogin", &json!({ "state": "failed", "error": error })),
+                        }
+                    }
                 },
             }
         }

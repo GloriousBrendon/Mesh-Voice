@@ -23,6 +23,19 @@ impl From<mesh_discord::Qr> for LoginQr {
     }
 }
 
+/// The native Discord helper's email + password sign-in form.
+#[derive(Debug, Default)]
+pub(crate) struct DcSignIn {
+    pub login: String,
+    pub password: String,
+    pub code: String,
+    /// Discord asked for a 2FA code.
+    pub asking_code: bool,
+    /// Sent; waiting for Discord's answer.
+    pub busy: bool,
+    pub error: Option<String>,
+}
+
 /// Where a network's account stands.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Link {
@@ -399,6 +412,7 @@ pub(crate) fn panel<'a>(state: &'a App) -> Element<'a, Message> {
             Step::SignIn | Step::Code => (
                 match (spec.auth, &link) {
                     (_, Some(Link::Offline)) => "Starting…",
+                    _ if spec.id == "dc" && state.discord_native.is_some() => "Waiting for sign-in…",
                     (Auth::Qr, _) => "Waiting for your phone…",
                     _ => "Continue",
                 },
@@ -465,6 +479,9 @@ fn sign_in<'a>(state: &'a App, spec: &'static NetworkSpec, link: Option<&Link>) 
         ]
         .spacing(6)
     };
+    if spec.id == "dc" && state.discord_native.is_some() {
+        return discord_password(state);
+    }
     match spec.auth {
         Auth::Qr => {
             let qr = state.login_qr.get(spec.id).filter(|_| matches!(link, Some(Link::SignedOut)));
@@ -525,6 +542,52 @@ fn sign_in<'a>(state: &'a App, spec: &'static NetworkSpec, link: Option<&Link>) 
         .spacing(12)
         .into(),
     }
+}
+
+/// Native Discord: email + password, then a 2FA code if it's on. No phone.
+fn discord_password(state: &App) -> Element<'_, Message> {
+    let p = &state.palette;
+    let f = &state.dc_sign_in;
+    let ready = state.discord.is_some() && !f.busy;
+    let label = |s: &'static str| ui::mono(s, 11.0, p.text_muted());
+    let mut form = if f.asking_code {
+        column![
+            label("2FA CODE"),
+            text_input("123456", &f.code)
+                .on_input(Message::DcSignInCode)
+                .on_submit_maybe(ready.then_some(Message::DcSignInSubmit))
+                .padding([10, 12])
+                .size(13),
+            text("From your authenticator app, or a backup code.").size(12).color(p.text_muted()),
+        ]
+    } else {
+        column![
+            label("EMAIL OR PHONE"),
+            text_input("you@example.com", &f.login).on_input(Message::DcSignInLogin).padding([10, 12]).size(13),
+            label("PASSWORD"),
+            text_input("", &f.password)
+                .on_input(Message::DcSignInPassword)
+                .on_submit_maybe(ready.then_some(Message::DcSignInSubmit))
+                .secure(true)
+                .padding([10, 12])
+                .size(13),
+        ]
+    }
+    .spacing(6);
+    let action = if f.busy { "Signing in…" } else if f.asking_code { "Confirm code" } else { "Sign in" };
+    form = form.push(
+        button(container(ui::sans(action, 14.0, Weight::Semibold, p.text_bright())).center_x(Length::Fill))
+            .width(Length::Fill)
+            .padding(12)
+            .style(flat_button_style(p))
+            .on_press_maybe(ready.then_some(Message::DcSignInSubmit)),
+    );
+    if let Some(error) = &f.error {
+        form = form.push(text(error).size(12).color(p.danger()));
+    }
+    form.push(text("Mesh talks to Discord directly. Your password goes only to Discord and isn't stored; Mesh keeps the session token on this PC.").size(12).color(p.text_muted()))
+        .spacing(10)
+        .into()
 }
 
 /// Step 2: what shows up in Mesh.

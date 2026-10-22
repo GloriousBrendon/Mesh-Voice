@@ -1,7 +1,9 @@
 //! Login. Reuses a stored token when there is one; otherwise runs Discord's
 //! remote-auth (QR) flow: the phone app scans the code and approves, and the
 //! account's token comes back encrypted to a key we made here. The token is
-//! stored in the data dir, nowhere else. No password or captcha path.
+//! stored in the data dir, nowhere else. Or email + password (and a 2FA code),
+//! the web client's `/auth/login`; no captcha path, so when Discord asks for
+//! one this reports it rather than solving it.
 
 use std::path::{Path, PathBuf};
 
@@ -115,6 +117,69 @@ pub async fn remote_auth(updates: mpsc::UnboundedSender<Update>) -> Result<()> {
     }
 }
 
+/// Where an email + password sign-in got to.
+#[derive(Debug, PartialEq)]
+pub enum Password {
+    Token(String),
+    /// 2FA is on: send the authenticator (or backup) code with this ticket.
+    Code { ticket: String },
+    Failed(String),
+}
+
+/// `POST /auth/login`, as the web client sends it.
+pub async fn password(login: &str, password: &str) -> Password {
+    let body = serde_json::json!({ "login": login, "password": password, "undelete": false, "login_source": null, "gift_code_sku_id": null });
+    password_step(post("/auth/login", &body).await)
+}
+
+/// `POST /auth/mfa/totp` with the ticket from [`password`].
+pub async fn code(ticket: &str, code: &str) -> Password {
+    let code: String = code.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+    password_step(post("/auth/mfa/totp", &serde_json::json!({ "code": code, "ticket": ticket })).await)
+}
+
+async fn post(path: &str, body: &Value) -> Result<Value> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}{path}", crate::gateway::api()))
+        .header("User-Agent", crate::gateway::USER_AGENT)
+        .header("X-Super-Properties", crate::gateway::super_properties())
+        .header("X-Discord-Locale", "en-US")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("couldn't reach Discord: {e}"))?;
+    resp.json().await.map_err(|e| anyhow!("odd answer from Discord: {e}"))
+}
+
+/// Discord's answer to a sign-in step, as what to do next.
+fn password_step(answer: Result<Value>) -> Password {
+    let v = match answer {
+        Ok(v) => v,
+        Err(e) => return Password::Failed(e.to_string()),
+    };
+    if let Some(token) = v["token"].as_str() {
+        return Password::Token(token.to_owned());
+    }
+    if v["mfa"].as_bool() == Some(true)
+        && let Some(ticket) = v["ticket"].as_str()
+    {
+        return Password::Code { ticket: ticket.to_owned() };
+    }
+    if v.get("captcha_key").is_some() || v.get("captcha_sitekey").is_some() {
+        return Password::Failed("Discord wants a captcha for this sign-in, which Mesh can't show. Try again later, or sign in once from the QR code.".into());
+    }
+    // `{errors: {login: {_errors: [{code, message}]}}}`, or a top-level message.
+    let first = v["errors"].as_object().and_then(|e| e.values().find_map(|f| f["_errors"][0].as_object().cloned()));
+    let message = match first {
+        Some(e) if e["code"] == "ACCOUNT_LOGIN_VERIFICATION_EMAIL" => {
+            "Discord emailed you to confirm this new sign-in location. Approve it, then sign in again.".to_owned()
+        }
+        Some(e) => e["message"].as_str().unwrap_or("Sign-in failed").to_owned(),
+        None => v["message"].as_str().unwrap_or("Sign-in failed").to_owned(),
+    };
+    Password::Failed(message)
+}
+
 /// Exchanges the approved ticket for the (encrypted) token and decrypts it.
 async fn redeem(key: &RsaPrivateKey, ticket: &str) -> Result<String> {
     let client = reqwest::Client::new();
@@ -156,5 +221,16 @@ mod tests {
         let nonce = b"a-random-16-byte";
         let proof = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(nonce));
         assert!(!proof.contains('=') && !proof.contains('+'));
+    }
+    #[test]
+    fn reads_password_answers() {
+        let step = |v: Value| password_step(Ok(v));
+        assert_eq!(step(serde_json::json!({"token": "t", "user_id": "1"})), Password::Token("t".into()));
+        assert_eq!(step(serde_json::json!({"mfa": true, "ticket": "k", "totp": true})), Password::Code { ticket: "k".into() });
+        assert!(matches!(step(serde_json::json!({"captcha_key": ["captcha-required"], "captcha_sitekey": "x"})), Password::Failed(m) if m.contains("captcha")));
+        let bad = serde_json::json!({"code": 50035, "errors": {"login": {"_errors": [{"code": "INVALID_LOGIN", "message": "Login or password is invalid."}]}}});
+        assert_eq!(step(bad), Password::Failed("Login or password is invalid.".into()));
+        let email = serde_json::json!({"errors": {"login": {"_errors": [{"code": "ACCOUNT_LOGIN_VERIFICATION_EMAIL", "message": "x"}]}}});
+        assert!(matches!(step(email), Password::Failed(m) if m.contains("emailed")));
     }
 }

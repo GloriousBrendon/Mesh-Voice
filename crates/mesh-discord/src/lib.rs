@@ -36,8 +36,18 @@ pub enum Event {
     Qr(Qr),
     /// A video call frame (someone's camera, or ours), or its end.
     Video(Video),
+    /// How an `Engine::sign_in` is going (native helper only).
+    SignIn(SignIn),
     /// Lost it (browser closed, page gone); reconnects on its own.
     Disconnected,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum SignIn {
+    /// 2FA is on: send the code with `Engine::sign_in_code`.
+    Code,
+    Failed { error: String },
 }
 
 /// Commands into the hidden client. Cheap to clone.
@@ -87,6 +97,15 @@ impl Engine {
     }
     pub fn close_channel(&self) {
         self.call("open", &[]);
+    }
+    /// Signs in with email (or phone) and password; answers with
+    /// `Event::SignIn` unless it just works (then a snapshot follows).
+    pub fn sign_in(&self, login: &str, password: &str) {
+        self.call("login", &[login, password]);
+    }
+    /// The 2FA (authenticator or backup) code asked for by `Event::SignIn::Code`.
+    pub fn sign_in_code(&self, code: &str) {
+        self.call("loginCode", &[code]);
     }
     /// Logs this Discord session out; the tab goes back to its login page.
     pub fn sign_out(&self) {
@@ -331,21 +350,20 @@ pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSend
         let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else { return };
         let (commands, mut command_rx) = mpsc::unbounded_channel();
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let mut connected = false;
+        // Connected as soon as it runs: unlinked, it shows its QR code, which
+        // Mesh only displays for a connected network.
+        if events.send(Event::Connected(Engine { commands: commands.clone() })).is_err() {
+            return;
+        }
         loop {
             tokio::select! {
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
                     let Some((name, payload)) = native_line(&line) else { continue };
-                    let event = if name == "dcReady" {
-                        connected = true;
-                        Event::Connected(Engine { commands: commands.clone() })
-                    } else {
-                        match binding_event(&name, &payload) {
-                            Some(event) => event,
-                            None => continue,
-                        }
-                    };
+                    if name == "dcReady" {
+                        continue;
+                    }
+                    let Some(event) = binding_event(&name, &payload) else { continue };
                     if events.send(event).is_err() {
                         return;
                     }
@@ -360,7 +378,7 @@ pub async fn run_native(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSend
             }
         }
         let _ = child.kill().await;
-        if connected && events.send(Event::Disconnected).is_err() {
+        if events.send(Event::Disconnected).is_err() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -383,6 +401,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "meshMedia" => engine::media(payload).map(|(url, bytes)| Event::Media { url, bytes }),
         "meshQr" => engine::qr(payload).map(Event::Qr),
         "meshVideo" => engine::video(payload).map(Event::Video),
+        "meshLogin" => serde_json::from_str(payload).ok().map(Event::SignIn),
         _ => None,
     }
 }
@@ -411,6 +430,16 @@ mod tests {
         let payload = r#"{"channel_id":"5","title":"B345T","body":"hi"}"#;
         let Some(Event::Notify(n)) = binding_event("meshNotify", payload) else { panic!("no notify") };
         assert_eq!((n.channel_id.as_str(), n.title.as_str()), ("5", "B345T"));
+    }
+
+    #[test]
+    fn parses_sign_in() {
+        let sign_in = |payload: &str| match binding_event("meshLogin", payload) {
+            Some(Event::SignIn(s)) => s,
+            other => panic!("not a sign-in: {other:?}"),
+        };
+        assert_eq!(sign_in(r#"{"state":"code"}"#), SignIn::Code);
+        assert_eq!(sign_in(r#"{"state":"failed","error":"nope"}"#), SignIn::Failed { error: "nope".into() });
     }
 
     #[test]

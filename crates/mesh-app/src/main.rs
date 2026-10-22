@@ -94,6 +94,8 @@ struct App {
     /// The native Discord helper (`mesh-dc`) beside Mesh's own binary, when it's
     /// there; Discord then runs in it instead of the engine browser.
     discord_native: Option<PathBuf>,
+    /// Its email + password sign-in form.
+    dc_sign_in: accounts::DcSignIn,
     /// Handle to drive it, while connected.
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
@@ -906,6 +908,11 @@ enum VerifyStage {
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// The native Discord sign-in form.
+    DcSignInLogin(String),
+    DcSignInPassword(String),
+    DcSignInCode(String),
+    DcSignInSubmit,
     RestoreFinished(Result<Arc<MeshClient>, String>),
     HomeserverChanged(String),
     UsernameChanged(String),
@@ -1175,6 +1182,7 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             whatsapp_native: whatsapp_native.clone(),
             discord_native,
+            dc_sign_in: accounts::DcSignIn::default(),
             discord: None,
             discord_state: None,
             whatsapp: None,
@@ -1954,8 +1962,41 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::DcSignInLogin(value) => {
+            state.dc_sign_in.login = value;
+            Task::none()
+        }
+        Message::DcSignInPassword(value) => {
+            state.dc_sign_in.password = value;
+            Task::none()
+        }
+        Message::DcSignInCode(value) => {
+            state.dc_sign_in.code = value;
+            Task::none()
+        }
+        Message::DcSignInSubmit => {
+            let f = &mut state.dc_sign_in;
+            if let Some(engine) = &state.discord {
+                if f.asking_code {
+                    engine.sign_in_code(f.code.trim());
+                } else {
+                    engine.sign_in(f.login.trim(), &f.password);
+                }
+                f.busy = true;
+                f.error = None;
+            }
+            Task::none()
+        }
         Message::Discord(event) => {
             match event {
+                mesh_discord::Event::SignIn(result) => {
+                    let f = &mut state.dc_sign_in;
+                    f.busy = false;
+                    match result {
+                        mesh_discord::SignIn::Code => f.asking_code = true,
+                        mesh_discord::SignIn::Failed { error } => f.error = Some(error),
+                    }
+                }
                 mesh_discord::Event::Connected(engine) => {
                     if let Screen::LoggedIn(session) = &state.screen
                         && let Some(chat) = session.web_chat.as_ref().filter(|c| c.network == Network::Discord)
@@ -1971,6 +2012,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         load_snapshot_media(session, &snapshot, engine);
                     }
                     if snapshot.me.is_some() {
+                        // Signed in: forget the form, password included.
+                        state.dc_sign_in = accounts::DcSignIn::default();
                         state.login_qr.remove("dc");
                         accounts::remember_linked(state, Network::Discord);
                     }
