@@ -6,8 +6,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageFormat, RgbImage};
-use openh264::decoder::{DecodedYUV, Decoder};
-use openh264::formats::YUVSource as _;
+use mesh_media::H264Decoder;
 
 /// Shrinks a picture so Mesh gets a few KB: photos to `width` px as JPEG, stickers to 160 px as
 /// PNG (keeping their transparency). ponytail: an animated sticker shows its first frame.
@@ -57,7 +56,7 @@ pub fn gif_frames(mp4: &[u8]) -> Result<Vec<Vec<u8>>> {
         stream.extend_from_slice(&[0, 0, 0, 1]);
         stream.extend_from_slice(nal.map_err(|e| anyhow!("{e}"))?);
     }
-    let mut decoder = Decoder::new()?;
+    let mut decoder = H264Decoder::new()?;
     let (mut frames, mut next_ms) = (Vec::new(), 0u64);
     for n in 1..=count {
         let Some(sample) = reader.read_sample(id, n).map_err(|e| anyhow!("{e}"))? else { continue };
@@ -66,7 +65,7 @@ pub fn gif_frames(mp4: &[u8]) -> Result<Vec<Vec<u8>>> {
             break;
         }
         annex_b(&sample.bytes, &mut stream);
-        let Some(yuv) = decoder.decode(&stream)? else {
+        let Some(frame) = decoder.decode(&stream)? else {
             stream.clear();
             continue;
         };
@@ -75,7 +74,7 @@ pub fn gif_frames(mp4: &[u8]) -> Result<Vec<Vec<u8>>> {
             continue;
         }
         next_ms = at_ms + 1000 / u64::from(GIF_FPS);
-        frames.push(jpeg(&fit(rgb(&yuv)?, GIF_WIDTH).to_rgb8(), 75)?);
+        frames.push(frame.jpeg(GIF_WIDTH, 75)?);
     }
     if frames.is_empty() {
         bail!("couldn't decode the GIF");
@@ -83,27 +82,8 @@ pub fn gif_frames(mp4: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(frames)
 }
 
-fn rgb(yuv: &DecodedYUV) -> Result<DynamicImage> {
-    let (w, h) = yuv.dimensions();
-    let mut rgb = vec![0; w * h * 3];
-    yuv.write_rgb8(&mut rgb);
-    Ok(DynamicImage::ImageRgb8(RgbImage::from_raw(w as u32, h as u32, rgb).ok_or_else(|| anyhow!("bad frame"))?))
-}
-
 fn fit(img: DynamicImage, width: u32) -> DynamicImage {
     if img.width() > width { img.resize(width, u32::MAX, FilterType::Triangle) } else { img }
-}
-
-/// A call's video frame as Mesh's JPEG (640 px wide at most), turned upright.
-pub fn yuv_jpeg(yuv: &DecodedYUV, orientation: u8) -> Result<Vec<u8>> {
-    let img = rgb(yuv)?;
-    let img = match orientation & 3 {
-        1 => img.rotate90(),
-        2 => img.rotate180(),
-        3 => img.rotate270(),
-        _ => img,
-    };
-    jpeg(&fit(img, 640).to_rgb8(), 70)
 }
 
 /// Length-prefixed (AVCC) NAL units to start-code (Annex B) ones, appended to `out`.
@@ -194,12 +174,12 @@ mod tests {
     /// An H.264 mp4 of `n` frames at 12 fps, as WhatsApp's GIFs are.
     fn gif_mp4(n: u32) -> Vec<u8> {
         let (w, h) = (64u16, 48u16);
-        let mut enc = openh264::encoder::Encoder::new().unwrap();
+        let mut enc = mesh_media::H264Encoder::new(12, 1_000_000).unwrap();
         let (mut sps, mut pps, mut samples) = (Vec::new(), Vec::new(), Vec::new());
         for i in 0..n {
-            let rgb = RgbImage::from_fn(w.into(), h.into(), |x, _| image::Rgb([(x * 4) as u8, (i * 20) as u8, 0]));
-            let yuv = openh264::formats::YUVBuffer::from_rgb8_source(openh264::formats::RgbSliceU8::new(rgb.as_raw(), (w.into(), h.into())));
-            let annexb = enc.encode(&yuv).unwrap().to_vec();
+            let rgba = image::RgbaImage::from_fn(w.into(), h.into(), |x, _| image::Rgba([(x * 4) as u8, (i * 20) as u8, 0, 255]));
+            let frame = mesh_media::Frame { width: w.into(), height: h.into(), rgba: rgba.into_raw(), at: std::time::Instant::now() };
+            let annexb = enc.encode(&frame, false).unwrap();
             let mut sample = Vec::new();
             for nal in split_nals(&annexb) {
                 match nal[0] & 0x1f {

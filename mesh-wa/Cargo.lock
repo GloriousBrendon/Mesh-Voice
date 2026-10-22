@@ -1758,6 +1758,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "openh264",
+ "windows",
+]
+
+[[package]]
 name = "mesh-wa"
 version = "0.1.0"
 dependencies = [
@@ -1768,8 +1779,8 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "mesh-media",
  "mp4",
- "openh264",
  "opus",
  "qrcode",
  "ringbuf",

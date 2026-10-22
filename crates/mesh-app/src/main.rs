@@ -126,6 +126,8 @@ struct App {
     video: HashMap<String, VideoTile>,
     /// WhatsApp's call, while there is one.
     wa_call: Option<whatsapp::Call>,
+    /// The share picker in WhatsApp's call bar: `Some(empty)` while it loads.
+    wa_share: Option<Vec<ShareChoice>>,
     /// Whether Mesh's window has focus (no notifications for the chat in view).
     window_focused: bool,
     /// Theme source files and their last-seen mtimes, polled for hot reload.
@@ -1012,6 +1014,9 @@ enum Message {
     WaCallMute,
     WaCallCamera,
     WaCallScreen,
+    /// Share this screen or window (its source id) in the WhatsApp call.
+    WaSharePick(String),
+    WaShareCancel,
     /// Drop video from cameras that stopped sending.
     VideoPrune,
     /// Show a Discord server (by id) from the hidden client.
@@ -1209,6 +1214,7 @@ fn boot() -> (App, Task<Message>) {
             accounts: accounts::Panel::default(),
             video: HashMap::new(),
             wa_call: None,
+            wa_share: None,
             window_focused: true,
             theme_stamps: theme::stamps(&theme_files),
             theme_files,
@@ -1947,10 +1953,27 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     Message::WaCallDecline => engine.call_decline(),
                     Message::WaCallEnd => engine.call_end(),
                     Message::WaCallMute => engine.call_mute(!call.muted),
+                    // The native helper shares what's picked in Mesh; the
+                    // engine tab asks with Edge's own picker.
+                    Message::WaCallScreen if !call.screen && state.whatsapp_native.is_some() => {
+                        engine.list_sources();
+                        state.wa_share = Some(Vec::new());
+                    }
                     Message::WaCallScreen => engine.call_screen(!call.screen),
                     _ => engine.call_camera(!call.camera),
                 }
             }
+            Task::none()
+        }
+        Message::WaSharePick(id) => {
+            if let Some(engine) = &state.whatsapp {
+                engine.call_screen_source(&id);
+            }
+            state.wa_share = None;
+            Task::none()
+        }
+        Message::WaShareCancel => {
+            state.wa_share = None;
             Task::none()
         }
         Message::ToggleScreenShare => {
@@ -2145,11 +2168,20 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     state.whatsapp_state = Some(snapshot);
                     accounts::refresh_shown(state);
                 }
+                whatsapp::Event::Sources(sources) => {
+                    // Only while the picker's open: a late answer after Cancel is dropped.
+                    if state.wa_share.is_some() {
+                        state.wa_share = Some(sources.sources.iter().map(ShareChoice::from).collect());
+                    }
+                }
                 whatsapp::Event::Qr(qr) => {
                     state.login_qr.insert("wa", qr.into());
                 }
                 whatsapp::Event::Call(Ok(call)) => {
                     let call = call.filter(|c| c.phase != "ended");
+                    if call.as_ref().is_none_or(|c| c.screen) {
+                        state.wa_share = None;
+                    }
                     let ringing = |c: &Option<whatsapp::Call>| c.as_ref().is_some_and(|c| c.phase == "incoming");
                     if ringing(&call) && !ringing(&state.wa_call)
                         && let Some(c) = &call
@@ -2314,6 +2346,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 }
                 whatsapp::Event::Disconnected => {
                     state.wa_call = None;
+                    state.wa_share = None;
                     state.video.retain(|id, _| !id.starts_with("wa-"));
                     state.whatsapp = None;
                     state.whatsapp_state = None;
@@ -4938,7 +4971,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     }
     if let Some(call) = &state.wa_call {
         let wa_video = state.video.iter().filter(|(id, _)| id.starts_with("wa-")).map(|(_, t)| t);
-        col = col.push(container(wa_call_bar(call, wa_video, p, l)).padding([8, 16]));
+        col = col.push(container(wa_call_bar(call, wa_video, state.wa_share.as_deref(), p, l)).padding([8, 16]));
     }
     if let Some(prompt) = &session.verification {
         col = col.push(container(verification_banner(prompt, p)).padding([8, 16]));
@@ -5248,10 +5281,67 @@ fn discord_call_bar<'a>(
 
 /// WhatsApp's call: ringing (answer / decline) or under way (mute, camera,
 /// hang up), with its video.
+/// A screen or window to share, with its thumbnail ready to draw.
+#[derive(Debug, Clone)]
+struct ShareChoice {
+    id: String,
+    name: String,
+    screen: bool,
+    thumbnail: Option<iced::widget::image::Handle>,
+}
+
+impl From<&whatsapp::ShareSource> for ShareChoice {
+    fn from(s: &whatsapp::ShareSource) -> Self {
+        ShareChoice {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            screen: s.kind == "screen",
+            thumbnail: s.thumbnail_jpeg().map(iced::widget::image::Handle::from_bytes),
+        }
+    }
+}
+
+/// The share picker: screens, then windows, as thumbnails.
+fn share_picker<'a>(choices: &'a [ShareChoice], p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let head = row![
+        ui::sans("Share your screen", 13.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
+        button(text("Cancel").size(12)).on_press(Message::WaShareCancel).padding([4, 10]).style(flat_button_style(p)),
+    ]
+    .align_y(iced::Alignment::Center);
+    if choices.is_empty() {
+        return column![head, text("Looking for screens and windows…").size(12).color(p.text_muted())].spacing(8).into();
+    }
+    let (hover, edge) = (p.surface(), p.border());
+    let radius = l.control_radius();
+    let tile = |c: &'a ShareChoice| {
+        let picture: Element<'a, Message> = match &c.thumbnail {
+            Some(h) => iced::widget::image(h.clone()).width(160).height(90).content_fit(iced::ContentFit::Contain).into(),
+            None => Space::new().width(160).height(90).into(),
+        };
+        button(column![picture, text(&c.name).size(11).color(p.text()).width(160).wrapping(iced::widget::text::Wrapping::None)].spacing(4))
+            .on_press(Message::WaSharePick(c.id.clone()))
+            .padding(6)
+            .style(move |_, status| button::Style {
+                background: matches!(status, button::Status::Hovered).then_some(hover.into()),
+                border: iced::border::rounded(radius).color(edge).width(1),
+                ..button::Style::default()
+            })
+    };
+    let mut body = column![head].spacing(8);
+    for (label, screens) in [("SCREENS", true), ("WINDOWS", false)] {
+        let picks: Vec<Element<'a, Message>> = choices.iter().filter(|c| c.screen == screens).map(|c| tile(c).into()).collect();
+        if !picks.is_empty() {
+            body = body.push(ui::mono(label, 11.0, p.text_muted())).push(iced::widget::Row::with_children(picks).spacing(8).wrap());
+        }
+    }
+    iced::widget::scrollable(body).height(Length::Shrink).into()
+}
+
 fn wa_call_bar<'a>(
     call: &'a whatsapp::Call,
     video: impl Iterator<Item = &'a VideoTile>,
-    p: &theme::Palette,
+    share: Option<&'a [ShareChoice]>,
+    p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let status = match call.phase.as_str() {
@@ -5302,6 +5392,9 @@ fn wa_call_bar<'a>(
         .align_y(iced::Alignment::Center),
     ]
     .spacing(8);
+    if let Some(choices) = share.filter(|_| !call.screen) {
+        body = body.push(share_picker(choices, p, l));
+    }
     if let Some(tiles) = video_tiles(video, p) {
         body = body.push(tiles);
     }

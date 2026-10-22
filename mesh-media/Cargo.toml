@@ -1,0 +1,45 @@
+[package]
+name = "mesh-media"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A plain package (no workspace of its own): mesh-wa and mesh-dc take it as a path dependency
+# and build it inside theirs. Root Cargo.toml excludes it.
+
+[dependencies]
+# Errors, the same as both helpers use.
+anyhow = "1"
+# Warnings from capture threads (the helpers send them to stderr).
+log = "0.4"
+# H.264 encode/decode, and its SIMD RGBA<->I420; builds Cisco's C source, no system library.
+openh264 = "0.9"
+# JPEG thumbnails and self-view frames; jpeg only, no other codecs.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Screens and windows (Graphics Capture; GDI for thumbnails) and cameras (Media Foundation):
+# the OS's own APIs, through the `windows` crate cpal already pulls into both helpers, rather
+# than a capture crate on top.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

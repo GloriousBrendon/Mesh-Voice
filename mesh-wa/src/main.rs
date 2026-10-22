@@ -28,7 +28,8 @@ use whatsapp_rust::{ProfilePictureRequest, ProfilePictureTarget, ProfilePictureT
 use whatsapp_rust::wacore::net::HttpRequest;
 use whatsapp_rust::wacore_binary::JidExt as _;
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
-use whatsapp_rust::wacore::types::call::{CallAction, IncomingCall};
+use whatsapp_rust::voip::VideoUpgradeToken;
+use whatsapp_rust::wacore::types::call::{CallAction, IncomingCall, VideoState};
 
 use calls::{Call, Update};
 use store::{Message, Quote, Store};
@@ -163,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         asked_pics: HashSet::new(),
         calls_tx,
         internal_tx,
+        screen_id: String::new(),
     };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut ticks = 0u64;
@@ -238,6 +240,8 @@ struct App {
     asked_pics: HashSet<String>,
     calls_tx: UnboundedSender<Update>,
     internal_tx: UnboundedSender<Internal>,
+    /// The screen or window `callScreen` last named.
+    screen_id: String,
 }
 
 /// How many chats get their profile pictures looked up, from the top of the list.
@@ -707,10 +711,9 @@ impl App {
                 }
                 self.emit_call();
             }
-            // Turning ours off is what we already do.
-            "callCamera" | "callScreen" if arg(0) != "true" => self.emit_call(),
-            "callCamera" => emit("waCall", &json!({ "error": "native WhatsApp can't send your camera yet (you see theirs)" })),
-            "callScreen" => emit("waCall", &json!({ "error": "native WhatsApp can't share your screen yet" })),
+            "callCamera" => self.call_video(Some(arg(0) == "true"), None),
+            "callScreen" => self.call_video(None, Some((arg(0) == "true", arg(1)))),
+            "listSources" => list_sources(),
             other => warn!("unknown command {other}"),
         }
     }
@@ -1059,7 +1062,7 @@ impl App {
                 self.seq += 1;
                 let mut info = calls::info(call_id, &peer, name, "incoming");
                 (info.video, info.group) = (*is_video, group_jid.is_some());
-                self.call = Some(Call { seq: self.seq, info, incoming: Some(Box::new(call.clone())), handle: None });
+                self.call = Some(calls::call(self.seq, info, Some(Box::new(call.clone()))));
                 self.emit_call();
             }
             CallAction::Terminate { call_id, .. } => self.drop_ringing(call_id),
@@ -1091,9 +1094,16 @@ impl App {
         let name = self.store.name_of(chat_id);
         let mut info = calls::info("", chat_id, name, "outgoing");
         (info.video, info.group) = (video, peer.is_group());
-        self.call = Some(Call { seq: self.seq, info, incoming: None, handle: None });
-        self.emit_call();
-        calls::dial(self.client.clone(), peer, video, self.seq, self.calls_tx.clone());
+        let mut call = calls::call(self.seq, info, None);
+        let ends = video.then(|| (call.video.attach(), call.video.sink.clone()));
+        let keyframe = call.video.keyframe.clone();
+        self.call = Some(call);
+        if video {
+            self.call_video(Some(true), None);
+        } else {
+            self.emit_call();
+        }
+        calls::dial(self.client.clone(), peer, ends, keyframe, self.seq, self.calls_tx.clone());
     }
 
     fn call_accept(&mut self, video: bool) {
@@ -1103,7 +1113,70 @@ impl App {
         let Some(incoming) = call.incoming.take() else { return };
         call.info.phase = "connecting".into();
         call.info.video &= video;
-        calls::answer(self.client.clone(), incoming, call.info.video, call.seq, self.calls_tx.clone());
+        let ends = call.info.video.then(|| (call.video.attach(), call.video.sink.clone()));
+        calls::answer(self.client.clone(), incoming, ends, call.video.keyframe.clone(), call.seq, self.calls_tx.clone());
+        if call.info.video {
+            self.call_video(Some(true), None);
+        } else {
+            self.emit_call();
+        }
+    }
+
+    /// Our camera or screen share on or off. Sharing the screen takes over from the camera (a
+    /// call carries one video of ours), and the camera comes back when sharing stops.
+    fn call_video(&mut self, camera: Option<bool>, screen: Option<(bool, String)>) {
+        let Some(call) = self.call.as_mut() else {
+            return emit("waCall", &json!({ "error": "no call" }));
+        };
+        if let Some(on) = camera {
+            call.info.camera = on;
+        }
+        if let Some((on, id)) = screen {
+            call.info.screen = on;
+            self.screen_id = id;
+        }
+        let want = if call.info.screen {
+            Some(calls::Source::Screen(self.screen_id.clone()))
+        } else if call.info.camera {
+            Some(calls::Source::Camera)
+        } else {
+            None
+        };
+        if let Err(e) = call.set_video(want, &self.calls_tx) {
+            let what = if call.info.screen { "screen share" } else { "camera" };
+            emit("waCall", &json!({ "error": format!("{what}: {e}") }));
+            if call.info.screen {
+                call.info.screen = false;
+                // Back to the camera if it was on, else nothing.
+                let fallback = call.info.camera.then_some(calls::Source::Camera);
+                if call.set_video(fallback, &self.calls_tx).is_err() {
+                    call.info.camera = false;
+                }
+            } else {
+                call.info.camera = false;
+            }
+        }
+        self.emit_call();
+    }
+
+    /// Their video changed (1:1 only: a group participant's doesn't change the call).
+    fn on_peer_video(&mut self, state: VideoState, token: Option<VideoUpgradeToken>) {
+        let Some(call) = self.call.as_mut().filter(|c| !c.info.group) else { return };
+        match state {
+            _ if state.is_upgrade_request() => match token {
+                Some(token) => call.accept_peer_video(token, &self.calls_tx),
+                None => return,
+            },
+            VideoState::UpgradeAccept | VideoState::Enabled => call.info.video = true,
+            VideoState::Stopped => return emit("waVideo", &json!({ "id": calls::PEER_ID, "ended": true })),
+            // They turned down our ask to make it a video call.
+            VideoState::UpgradeReject | VideoState::UpgradeRejectByTimeout if !call.info.video => {
+                call.video.stop();
+                (call.info.camera, call.info.screen) = (false, false);
+                emit("waCall", &json!({ "error": "they didn't switch to video" }));
+            }
+            _ => return,
+        }
         self.emit_call();
     }
 
@@ -1132,6 +1205,15 @@ impl App {
                 }
             }
             Update::Ended(seq) if Some(seq) == current => self.end_call(),
+            Update::PeerVideo(seq, state, token) if Some(seq) == current => self.on_peer_video(state, token),
+            Update::VideoFailed(seq, error) if Some(seq) == current => {
+                if let Some(call) = self.call.as_mut() {
+                    call.video.stop();
+                    (call.info.camera, call.info.screen) = (false, false);
+                }
+                emit("waCall", &json!({ "error": format!("video: {error}") }));
+                self.emit_call();
+            }
             _ => {}
         }
     }
@@ -1171,6 +1253,18 @@ async fn download(client: &Client, m: &wa::Message) -> Result<Vec<u8>, String> {
         return Err("nothing to download".into());
     };
     client.download(item, Default::default()).await.map_err(|e| format!("download failed: {e}"))
+}
+
+/// What Mesh can show in a call (`waSources`): cameras, then screens and windows with thumbnails.
+fn list_sources() {
+    tokio::task::spawn_blocking(|| {
+        let cameras: Vec<_> = mesh_media::list_cameras().into_iter().map(|c| json!({ "id": c.id, "name": c.name })).collect();
+        let sources: Vec<_> = mesh_media::list_sources()
+            .into_iter()
+            .map(|s| json!({ "id": s.id, "name": s.name, "kind": s.kind.as_str(), "thumbnail": B64.encode(&s.thumbnail_jpeg) }))
+            .collect();
+        emit("waSources", &json!({ "cameras": cameras, "sources": sources }));
+    });
 }
 
 fn hang_up(client: Arc<Client>, call: Call) {

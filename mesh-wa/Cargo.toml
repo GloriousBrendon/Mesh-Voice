@@ -16,8 +16,9 @@ cpal = "0.18"
 env_logger = "0.11"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 log = "0.4"
+# Capture (camera, screens, windows) and H.264 in and out, shared with mesh-dc.
+mesh-media = { path = "../mesh-media" }
 mp4 = "0.14"
-openh264 = "0.9"
 opus = "0.4"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 ringbuf = "0.5"

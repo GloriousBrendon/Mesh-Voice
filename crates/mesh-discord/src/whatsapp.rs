@@ -47,6 +47,8 @@ pub enum Event {
     Video(engine::Video),
     /// Lost the tab (closed, not logged in yet); reconnects on its own.
     Disconnected,
+    /// The cameras, screens and windows asked for with `WhatsApp::list_sources`.
+    Sources(Sources),
 }
 
 /// The call WhatsApp has going (one at a time).
@@ -132,6 +134,16 @@ impl Engine {
         }
         self.call("callScreen", &[flag(on)]);
     }
+    /// Shares one screen or window (a [`ShareSource::id`] from [`Sources`]) in the call,
+    /// in place of our camera while it lasts (native helper only; `call_screen(false)` stops).
+    pub fn call_screen_source(&self, source_id: &str) {
+        self.call("callScreen", &["true", source_id]);
+    }
+    /// Asks for the cameras, screens and windows there are, for a picker; answers with
+    /// `waSources` ([`Sources`]; native helper only).
+    pub fn list_sources(&self) {
+        self.call("listSources", &[]);
+    }
     /// Sends through WhatsApp Web's own send action; `reply_to` (a message
     /// id) quotes that message.
     pub fn send_message(&self, chat_id: &str, text: &str, reply_to: Option<&str>) {
@@ -210,6 +222,39 @@ pub fn gif_url(message_id: &str) -> String {
 /// back out of this (strip the `wa-file:` prefix).
 pub fn file_url(message_id: &str) -> String {
     format!("wa-file:{message_id}")
+}
+
+/// Cameras, screens and windows to show in a call: a `waSources` payload, the answer to
+/// `Engine::list_sources`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Sources {
+    pub cameras: Vec<Camera>,
+    /// Screens (the main one first), then windows front to back.
+    pub sources: Vec<ShareSource>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Camera {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ShareSource {
+    pub id: String,
+    pub name: String,
+    /// `screen` or `window`.
+    pub kind: String,
+    /// A JPEG up to 240 px wide, base64 (see [`ShareSource::thumbnail_jpeg`]).
+    #[serde(default)]
+    pub thumbnail: String,
+}
+
+impl ShareSource {
+    pub fn thumbnail_jpeg(&self) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.decode(&self.thumbnail).ok().filter(|b| !b.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -462,6 +507,7 @@ fn binding_event(name: &str, payload: &str) -> Option<Event> {
         "waQr" => engine::qr(payload).map(Event::Qr),
         "waCall" => call_event(payload),
         "waVideo" => engine::video(payload).map(Event::Video),
+        "waSources" => serde_json::from_str(payload).ok().map(Event::Sources),
         _ => None,
     }
 }
@@ -564,5 +610,10 @@ mod tests {
         assert_eq!((c.name.as_str(), c.phase.as_str(), c.video), ("Ruan", "incoming", true));
         assert!(matches!(binding_event("waCall", "null"), Some(Event::Call(Ok(None)))));
         assert!(matches!(binding_event("waCall", r#"{"error":"couldn't answer: no"}"#), Some(Event::Call(Err(e))) if e.contains("answer")));
+
+        let sources = r#"{"cameras":[{"id":"cam1","name":"HD Webcam"}],"sources":[{"id":"window:66974","name":"Notes","kind":"window","thumbnail":"aGk="}]}"#;
+        let s: Sources = serde_json::from_str(sources).expect("sources");
+        assert_eq!((s.cameras[0].name.as_str(), s.sources[0].kind.as_str()), ("HD Webcam", "window"));
+        assert_eq!((s.sources[0].id.as_str(), s.sources[0].thumbnail_jpeg()), ("window:66974", Some(b"hi".to_vec())));
     }
 }

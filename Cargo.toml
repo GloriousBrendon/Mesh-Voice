@@ -2,7 +2,7 @@
 resolver = "2"
 members = ["crates/mesh-core", "crates/mesh-discord", "crates/mesh-app"]
 # Its own workspace: whatsapp-rust's SQLite can't link next to matrix-sdk's.
-exclude = ["mesh-wa"]
+exclude = ["mesh-wa", "mesh-media"]
 
 [workspace.package]
 version = "0.1.0"
