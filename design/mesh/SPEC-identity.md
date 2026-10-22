@@ -1,6 +1,6 @@
 # Spec: `identity` (Mesh)
 
-Status: **DRAFT, awaiting approval.** Module 1 of the build order in
+Status: **REVISED 2026-10-22 with Brendon's answers to Q1–Q6; awaiting approval.** Module 1 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Carries over
 `GloriousBrendon/Mesh` `docs/IDENTITY_AND_KEY_MANAGEMENT.md` §1–4 where it
 still holds (noted inline).
@@ -34,7 +34,9 @@ What this module delivers:
 **User stories**
 
 - First launch: I pick a username and a password, and I have an ID. No email,
-  no phone number, no sign-up.
+  no phone number, no sign-up. Every later start asks for both again (unless I
+  turned on "keep unlocked on this device"), and neither is stored readably
+  anywhere.
 - I copy my ID, show its QR code, or make a code that lasts 24 hours and
   works once, and give that to a friend.
 - After we connect, we read out our safety number to check nobody is in the
@@ -49,7 +51,7 @@ What this module delivers:
 | # | Decision | Why |
 |---|---|---|
 | D1 | **Root key plus device keys.** The ID is the root public key. Each device has its own Ed25519 device key, certified by a root-signed device certificate. | iroh dials one key per running endpoint, so two of your devices online at the same time need different keys. Per-device keys also make removing a lost device possible. This settles the old doc's open question (§7). |
-| D2 | **The root secret is copied to every linked device** (encrypted in each keystore). | "Linking needs one existing device online" means any device must be able to link. If only the first device held the root key, losing it would freeze your devices forever. Cost: anyone who steals a device and its password holds your identity. In v1 the remedy is ID rotation, which is out of scope. See open question Q1. |
+| D2 | **The root secret is copied to every linked device** (encrypted in each keystore). | "Linking needs one existing device online" means any device must be able to link. If only the first device held the root key, losing it would freeze your devices forever. Cost: anyone who steals a device and its username and password holds your identity, and ID rotation is out of v1. Hence the strict password policy (D11). **Decided (Q1).** |
 | D3 | ID text is **bech32m** with prefix `mesh`: `mesh1` + 52 characters + a 6-character checksum (about 63 in all). | The checksum catches typos in copy-pasted IDs. It's the format the map already names. |
 | D4 | Friend codes are **8 Crockford base32 characters (40 bits)**, shown as `XXXX-XXXX`. Input ignores case and hyphens, and reads `I`/`L` as `1` and `O` as `0`. | Easy to read aloud, with no ambiguous characters. 40 bits plus a slow key derivation and rate limits make guessing too expensive (see Q3). |
 | D5 | A code's record is **encrypted and found under keys derived from the code**, so whoever stores it (a seed, or the DHT later) can't tell which ID it belongs to without breaking the code. | Seeds hold ciphertext only (map: seed hardening). |
@@ -57,6 +59,10 @@ What this module delivers:
 | D7 | Safety number: **60 digits (12 groups of 5)**, built from both IDs in sorted order, so both people see the same number. Also offered as a QR code. | The Signal pattern, which people know. Based on root IDs, so it doesn't change when either person adds a device. Refines the old doc's §3.4 BLAKE3 formula with domain separation. |
 | D8 | Device linking uses a **short typed code with SPAKE2** (a password-authenticated key exchange), not a long QR payload. | Desktops rarely have a camera aimed at another screen. SPAKE2 makes a short code safe: an attacker gets one guess per linking attempt. |
 | D9 | **One identity per install** in v1. | Mesh-Voice shows one account per network today. Multiple identities can come later. |
+| D10 | **Username and password together unlock the keystore.** Both go into the key derivation, and nothing on disk shows either, or the ID, before unlocking. | You asked that both be needed to make or open an account, without either being stored. A thief who copies the keystore has to guess both. **Decided (Q1).** |
+| D11 | **Weak passwords are refused**, not just warned about: at least 10 characters, a `zxcvbn` score of 3 or more out of 4, and not containing the username. The UI shows zxcvbn's hint ("add another word…"). | A stolen device plus a guessable password is a whole identity lost (D2). The same rule applies to changing the password, restoring a backup and setting up a linked device. **Decided (Q2).** |
+| D12 | **"Keep unlocked on this device"** is a toggle, **off by default**. When on, the keystore's data key is kept in the OS keyring (Windows Credential Manager, Linux Secret Service), and Mesh opens without asking. Turning it off deletes that entry. Where no keyring is available, the toggle is disabled and the UI says why. | Your call: opt in or out per device. It's only as safe as the OS login, and the toggle says so. **Decided (Q3).** |
+| D13 | **Friend codes are held by seeds only in v1.** The record format leaves room to publish on the BitTorrent DHT (pkarr) later. | Only a holder that can count and refuse lookups can enforce single use, revocation and rate limits; the DHT can't. **Decided (Q5).** |
 
 ## Behaviour
 
@@ -93,8 +99,10 @@ What this module delivers:
 ### Friend codes (D4, D5)
 
 - **Create**: `code = 40 random bits`. Options:
-  - expiry: 30 minutes, 1 hour, 6 hours, 12 hours, **24 hours (default)** or
-    7 days (see Q4);
+  - expiry: 30 minutes, 1 hour, 6 hours, 12 hours, 24 hours, **7 days
+    (default)**, or **never**. Never has to be chosen explicitly, and the UI
+    notes that the code works until you revoke it (Q4). A never-expiring
+    record stores `expires_at = 0`;
   - uses: **1 (default)**, 5, 10, 25 or unlimited.
 - **Derive**: `Argon2id(code, salt = "mesh/v1/code")` → 48 bytes:
   - `lookup_id` (16 bytes): the key the record is stored and found under;
@@ -108,7 +116,7 @@ What this module delivers:
 - **Revoke**: `CodeRevoke { lookup_id, sig_by_root }`. The holder deletes the
   record.
 - **Enforcement** of expiry, uses and lookup rate limits happens where the
-  record is held (`seed`). The client also refuses an expired record. Your
+  record is held: a seed in v1 (D13). The client also refuses an expired record. Your
   own active codes are listed in the keystore, so you can see and revoke
   them.
 - A code is only a pointer. Trust comes from the safety number (D7).
@@ -119,9 +127,11 @@ What this module delivers:
   pattern: `--data`, defaulting to `~/.local/share/mesh/node` or
   `%APPDATA%\mesh\node`.
 - Header (plaintext, authenticated as associated data): magic `MKS1`, format
-  version, Argon2id parameters, salt, the wrapped data key, and `root_id` (so
-  the unlock screen can show whose identity this is before the password is
-  entered).
+  version, Argon2id parameters, salt and the wrapped data key. **No ID and no
+  username** (D10): the unlock screen just asks for the username and password.
+- Key derivation input: `normalize(username) || 0x00 || password`. The
+  username is normalized by trimming spaces and lowercasing, so `Brendon` and
+  `brendon` both unlock; its display casing is kept inside the payload.
 - Argon2id settings: **m = 64 MiB, t = 3, p = 1**, stored in the header so
   they can be raised later without breaking old files. The goal is under 1 s
   to unlock on the Linux box; see success criteria.
@@ -131,12 +141,18 @@ What this module delivers:
 - Writes are atomic (temporary file, fsync, rename) with permissions 0600 on
   Unix. Secrets are wiped from memory (`zeroize`) when dropped and never
   logged.
-- **Password**: at least 8 characters; the UI warns about weak ones (see
-  Q2). The password can be changed, which re-wraps the data key. **A
-  forgotten password can't be recovered.** The ways back are a backup file or
-  relinking from another device. The UI says so at onboarding.
-- **Backup**: `export(path, password)` writes the same format with a fresh
-  salt, holding the root key and username. A restored device makes a new
+- **Password**: the D11 policy, enforced in `mesh-identity` itself, so no
+  caller can skip it. The password can be changed, which re-wraps the data
+  key. **A forgotten username or password can't be recovered.** The ways back
+  are a backup file or relinking from another device. The UI says so at
+  onboarding.
+- **Keep unlocked** (D12): with the toggle on, the data key sits in the OS
+  keyring under the service name `mesh-node` and an entry named by a random
+  per-install value. The unlock screen is skipped while that entry exists and
+  opens the keystore.
+- **Backup**: `export(path, username, password)` writes the same format with
+  a fresh salt, holding the root key and username, and is opened with the
+  same username and password. A restored device makes a new
   device key and certificate, signed with the restored root key. The old
   doc's §4.1 carries over. Shamir secret sharing (§4.2) and hardware keys are
   not in v1.
@@ -168,7 +184,8 @@ Existing device **E**, new device **N**:
    - E sends the root secret, the username and the device list, plus a new
      `DeviceCert` for N;
    - E publishes the device list with `seq + 1`.
-5. N sets its own password. Each device's keystore has its own password.
+5. N asks for the identity's username, then a password for this device (D11
+   policy). Each device's keystore has its own password.
 6. **Remove a device**: any device signs a new `DeviceList` with that device
    in `revoked`. Honest peers stop talking to it. Because of D2, a removed
    device that someone else controls still holds the root key; see Q1.
@@ -192,6 +209,8 @@ Dependencies, each justified, all RustCrypto or widely audited:
 | `bech32` | The `mesh1…` ID with its checksum. |
 | `spake2` | Device-link key exchange (D8). |
 | `zeroize` | Wiping secrets from memory. |
+| `zxcvbn` | The password strength check (D11). Its word lists add about 1 MB to the binary, which is the price of a real check rather than ad-hoc rules. |
+| `keyring` | The OS keyring for "keep unlocked" (D12): Credential Manager on Windows, Secret Service on Linux. |
 | `rand_core` / `getrandom` | OS randomness. |
 | `serde` + `postcard` | Encoding the encrypted keystore payload only (not signed bytes). |
 | `thiserror` | Typed errors the UI can show. |
@@ -220,9 +239,11 @@ cargo build --release -p mesh-app && cargo test -p mesh-app
 Helper protocol: the same as `mesh-wa` / `mesh-dc`. Commands arrive on stdin
 as `{"fn":..,"args":[..]}`; events go to stdout as
 `{"binding":..,"payload":"<json>"}`; logs go to stderr. Identity commands:
-`idStatus`, `idCreate(username, password)`, `idUnlock(password)`, `idLock`,
-`idChangePassword(old, new)`, `idExport(path, password)`,
-`idImport(path, backupPassword, newPassword)`, `codeCreate(ttl, uses)`,
+`idStatus`, `idCreate(username, password)`, `idUnlock(username, password)`,
+`idLock`, `idChangePassword(username, old, new)`, `idKeepUnlocked(on)`,
+`idCheckPassword(username, password)` (the D11 verdict and hint, for live
+feedback while typing), `idExport(path, username, password)`,
+`idImport(path, username, backupPassword, newPassword)`, `codeCreate(ttl, uses)`,
 `codeRevoke(code)`, `codeList`, `safetyNumber(otherId)`, `parseId(text)`.
 Events: `meshIdentity` (locked or unlocked, ID, username, devices),
 `meshCodes`, `meshError`.
@@ -335,54 +356,43 @@ impl MeshId {
 2. A new identity on first launch takes at most 2 screens in Mesh-Voice
    (username + password → done), with no network needed.
 3. Unlocking with the default parameters takes under 1 s on the Linux box and
-   the Windows PC (measured and recorded). A wrong password is rejected, and
-   rejects the same way whether the password or the file is wrong.
-4. Restarting Mesh-Voice keeps the identity; the unlock screen shows the ID's
-   username before the password is entered.
-5. ID text: typos in copied IDs are caught (checksum), and parse errors tell
+   the Windows PC (measured and recorded). A wrong username, a wrong password
+   or a damaged file all fail with the same message, so the failure gives no
+   hint which one was wrong.
+4. Restarting Mesh-Voice keeps the identity. The unlock screen asks for the
+   username and password and shows nothing about the identity before that.
+   With "keep unlocked" on, Mesh opens without asking; after turning it off,
+   it asks again and the keyring entry is gone.
+5. Weak passwords are refused (D11) when creating, changing, restoring and
+   linking, with zxcvbn's hint shown. Unit tests cover a dictionary word, a
+   short password, one containing the username, and a strong one.
+6. ID text: typos in copied IDs are caught (checksum), and parse errors tell
    you which kind of mistake it is.
-6. Friend codes: creation, listing, revocation and record verification work,
+7. Friend codes: creation, listing, revocation and record verification work,
    and records can't be read without the code.
-7. The safety number is identical on both machines for the same pair, in both
+8. The safety number is identical on both machines for the same pair, in both
    directions.
-8. Backup export → import on the other machine gives the same ID, with a new
+9. Backup export → import on the other machine gives the same ID, with a new
    device key.
-9. Linking: the in-memory E↔N test passes. A wrong code fails without
+10. Linking: the in-memory E↔N test passes. A wrong code fails without
    revealing anything about the code beyond "wrong".
-10. Test vectors are committed for every format.
-11. The two-machine check above passes.
+11. Test vectors are committed for every format.
+12. The two-machine check above passes.
+
+## Resolved questions (2026-10-22)
+
+- **Q1. Root key on every device?** Yes (D2). A username and password are
+  still needed to create or unlock an identity on each device, and neither is
+  stored (D10).
+- **Q2. Weak passwords?** Refused, not just warned about (D11).
+- **Q3. Unlock every launch?** "Keep unlocked on this device" is a toggle,
+  off by default (D12).
+- **Q4. Never-expiring codes?** Allowed when chosen explicitly. The default is
+  7 days.
+- **Q5. Where codes are held in v1?** Seeds only, as recommended (D13).
+- **Q6. Capability map.** Fixed: `social` depends on `routing` and gains
+  offline delivery when `mailbox` lands.
 
 ## Open questions
 
-- **Q1. Root key on every device (D2), or only on some?** I recommend every
-  device for v1, because it's the only way "any online device can link" holds
-  without one indispensable device. The cost is that a stolen device plus its
-  password owns the identity until ID rotation exists. The alternative is to
-  keep the root key only on the first device, so others can't link or remove
-  devices. Which do you want?
-- **Q2. Password policy.** Is a minimum of 8 characters with a weak-password
-  warning enough, or should weak passwords be refused outright? The keystore
-  only protects against someone who has your disk, so this is about offline
-  guessing.
-- **Q3. Unlock every launch, or "remember on this device"?** Discord never
-  asks. The options:
-  - (a) ask every time Mesh starts;
-  - (b) offer "keep unlocked on this device", which keeps the data key in the
-    OS keyring (Windows Credential Manager / Linux Secret Service), so it's
-    only as safe as your login;
-  - (c) (b) on by default.
-
-  I lean to (b), off by default.
-- **Q4. Friend-code limits.** Discord allows invites that never expire. I
-  propose 7 days at most for v1, because a code that lives forever is a
-  standing pointer anyone who sees it can use. Allow "never"?
-- **Q5. Where codes are held in v1.** Seeds can enforce single-use, revocation
-  and rate limits. The BitTorrent DHT (pkarr) can't enforce single-use or rate
-  limits: anyone can read a record as often as they like until it expires. I
-  propose seeds only for v1, using the same record format so the DHT can be
-  added later. OK?
-- **Q6. Capability map inconsistency (not identity).** The table says
-  `social` depends on `mailbox`, but the build order puts `social` before
-  `mailbox`. I'd read it as "social works between online peers first, and
-  gains offline delivery when `mailbox` lands", and change the table to
-  `social: routing (+ mailbox later)`. OK to fix the map that way?
+None left for this module.

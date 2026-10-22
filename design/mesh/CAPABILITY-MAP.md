@@ -30,7 +30,7 @@ other.
 | `routing` | Reaching someone by ID: first friends, then a blinded friend-of-friend lookup a few hops deep, then seed rendezvous as a fallback; sharing your current address with friends | transport, seed | new |
 | `e2ee` | End-to-end encryption for 1:1 chats, groups and Spaces, with forward secrecy (MLS, or Signal-style ratchets); sealed sender for relayed mail | identity | IDENTITY §1, SECURITY_THREAT_MODEL |
 | `mailbox` | Store-and-forward: friends and seeds hold encrypted mail for someone offline, with an expiry and quotas, and deliver it when they come back | routing, e2ee | CONTENT_STORAGE §7, ABUSE §3 |
-| `social` | Friend requests (send by ID, accept, decline), friends list, blocking, presence (online, idle, DND, invisible) | routing, mailbox | PRESENCE_SYSTEM, ABUSE §5 |
+| `social` | Friend requests (send by ID, accept, decline), friends list, blocking, presence (online, idle, DND, invisible) | routing (works between online peers first; gains offline delivery when `mailbox` lands) | PRESENCE_SYSTEM, ABUSE §5 |
 | `dm` | 1:1 and group DMs: send, edit, delete, reply, react, typing, read state, attachments, history sync between devices | social, e2ee, mailbox | CONTENT_STORAGE §4–6 |
 | `spaces` | Servers: channels and categories, roles and permissions, invites, signed append-only logs replicated among members, moderation (kick, ban, delete), attachments | e2ee, mailbox, routing | SPACE_ARCHITECTURE §1–5 |
 | `calls` | Voice, video and screen share in DMs and voice channels: a direct link 1:1, a relay tree of the nearest members in groups, SFrame E2EE so relays carry only ciphertext. Reuses `mesh-media` and Opus | social, spaces, transport | VOICE_VIDEO_ARCHITECTURE §3–7 (without mediasoup) |
