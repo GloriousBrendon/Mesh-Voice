@@ -114,7 +114,11 @@ impl State {
 /// ponytail: no RESUME, full re-identify on every drop; add resume if the
 /// reconnect rate ever trips Discord's identify limits.
 pub async fn run(token: String, state: &tokio::sync::Mutex<State>, events: mpsc::UnboundedSender<Event>, cmds: &mut mpsc::UnboundedReceiver<Cmd>) {
+    // Seconds to wait before the next try: doubles on quick failures, so a
+    // bug can't turn into an identify storm on the account.
+    let mut wait = 5;
     loop {
+        let started = std::time::Instant::now();
         match session(&token, state, &events, cmds).await {
             Err(e) if e == "invalid session" => {
                 let _ = events.send(Event::InvalidSession);
@@ -126,7 +130,8 @@ pub async fn run(token: String, state: &tokio::sync::Mutex<State>, events: mpsc:
         if events.is_closed() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        wait = if started.elapsed().as_secs() > 300 { 5 } else { (wait * 2).min(300) };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
     }
 }
 
@@ -141,7 +146,6 @@ async fn session(token: &str, state: &tokio::sync::Mutex<State>, events: &mpsc::
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(41_250));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut seq: Option<u64> = None;
-    let mut identified = false;
 
     loop {
         tokio::select! {
@@ -160,13 +164,13 @@ async fn session(token: &str, state: &tokio::sync::Mutex<State>, events: &mpsc::
                         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                         heartbeat.tick().await; // consume the immediate first tick
                         ws.send(Ws::text(identify(token))).await.map_err(|e| e.to_string())?;
-                        identified = true;
                     }
                     Some(1) => {
                         ws.send(Ws::text(json!({ "op": 1, "d": seq }).to_string())).await.map_err(|e| e.to_string())?;
                     }
                     Some(11) => {}
-                    Some(9) => return Err(if identified { "invalid session".into() } else { "session invalidated".into() }),
+                    // Not a bad token (that's close 4004): identify again after the backoff.
+                    Some(9) => return Err("session invalidated".into()),
                     Some(0) => {
                         let t = v["t"].as_str().unwrap_or("");
                         if dispatch(t, &v["d"], state, events).await {
@@ -235,22 +239,28 @@ fn inflate_payload(msg: &Ws, inflate: &mut Decompress, buf: &mut Vec<u8>) -> R<O
     let data = match msg {
         Ws::Binary(b) => b.as_ref(),
         Ws::Text(t) => return Ok(Some(t.as_bytes().to_vec())),
-        Ws::Close(_) => return Err("gateway sent close".into()),
+        // 4004: the token is no good (signed out elsewhere, or reset).
+        Ws::Close(Some(f)) if u16::from(f.code) == 4004 => return Err("invalid session".into()),
+        Ws::Close(f) => return Err(format!("gateway sent close {:?}", f.as_ref().map(|f| u16::from(f.code)))),
         _ => return Ok(None),
     };
     buf.extend_from_slice(data);
     if buf.len() < 4 || buf[buf.len() - 4..] != [0, 0, 0xff, 0xff] {
         return Ok(None);
     }
+    // `decompress_vec` only fills spare capacity, so keep going until a pass
+    // has eaten all the input and still left room: then nothing's held back.
     let mut out = Vec::with_capacity(buf.len() * 4);
-    let before = inflate.total_in();
-    inflate.decompress_vec(buf, &mut out, flate2::FlushDecompress::Sync).map_err(|e| e.to_string())?;
-    // Grow once if the first pass didn't consume everything.
-    while inflate.total_in() - before < buf.len() as u64 {
-        let n = out.len();
-        out.reserve(n.max(4096));
-        let consumed = (inflate.total_in() - before) as usize;
+    let start = inflate.total_in();
+    loop {
+        let consumed = (inflate.total_in() - start) as usize;
+        if out.capacity() - out.len() < 4096 {
+            out.reserve(out.capacity().max(4096));
+        }
         inflate.decompress_vec(&buf[consumed..], &mut out, flate2::FlushDecompress::Sync).map_err(|e| e.to_string())?;
+        if (inflate.total_in() - start) as usize == buf.len() && out.len() < out.capacity() {
+            break;
+        }
     }
     buf.clear();
     Ok(Some(out))
@@ -522,6 +532,22 @@ mod tests {
         // The rest completes the frame and decodes to the original message.
         let out = inflate_payload(&Ws::binary(packet[1..].to_vec()), &mut inflate, &mut buf).unwrap();
         assert_eq!(out.as_deref(), Some(&msg[..]));
+    }
+
+    #[test]
+    fn zlib_stream_inflates_big_messages_whole() {
+        // Compresses far more than 4x: the case that used to come out cut short.
+        use flate2::{Compress, Compression, FlushCompress};
+        let mut comp = Compress::new(Compression::default(), true);
+        let mut inflate = Decompress::new(true);
+        let mut buf = Vec::new();
+        for n in [200_000usize, 50] {
+            let msg = format!(r#"{{"op":0,"d":"{}"}}"#, "a".repeat(n));
+            let mut packet = Vec::with_capacity(msg.len() + 1024);
+            comp.compress_vec(msg.as_bytes(), &mut packet, FlushCompress::Sync).unwrap();
+            let out = inflate_payload(&Ws::binary(packet), &mut inflate, &mut buf).unwrap().unwrap();
+            assert_eq!(out, msg.as_bytes());
+        }
     }
 
     #[test]
