@@ -43,3 +43,12 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Screens and windows through the desktop's own picker (xdg-desktop-portal ScreenCast, frames over
+# PipeWire), cameras through V4L2.
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screencast"] }
+pipewire = "0.10"
+v4l = "0.14"
+# Waits on the portal calls (ashpd runs on zbus's own executor thread with async-io).
+async-io = "2"

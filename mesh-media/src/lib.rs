@@ -1,6 +1,7 @@
 //! Video for Mesh's native helpers: what to share (cameras, screens, windows), capturing it, and
-//! H.264 in and out. Windows has real capture (GDI for screens and windows, Media Foundation for
-//! cameras); elsewhere listing is empty and capture fails with "not supported on this platform".
+//! H.264 in and out. Windows captures with GDI / Graphics Capture and Media Foundation; Linux with
+//! the xdg-desktop-portal ScreenCast picker over PipeWire and V4L2 (see `linux.rs`). Elsewhere
+//! listing is empty and capture fails with "not supported on this platform".
 //!
 //! ```text
 //! list_cameras() -> Vec<Camera { id, name }>
@@ -31,7 +32,11 @@ use openh264::formats::{RgbaSliceU8, YUVBuffer, YUVSource as _};
 #[path = "windows.rs"]
 mod sys;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "linux.rs"]
+mod sys;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 mod sys {
     use super::*;
 
@@ -195,7 +200,7 @@ fn start(open: impl FnOnce() -> Result<Box<dyn Grab>> + Send + 'static) -> Resul
 }
 
 /// `w`×`h` scaled to `max_width` at most, both even and at least 2.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn fit(w: u32, h: u32, max_width: u32) -> (u32, u32) {
     let (w, h) = (w.max(2), h.max(2));
     let (w2, h2) = if w > max_width.max(2) { (max_width, (h as u64 * max_width as u64 / w as u64) as u32) } else { (w, h) };
@@ -203,7 +208,7 @@ pub(crate) fn fit(w: u32, h: u32, max_width: u32) -> (u32, u32) {
 }
 
 /// BGRA rows `pitch` bytes apart, `sw`×`sh`, box-filtered down to `dw`×`dh` RGBA (no larger).
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub(crate) fn shrink(bgra: &[u8], pitch: usize, (sw, sh): (usize, usize), (dw, dh): (usize, usize)) -> Vec<u8> {
     // Each source column and row belongs to one output column and row; sum them, then average.
     let cols: Vec<usize> = (0..sw).map(|x| x * dw / sw).collect();
@@ -387,6 +392,22 @@ mod tests {
             let frame = capture.recv_timeout(Duration::from_secs(5)).unwrap().expect("a window frame");
             assert!(frame.width <= 640);
         }
+    }
+
+    /// Opens the desktop's share picker (pick something): run by hand with `cargo test -- --ignored`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn captures_a_screen_through_the_portal() {
+        assert_eq!(list_sources().len(), 1);
+        let capture = Capture::source("", Opts { fps: 15, max_width: 1280 }).unwrap();
+        let frames: Vec<Frame> = (0..15).map_while(|_| capture.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
+        let frame = frames.last().expect("a frame");
+        assert!(frame.width <= 1280 && frame.width % 2 == 0 && frame.height % 2 == 0);
+        assert!(frame.rgba.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]), "an all-black screen");
+        let fps = (frames.len() - 1) as f64 / frame.at.duration_since(frames[0].at).as_secs_f64();
+        eprintln!("{}x{}, {fps:.1} fps", frame.width, frame.height);
+        std::fs::write(std::env::temp_dir().join("mesh-media-screen.jpg"), frame.jpeg(1280, 80).unwrap()).unwrap();
     }
 
     /// Turns the camera on: run by hand with `cargo test -- --ignored`.
