@@ -1,7 +1,6 @@
 # Capability Map: Mesh (serverless Discord)
 
-Status: **DRAFT.** Decisions from 2026-10-22 recorded below; awaiting the
-answer on short friend codes before the `identity` spec.
+Status: **APPROVED 2026-10-22.** Next step: the `identity` spec (`design/mesh/SPEC-identity.md`).
 
 **What Mesh is:** Discord without servers. Every install is a node. There is
 no account to register: your identity is a keypair, and your ID is your public
@@ -82,12 +81,21 @@ chat while both of you are online. `mailbox` adds offline delivery.
   open to the internet. Admin is over Tailscale only. It runs in a container
   that holds nothing readable: ciphertext only, with quotas, expiry and rate
   limits. The `seed` spec covers this.
-- **IDs must be short enough to share by hand**, around 8 characters. This
-  needs a design choice; see open question 1.
+- **IDs: a long permanent ID plus short friend codes.**
+  - The permanent ID is the public key. It travels in QR codes, `mesh://`
+    links and copy and paste.
+  - Friend codes are what people share by hand, like `K7QM-3XPA`. They work
+    like Discord invites: they expire (24 hours by default), can be single-use
+    and can be revoked, and lookups are rate-limited.
+  - After a request, both people can compare a safety number.
+- **Blocking is per account, kept on your devices.** You keep the ID of anyone
+  you've blocked, and the list syncs to your other devices. ID rotation is not
+  in version 1.
+- **Linking a device needs one of your existing devices online.** There is no
+  server copy: the new device syncs from your existing one.
+- **A second seed on a VPS comes after testing**, once the homelab seed is
+  shown to work.
 
 ## Open questions
 
-1. **Short friend codes** (see the `identity` notes): a permanent full ID plus
-   short codes that expire and resolve to it?
-2. **ID rotation** if a code or ID leaks to spammers: version 1, or later?
-3. **A second seed on a cheap VPS**, so Mesh works when the homelab is down?
+None at the map level. Each module spec has its own.
