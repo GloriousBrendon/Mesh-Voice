@@ -116,6 +116,13 @@ platform data dir (`~/.local/share/mesh` on Linux).
 
 ## Windows
 
+`installeruild.ps1` builds Mesh, both helpers and `dist\Mesh-Setup-<version>.exe`
+(needs [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+`winget install JRSoftware.InnoSetup --scope user`). The setup installs per user
+without an admin prompt, adds Mesh to the Start menu and Settings → Apps, and
+can add a desktop shortcut and start Mesh at sign-in. Uninstalling keeps your
+accounts and chats in `%APPDATA%\mesh`.
+
 The whole stack is pure Rust — build on a Windows machine with
 `cargo build --release`, or cross-compile with
 `cargo build --target x86_64-pc-windows-gnu` (needs `mingw-w64`).
