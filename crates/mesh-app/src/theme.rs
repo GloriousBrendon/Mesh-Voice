@@ -353,6 +353,8 @@ pub struct Config {
     pub discord_native_wrapper: Option<Vec<String>>,
     /// Read gaps/border/rounding from hyprland.conf (default on).
     pub layout_from_hyprland: Option<bool>,
+    /// Use the desktop's fonts (fontconfig, Linux) instead of the bundled ones (default on).
+    pub font_from_system: Option<bool>,
     pub density: Option<Density>,
     #[serde(default)]
     pub extras: Extras,

@@ -1,6 +1,8 @@
 //! Styled building blocks for the tiled shell. Colors come from the
 //! [`Palette`], sizes from the [`Layout`]; nothing here hardcodes either.
 
+use std::sync::LazyLock;
+
 use iced::font::Weight;
 use iced::widget::{Space, Text, button, container, stack, svg, text, tooltip};
 use iced::{Alignment, Color, Element, Font, Length, border};
@@ -8,8 +10,20 @@ use iced::{Alignment, Color, Element, Font, Length, border};
 use crate::Message;
 use crate::theme::{Layout, Palette, alpha, mix};
 
-pub const SANS: Font = Font::with_name("IBM Plex Sans");
-pub const MONO: Font = Font::with_name("JetBrains Mono");
+/// The desktop's fonts on Linux (fontconfig's `sans-serif` and `monospace`), else the bundled ones.
+pub static SANS: LazyLock<Font> = LazyLock::new(|| desktop_font("sans-serif").unwrap_or(Font::with_name("IBM Plex Sans")));
+pub static MONO: LazyLock<Font> = LazyLock::new(|| desktop_font("monospace").unwrap_or(Font::with_name("JetBrains Mono")));
+
+/// fontconfig's pick for `generic`, unless `font_from_system = false`.
+// ponytail: read once at startup; a font change shows after restarting Mesh.
+fn desktop_font(generic: &str) -> Option<Font> {
+    if !cfg!(target_os = "linux") || crate::theme::load_config(&crate::config_path()).font_from_system == Some(false) {
+        return None;
+    }
+    let out = std::process::Command::new("fc-match").args(["-f", "%{family[0]}", generic]).output().ok()?;
+    let family = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    (!family.is_empty()).then(|| Font::with_name(family.leak()))
+}
 
 /// The bundled fonts, registered at startup so Linux and Windows look the same.
 pub const FONTS: [&[u8]; 5] = [
@@ -97,15 +111,15 @@ pub fn weight(font: Font, weight: Weight) -> Font {
 
 /// Sans text in a given weight.
 pub fn sans<'a>(content: impl text::IntoFragment<'a>, size: f32, w: Weight, color: Color) -> Text<'a> {
-    text(content).font(weight(SANS, w)).size(size).color(color)
+    text(content).font(weight(*SANS, w)).size(size).color(color)
 }
 
 pub fn mono<'a>(content: impl text::IntoFragment<'a>, size: f32, color: Color) -> Text<'a> {
-    text(content).font(MONO).size(size).color(color)
+    text(content).font(*MONO).size(size).color(color)
 }
 
 pub fn mono_bold<'a>(content: impl text::IntoFragment<'a>, size: f32, color: Color) -> Text<'a> {
-    text(content).font(weight(MONO, Weight::Bold)).size(size).color(color)
+    text(content).font(weight(*MONO, Weight::Bold)).size(size).color(color)
 }
 
 /// A section label: mono 11, uppercase, muted.

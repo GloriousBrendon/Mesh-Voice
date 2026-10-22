@@ -25,6 +25,10 @@ Mesh wears your desktop. By default it follows your rice:
   with `MESH_THEME_FILE`). The other colours (bright and muted text, borders,
   text on accent) are derived, and muted text is lightened until it passes
   4.5:1 contrast.
+- **Fonts** from fontconfig on Linux (`fc-match sans-serif` and `monospace`),
+  read when Mesh starts. Set `font_from_system = false` in `config.toml` to
+  use the bundled IBM Plex Sans and JetBrains Mono instead (Windows always
+  does).
 - **Gaps, border width and rounding** from `~/.config/hypr/hyprland.conf`
   (`general { gaps_in gaps_out border_size }`, `decoration { rounding }`,
   following `source = …` includes). Set `layout_from_hyprland = false` in

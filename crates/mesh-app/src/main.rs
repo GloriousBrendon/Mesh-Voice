@@ -5917,7 +5917,7 @@ fn link_segments(s: &str) -> Vec<(bool, &str)> {
 
 /// Prose with `inline code` spans and clickable links.
 fn prose<'a>(body: &'a str, all_mono: bool, color: iced::Color, p: &theme::Palette) -> Element<'a, Message> {
-    let font = if all_mono { ui::MONO } else { ui::SANS };
+    let font = if all_mono { *ui::MONO } else { *ui::SANS };
     let size = if all_mono { 12.0 } else { 14.0 };
     let has_link = body.contains("http://") || body.contains("https://");
     if !body.contains('`') && !has_link {
@@ -5929,7 +5929,7 @@ fn prose<'a>(body: &'a str, all_mono: bool, color: iced::Color, p: &theme::Palet
         if i % 2 == 1 {
             spans.push(
                 iced::widget::span(part)
-                    .font(ui::MONO)
+                    .font(*ui::MONO)
                     .size(12)
                     .color(code_fg)
                     .background(code_fill)
@@ -7130,7 +7130,7 @@ fn add_friend_view<'a>(
         .on_submit(Message::FriendSend)
         .padding([10, 0])
         .size(14)
-        .font(ui::MONO)
+        .font(*ui::MONO)
         .style(move |_, _| text_input::Style {
             background: iced::Color::TRANSPARENT.into(),
             border: iced::Border::default(),
@@ -7337,7 +7337,7 @@ fn join_server_view<'a>(
         .on_submit(Message::JoinServerSubmit)
         .padding([10, 0])
         .size(14)
-        .font(ui::MONO)
+        .font(*ui::MONO)
         .style(move |_, _| text_input::Style {
             background: iced::Color::TRANSPARENT.into(),
             border: iced::Border::default(),
@@ -7489,7 +7489,7 @@ fn main() -> iced::Result {
     let app = ui::FONTS
         .into_iter()
         .fold(iced::daemon(boot, update, view), |app, font| app.font(font));
-    app.default_font(ui::SANS)
+    app.default_font(*ui::SANS)
         .theme(theme)
         .subscription(subscription)
         .title("Mesh")
