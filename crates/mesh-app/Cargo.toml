@@ -33,3 +33,7 @@ winresource = "0.1"
 # Notification-area icon; Linux needs none (and would pull in GTK).
 tray-icon = { version = "0.26.1", default-features = false }
 windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
+
+# Tray icon over D-Bus (StatusNotifierItem: Waybar, KDE, …); zbus is already in the tree, no GTK.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.3.7"

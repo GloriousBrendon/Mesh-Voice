@@ -1221,14 +1221,26 @@ fn boot() -> (App, Task<Message>) {
             screen,
             rain_time: 0.0,
         },
-        Task::batch([
-            task,
-            // The title bar takes the theme's colors once the window exists.
-            iced::window::latest()
-                .and_then(iced::window::raw_id::<Message>)
-                .map(Message::WindowReady),
-        ]),
+        Task::batch([task, open_window()]),
     )
+}
+
+/// Opens Mesh's window; the title bar takes the theme's colors once it exists.
+fn open_window() -> Task<Message> {
+    let (_, opened) = iced::window::open(window_settings());
+    opened.then(iced::window::raw_id::<Message>).map(Message::WindowReady)
+}
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        icon: iced::window::icon::from_file_data(include_bytes!("../assets/mesh.png"), None).ok(),
+        // Closing goes to the tray, or quits: see `CloseRequested`.
+        exit_on_close_request: false,
+        // Wayland takes the icon from the .desktop file named after this.
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific { application_id: "mesh".into(), ..Default::default() },
+        ..iced::window::Settings::default()
+    }
 }
 
 /// Enters the logged-in screen and kicks off the room list load plus the
@@ -2006,16 +2018,25 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Tray(tray::Action::Quit) => iced::exit(),
-        Message::Tray(tray::Action::Show) => iced::window::latest().and_then(|id| {
-            Task::batch([iced::window::set_mode(id, iced::window::Mode::Windowed), iced::window::gain_focus(id)])
+        Message::Tray(tray::Action::Show) => iced::window::latest().then(|id| match id {
+            Some(id) => Task::batch([iced::window::set_mode(id, iced::window::Mode::Windowed), iced::window::gain_focus(id)]),
+            None => open_window(),
         }),
-        Message::CloseRequested(id) => {
-            if state.tray {
-                iced::window::set_mode(id, iced::window::Mode::Hidden)
-            } else {
-                iced::exit()
-            }
+        Message::Tray(tray::Action::Gone) => {
+            state.tray = false;
+            Task::none()
         }
+        // Wayland can't hide a window, so there it closes and the tray opens a new one.
+        // Unfocused, so notifications show while it's away (a closed window may not say so).
+        Message::CloseRequested(id) if state.tray && cfg!(windows) => {
+            state.window_focused = false;
+            iced::window::set_mode(id, iced::window::Mode::Hidden)
+        }
+        Message::CloseRequested(id) if state.tray => {
+            state.window_focused = false;
+            iced::window::close(id)
+        }
+        Message::CloseRequested(_) => iced::exit(),
         Message::WindowReady(raw_id) => {
             titlebar::set_window(raw_id);
             titlebar::paint(&state.palette);
@@ -3379,7 +3400,7 @@ fn reload_theme(state: &mut App) {
     state.theme_stamps = theme::stamps(&state.theme_files);
 }
 
-fn theme(state: &App) -> IcedTheme {
+fn theme(state: &App, _: iced::window::Id) -> IcedTheme {
     state.iced_theme.clone()
 }
 
@@ -3566,7 +3587,7 @@ fn jump_matches(session: &Session) -> Vec<&RoomSummary> {
         .collect()
 }
 
-fn view(state: &App) -> Element<'_, Message> {
+fn view(state: &App, _: iced::window::Id) -> Element<'_, Message> {
     let content = match &state.screen {
         Screen::Booting => center_text("Restoring session..."),
         Screen::LoggedOut(form) => login_view(form, false, state),
@@ -7467,17 +7488,11 @@ fn main() -> iced::Result {
 
     let app = ui::FONTS
         .into_iter()
-        .fold(iced::application(boot, update, view), |app, font| app.font(font));
+        .fold(iced::daemon(boot, update, view), |app, font| app.font(font));
     app.default_font(ui::SANS)
         .theme(theme)
         .subscription(subscription)
         .title("Mesh")
-        .window(iced::window::Settings {
-            icon: iced::window::icon::from_file_data(include_bytes!("../assets/mesh.png"), None).ok(),
-            // Closing hides to the tray (Windows) or quits: see `CloseRequested`.
-            exit_on_close_request: false,
-            ..iced::window::Settings::default()
-        })
         .run()
 }
 
