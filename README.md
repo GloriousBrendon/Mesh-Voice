@@ -116,7 +116,7 @@ platform data dir (`~/.local/share/mesh` on Linux).
 
 ## Windows
 
-`installeruild.ps1` builds Mesh, both helpers and `dist\Mesh-Setup-<version>.exe`
+`installerbuild.ps1` builds Mesh, both helpers and `dist\Mesh-Setup-<version>.exe`
 (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php):
 `winget install JRSoftware.InnoSetup --scope user`). The setup installs per user
 without an admin prompt, adds Mesh to the Start menu and Settings → Apps, and
