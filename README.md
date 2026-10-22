@@ -90,8 +90,11 @@ build them with `cargo build --release` in `mesh-wa/` and `mesh-dc/` (they need
 `cmake` and `clang`, plus ALSA headers on Linux) and put the binaries next to
 Mesh's own. Mesh uses a helper when it finds it there and the engine browser
 otherwise. Link WhatsApp from the QR code on the Accounts page; sign in to
-Discord there with email and password (or its QR code). Not native yet: video
-and screen sharing.
+Discord there with email and password (or its QR code). WhatsApp calls can
+send your camera or screen: on Linux the camera is any V4L2 webcam, and
+"Choose a screen or window…" opens your desktop's own share picker
+(xdg-desktop-portal, frames over PipeWire). Discord video and screen sharing
+are left out on purpose.
 
 On Linux, where Discord goes through a VPN, have `mesh-dc` run inside the
 VPN's network namespace too, or it connects from your own IP. In
@@ -100,7 +103,13 @@ helper (it must work without a password prompt: Mesh has no terminal):
 
 ```toml
 discord_native_wrapper = ["sudo", "-n", "ip", "netns", "exec", "vpn", "sudo", "-n", "-u", "you"]
+# or a rootless launcher that runs its arguments inside the tunnel:
+discord_native_wrapper = ["/home/you/.local/bin/discord-voice"]
 ```
+
+The wrapper must pass stdin through to the helper (a shell script that starts
+it with `&` hands it `/dev/null` instead), and Mesh stops it with SIGKILL, so
+anything it starts should go down when the helper's stdin closes.
 
 If the wrapper can't start, Discord stays offline; it never falls back to a
 direct connection.
@@ -113,6 +122,17 @@ cargo run -p mesh-app
 
 Session data (access token + sqlite store, including E2EE keys) is kept in the
 platform data dir (`~/.local/share/mesh` on Linux).
+
+## Linux
+
+`installer/install-linux.sh` builds Mesh and both helpers and installs them
+for your user: `mesh`, `mesh-wa` and `mesh-dc` in `~/.local/bin`, Mesh's icon
+and a `.desktop` entry. `mesh-dc` is left out until `discord_native_wrapper`
+is set. `--uninstall` removes them and keeps your accounts and chats.
+
+With a tray (Waybar's `tray` module, KDE, …) Mesh puts its icon there, and
+closing the window keeps Mesh running, calls and helpers included; click the
+icon to bring it back, or quit from its menu. Without one, closing quits.
 
 ## Windows
 
