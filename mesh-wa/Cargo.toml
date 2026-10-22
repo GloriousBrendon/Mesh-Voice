@@ -1,0 +1,27 @@
+[package]
+name = "mesh-wa"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: whatsapp-rust links libsqlite3-sys 0.38, Mesh's matrix-sdk 0.35.
+[workspace]
+
+[dependencies]
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "3870ce5c3d5d856e7cb3cc7f3a0cbbf6fcf24f8e", features = ["voip-mlow", "voip-relay-native"] }
+anyhow = "1"
+async-channel = "2.5"
+base64 = "0.22"
+cpal = "0.18"
+env_logger = "0.11"
+log = "0.4"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+ringbuf = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

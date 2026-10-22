@@ -88,6 +88,9 @@ struct App {
     discord_socket: Option<PathBuf>,
     /// Command that starts it (`discord_engine_command`).
     discord_command: Option<String>,
+    /// The native WhatsApp helper beside Mesh's own binary, when it's there;
+    /// WhatsApp then runs in it instead of the engine browser.
+    whatsapp_native: Option<PathBuf>,
     /// Handle to drive it, while connected.
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
@@ -1098,6 +1101,7 @@ fn boot() -> (App, Task<Message>) {
     let iced_theme = palette.to_iced_theme();
     let theme_files = theme::watched_files(&theme_choice, &theme_path());
 
+    let whatsapp_native = whatsapp_native();
     // Start the hidden Discord client (once) if it isn't running yet.
     if let (Some(socket), Some(cmd)) = (discord_socket(&config), &config.discord_engine_command)
         && !mesh_discord::is_running(&socket)
@@ -1112,6 +1116,7 @@ fn boot() -> (App, Task<Message>) {
             .linked
             .iter()
             .filter_map(|id| mesh_core::networks::spec(id))
+            .filter(|spec| !(spec.id == "wa" && whatsapp_native.is_some()))
             .filter_map(|spec| Some((spec.engine?, spec.login_url?)))
             .collect();
         std::thread::spawn(move || {
@@ -1158,6 +1163,7 @@ fn boot() -> (App, Task<Message>) {
             theme_reloaded: Local::now().format("%H:%M").to_string(),
             discord_socket: discord_socket(&config),
             discord_command: config.discord_engine_command.clone(),
+            whatsapp_native: whatsapp_native.clone(),
             discord: None,
             discord_state: None,
             whatsapp: None,
@@ -3259,9 +3265,10 @@ fn subscription(state: &App) -> Subscription<Message> {
             Some(socket) => Subscription::run_with(socket.clone(), discord_events),
             None => Subscription::none(),
         },
-        match &state.discord_socket {
-            Some(socket) => Subscription::run_with(socket.clone(), whatsapp_events),
-            None => Subscription::none(),
+        match (&state.whatsapp_native, &state.discord_socket) {
+            (Some(exe), _) => Subscription::run_with(exe.clone(), whatsapp_native_events),
+            (None, Some(socket)) => Subscription::run_with(socket.clone(), whatsapp_events),
+            (None, None) => Subscription::none(),
         },
         // Drive the animated background at ~15 fps (only while it's on).
         if state.extras.digital_rain {
@@ -3358,6 +3365,27 @@ fn whatsapp_events(socket: &PathBuf) -> impl iced::futures::Stream<Item = Messag
         use iced::futures::SinkExt;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(whatsapp::run(socket, tx));
+        while let Some(event) = rx.recv().await {
+            if output.send(Message::WhatsApp(event)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// `mesh-wa` next to Mesh's own binary, if it was installed with it.
+fn whatsapp_native() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "mesh-wa.exe" } else { "mesh-wa" });
+    exe.is_file().then_some(exe)
+}
+
+/// Streams the native WhatsApp helper's events (restarting it by itself).
+fn whatsapp_native_events(exe: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let exe = exe.clone();
+    iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        use iced::futures::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(whatsapp::run_native(exe, data_dir().join("whatsapp"), tx));
         while let Some(event) = rx.recv().await {
             if output.send(Message::WhatsApp(event)).await.is_err() {
                 break;

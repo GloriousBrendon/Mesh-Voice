@@ -23,8 +23,9 @@ pub(crate) struct Site {
 }
 
 pub(crate) enum Command {
-    /// A JavaScript expression to evaluate in the page.
-    Eval(String),
+    /// `window.__mesh.<function>(args…)` in the page, or the same function
+    /// in the native WhatsApp helper.
+    Call { function: String, args: Vec<String> },
     /// Restore and focus the tab's window (for a captcha, or the browser's
     /// "choose what to share" picker).
     BringToFront,
@@ -36,10 +37,14 @@ pub(crate) enum Raw {
     Disconnected,
 }
 
-/// `window.__mesh.<function>(args…)` with JSON-quoted string arguments.
 pub(crate) fn call(function: &str, args: &[&str]) -> Command {
+    Command::Call { function: function.to_owned(), args: args.iter().map(|a| a.to_string()).collect() }
+}
+
+/// The page expression for a `Command::Call`, with JSON-quoted arguments.
+fn expression(function: &str, args: &[String]) -> String {
     let args: Vec<String> = args.iter().map(|a| serde_json::to_string(a).unwrap_or_default()).collect();
-    Command::Eval(format!("window.__mesh && window.__mesh.{function}({})", args.join(",")))
+    format!("window.__mesh && window.__mesh.{function}({})", args.join(","))
 }
 
 /// Keeps a connection to `site` at `socket` for as long as `raw` is open,
@@ -137,8 +142,8 @@ async fn session(socket: &Path, site: &Site, raw: &mpsc::UnboundedSender<Raw>, c
                 let msg = match command {
                     // As a user gesture: pages keep some things (screen capture,
                     // starting call audio) for a real click.
-                    Some(Command::Eval(expression)) => {
-                        send("Runtime.evaluate", serde_json::json!({ "expression": expression, "userGesture": true }))
+                    Some(Command::Call { function, args }) => {
+                        send("Runtime.evaluate", serde_json::json!({ "expression": expression(&function, &args), "userGesture": true }))
                     }
                     // Restores the window even when it's minimized.
                     Some(Command::BringToFront) => send("Page.bringToFront", serde_json::json!({})),

@@ -147,6 +147,10 @@ pub(crate) fn start_link(state: &App, network: Network) -> Result<(), String> {
     let (Some(host), Some(url)) = (spec.engine, spec.login_url) else {
         return Ok(());
     };
+    // The native helper is always up and shows its QR code when unlinked.
+    if network == Network::WhatsApp && state.whatsapp_native.is_some() {
+        return Ok(());
+    }
     match &state.discord_socket {
         Some(socket) if mesh_discord::is_running(socket) => mesh_discord::open(socket, host, url, false),
         _ => match &state.discord_command {
