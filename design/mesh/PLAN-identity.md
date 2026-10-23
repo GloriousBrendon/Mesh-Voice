@@ -196,7 +196,7 @@ short note to you, no stop needed unless something surprised me.
 
 ### Phase 4: Linking (highest library risk)
 
-- [ ] **Task 10: Link state machine** (`link.rs`)
+- [x] **Task 10: Link state machine** (`link.rs`, Mesh-Node `34f7640`)
   - What: link-code generation (5-minute life, one use); `LinkInitiator` (E)
     and `LinkResponder` (N) as byte-message state machines; SPAKE2 plus key
     confirmation; then, over the derived key, device info, confirmation, and
@@ -216,6 +216,17 @@ short note to you, no stop needed unless something surprised me.
 **Checkpoint C:** the whole library is done. `cargo test --workspace` is
 green, clippy and fmt are clean, and the vectors are committed. A short
 report to you.
+
+**Checkpoint C result (2026-10-23):** the library is done. 46 tests pass
+(2 more are `--ignored`: unlock timing and the real keyring); clippy and fmt
+are clean; vectors for IDs, device certificates and lists, the safety number,
+friend-code records and revokes, and the link key schedule, each computed with
+independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
+- `spake2` is `=0.5.0-pre.0`, not 0.4 (your call: newest over legacy). It is
+  RustCrypto's current line and shares curve25519-dalek 5 / sha2 0.11 with the
+  rest, so no duplicate old majors remain. Move to 0.5.0 when it ships.
+- Every other dependency is on its latest release (checked 2026-10-23).
+- Friend-code derivation: Argon2id 64 MiB, t = 5, about 100 ms here.
 
 ### Phase 5: Helper and Mesh-Voice
 
@@ -307,7 +318,7 @@ done in the capability map.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `spake2` 0.4 is old (2023) and its 0.5 is a pre-release; it may pull a second `curve25519-dalek` major version | Medium | It's isolated in `link.rs` (Task 10, late). If it conflicts or looks unmaintained, swap in another PAKE (CPace) behind the same state machine. I'd ask you first, as it's a dependency change. |
+| ~~`spake2` 0.4 is old (2023)~~ Resolved: on `=0.5.0-pre.0`, no duplicate majors. Watch for 0.5.0 | Low | It's isolated in `link.rs` (Task 10, late). If it conflicts or looks unmaintained, swap in another PAKE (CPace) behind the same state machine. I'd ask you first, as it's a dependency change. |
 | New RustCrypto majors (`argon2` 0.6, `chacha20poly1305` 0.11, `rand_core` 0.10) don't line up with `ed25519-dalek` 3 | Medium | Task 1 adds every dependency up front, so a conflict shows on day one; pin the versions that agree. |
 | No Secret Service on the Linux box (Hyprland doesn't start one by itself) | Low | The D12 "unavailable" path is designed in; Task 7 checks the box and reports. Installing a keyring daemon would be a system package, so I'd ask first. |
 | 64 MiB Argon2 is slower than 1 s on one machine | Low | Parameters live in the header, so lowering them is a deliberate, recorded decision (the spec says ask first). |
