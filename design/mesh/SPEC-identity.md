@@ -248,8 +248,15 @@ as `{"fn":..,"args":[..]}`; events go to stdout as
 feedback while typing), `idExport(path, username, password)`,
 `idImport(path, username, backupPassword, newPassword)`, `codeCreate(ttl, uses)`,
 `codeRevoke(code)`, `codeList`, `safetyNumber(otherId)`, `parseId(text)`.
-Events: `meshIdentity` (locked or unlocked, ID, username, devices),
-`meshCodes`, `meshError`.
+Events: `meshIdentity` (`none`, `locked` or `unlocked`; when unlocked, the
+ID, link, username, devices and "keep unlocked"; always the keyring's
+unavailability reason, or null), `meshCodes` (this device's live codes and
+the one just made), `meshError` (`fn`, a stable `kind`, a message). Commands
+that answer with something else: `idCheckPassword` → `meshPassword` (ok,
+message), `safetyNumber` → `meshSafety` (number, QR payload), `parseId` →
+`meshParsed` (an ID or a code), and `idChangePassword` / `idExport` →
+`meshDone` (`fn`). `codeCreate(ttl, uses)` takes seconds or `never`, and a
+count or `unlimited`; empty means the defaults.
 
 ## Project structure
 

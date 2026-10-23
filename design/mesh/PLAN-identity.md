@@ -230,7 +230,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
 
 ### Phase 5: Helper and Mesh-Voice
 
-- [ ] **Task 11: `mesh-node` helper mode**
+- [x] **Task 11: `mesh-node` helper mode** (Mesh-Node, see result below)
   - What:
     - `mesh-node --data <dir>` speaks the JSON-lines protocol;
     - all identity commands and events from the spec, with `meshError` kinds;
@@ -246,6 +246,21 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - Files: `crates/mesh-node/src/{main.rs,helper.rs}`,
     `crates/mesh-node/tests/protocol.rs`.
   - Size M. Depends on Tasks 5–9.
+  - **Result (2026-10-23):** done. The protocol test passes (create, lock,
+    unlock, change password, codes, parsing, safety number from both sides,
+    export and import into a second data directory, and no password on
+    stderr). Changes from the plan, all small:
+    - one dependency added to `mesh-node` only: `serde_json` (the protocol
+      is JSON; mesh-wa and mesh-dc use it too);
+    - the spec's event list grew by the answers it implied (`meshPassword`,
+      `meshSafety`, `meshParsed`, `meshDone`); the spec says which command
+      answers with which;
+    - stdin is read on the main thread, with no async runtime: there's no
+      networking yet, so nothing else needs to run alongside it. It exits
+      when stdin closes, as planned;
+    - `idExport` refuses a username that isn't the identity's
+      (`wrong-username`), since the backup opens only with the real one;
+    - the device name is the machine's hostname.
 - [ ] **Task 12: Mesh-Voice: Mesh network, onboarding and unlock**
   - What:
     - Mesh in the network registry;
