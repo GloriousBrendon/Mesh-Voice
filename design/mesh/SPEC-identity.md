@@ -113,8 +113,11 @@ What this module delivers:
   `CodeRecord { version, root_id, expires_at, max_uses, created_at, sig_by_root }`,
   encrypted with `record_key`. Someone who resolves it checks the signature
   and `root_id`, so only the owner can make a record for their ID.
-- **Revoke**: `CodeRevoke { lookup_id, sig_by_root }`. The holder deletes the
-  record.
+- **Revoke**: `CodeRevoke { lookup_id, revoke_secret }`. The held record
+  carries `BLAKE3(revoke_secret)`, and only the owner's root key can derive
+  the secret (`derive_key("mesh/v1/code-revoke", root_secret || lookup_id)`).
+  The holder checks the hash and deletes the record. *Changed 2026-10-23 from a
+  root signature, which would have shown the holder the ID (D5).*
 - **Enforcement** of expiry, uses and lookup rate limits happens where the
   record is held: a seed in v1 (D13). The client also refuses an expired record. Your
   own active codes are listed in the keystore, so you can see and revoke

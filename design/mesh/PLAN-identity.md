@@ -153,9 +153,18 @@ short note to you, no stop needed unless something surprised me.
 - I report whether the Linux box has a Secret Service.
 - You confirm before codes and linking.
 
+**Checkpoint B result (approved 2026-10-23):**
+- Unlock with 64 MiB / t = 3 / p = 1: 60 ms on the Linux box (release).
+- The keystore file holds no username, ID, device name or device key
+  (`nothing_identifying_is_readable_on_disk` searches the bytes).
+- The Linux box has no working Secret Service: only KDE's
+  `secretservicecompat` is registered and it fails to activate. "Keep
+  unlocked" reports unavailable here, as designed. Installing a keyring daemon
+  is a system change, so it needs your go-ahead.
+
 ### Phase 3: Safety number and friend codes
 
-- [ ] **Task 8: Safety number** (`safety.rs`)
+- [x] **Task 8: Safety number** (`safety.rs`, Mesh-Node `a3de90e`)
   - What: 30 digits per side from `BLAKE3-XOF("mesh/v1/safety" || id)`; the
     60-digit number ordered by the lower ID first; a QR payload string; a
     compare function.
@@ -164,7 +173,7 @@ short note to you, no stop needed unless something surprised me.
   - Verify: `cargo test -p mesh-identity safety`.
   - Files: `src/safety.rs`, `tests/vectors.rs`.
   - Size XS. Depends on Task 2.
-- [ ] **Task 9: Friend codes** (`code.rs`)
+- [x] **Task 9: Friend codes** (`code.rs`, Mesh-Node `f504146`; revoking is blind, see the spec's Revoke line)
   - What:
     - generate 40 bits; display `XXXX-XXXX`; lenient parsing (case,
       hyphens, I/L → 1, O → 0);
