@@ -245,7 +245,7 @@ this box.
       note); Task 10 checks the idle cost, and iroh's watchers replace it
       if it shows.
     - 70 workspace tests pass; clippy and fmt clean.
-- [ ] **Task 9: Network section in Mesh-Voice**
+- [x] **Task 9: Network section in Mesh-Voice** (by-hand check pending)
   - What: `meshNet`, `meshTicket` and `meshPing` in `mesh.rs`; on Your ID, a
     status line, "Copy test ticket", and a paste field with **Ping** showing
     who answered, the path and the time.
@@ -254,6 +254,16 @@ this box.
   - Verify: `cargo test -p mesh-app -p mesh-discord`; you, by hand.
   - Files: `crates/mesh-discord/src/mesh.rs`, `crates/mesh-app/src/mesh_ui.rs`.
   - Size M.
+  - Result (2026-10-26): built; your by-hand check is still to do.
+    - Your ID has a Network section between Check an ID and Devices: the
+      status line ("Online · relay aps1 · 1 connection, direct",
+      "Connecting…", "Offline"), Copy test ticket, a ticket field and Ping,
+      which shows "box answered · direct · 0.7 ms" and their ID.
+    - Errors show under the button with the helper's fixed messages.
+    - Two windows on one machine: start the second with its own data
+      folder, `XDG_DATA_HOME=/tmp/meshB mesh-app` (no code needed).
+    - Tests: 25 in `mesh-app`, 15 in `mesh-discord` pass; it launches with
+      the new helper and no errors.
 - [ ] **Task 10: Idle cost**
   - What: measure `mesh-node`'s CPU and memory unlocked with no connections
     (success criterion 6) on the Linux box; record it.

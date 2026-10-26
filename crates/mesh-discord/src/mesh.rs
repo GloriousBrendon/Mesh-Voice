@@ -19,6 +19,12 @@ pub enum Event {
     Safety(Safety),
     /// A command that answers with nothing else went through (`idChangePassword`, `idExport`).
     Done(String),
+    /// The node's state; comes by itself whenever it changes.
+    Net(Net),
+    /// This device's test ticket (`Node::ticket`).
+    Ticket(String),
+    /// A ping's answer (`Node::ping`).
+    Ping(Pong),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -75,6 +81,40 @@ pub struct Safety {
     pub qr: String,
 }
 
+/// Whether this device is on the Mesh network (SPEC-transport "Helper protocol").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetState {
+    /// Locked: no node.
+    Off,
+    /// Running, no relay reached yet.
+    Connecting,
+    Online,
+}
+
+/// A `meshNet` report. Never holds an IP address.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Net {
+    pub state: NetState,
+    /// The home relay's URL, once online.
+    pub relay: Option<String>,
+    /// At least one connection is on a direct path.
+    pub direct: bool,
+    pub connections: usize,
+}
+
+/// A `meshPing`: who answered, by which path, and how fast.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Pong {
+    /// Their `mesh1…` ID.
+    pub id: String,
+    /// Their device's name.
+    pub name: String,
+    /// `direct` or `relay`.
+    pub path: String,
+    pub ms: f64,
+}
+
 /// A `meshError`: the command that failed, a stable kind and a message to show.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Error {
@@ -129,6 +169,21 @@ impl Node {
     /// Asks whether a new password would be accepted; answers with `Password`.
     pub fn check_password(&self, username: &str, password: &str) {
         self.call("idCheckPassword", &[username, password]);
+    }
+
+    /// Asks for the node's state; answers with `Net`.
+    pub fn net_status(&self) {
+        self.call("netStatus", &[]);
+    }
+    /// This device's `mesh://node/…` test ticket; answers with `Ticket`, or an
+    /// `Error` (`offline`) before a relay is reached.
+    pub fn ticket(&self) {
+        self.call("netTicket", &[]);
+    }
+    /// Pings the device a ticket names; answers with `Ping` or an `Error`
+    /// (`bad-ticket`, `unreachable`, `timeout`, `bad-cert`, `key-mismatch`, `offline`).
+    pub fn ping(&self, ticket: &str) {
+        self.call("netPing", &[ticket]);
     }
 
     fn call(&self, function: &str, args: &[&str]) {
@@ -199,6 +254,12 @@ fn line_event(line: &str) -> Option<Event> {
             let v: serde_json::Value = serde_json::from_str(payload).ok()?;
             Some(Event::Done(v["fn"].as_str()?.to_owned()))
         }
+        "meshNet" => serde_json::from_str(payload).ok().map(Event::Net),
+        "meshTicket" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(Event::Ticket(v["ticket"].as_str()?.to_owned()))
+        }
+        "meshPing" => serde_json::from_str(payload).ok().map(Event::Ping),
         _ => None,
     }
 }
@@ -239,6 +300,21 @@ mod tests {
             panic!("no safety number")
         };
         assert_eq!(n.number, "12345 67890");
+
+        let Some(Event::Net(net)) = line_event(&line("meshNet", r#"{"state":"online","relay":"https://aps1-1.relay.n0.iroh.link./","direct":true,"connections":1}"#)) else {
+            panic!("no net")
+        };
+        assert_eq!((net.state, net.direct, net.connections), (NetState::Online, true, 1));
+        let Some(Event::Net(off)) = line_event(&line("meshNet", r#"{"state":"off","relay":null,"direct":false,"connections":0}"#)) else { panic!("no net") };
+        assert_eq!((off.state, off.relay), (NetState::Off, None));
+
+        let Some(Event::Ticket(t)) = line_event(&line("meshTicket", r#"{"ticket":"mesh://node/ab?relay=x"}"#)) else { panic!("no ticket") };
+        assert_eq!(t, "mesh://node/ab?relay=x");
+
+        let Some(Event::Ping(pong)) = line_event(&line("meshPing", r#"{"id":"mesh1abc","name":"box","path":"direct","ms":0.7}"#)) else {
+            panic!("no pong")
+        };
+        assert_eq!((pong.id.as_str(), pong.path.as_str(), pong.ms), ("mesh1abc", "direct", 0.7));
 
         assert!(line_event(&line("meshCodes", r#"{"codes":[]}"#)).is_none());
         assert!(line_event("not json").is_none());

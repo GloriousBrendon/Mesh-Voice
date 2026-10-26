@@ -18,6 +18,8 @@ pub(crate) struct Mesh {
     pub started: bool,
     /// The `mesh://` link as a QR code, while unlocked.
     qr: Option<qr_code::Data>,
+    /// The node's latest `meshNet`.
+    net: Option<mesh::Net>,
     form: Form,
     settings: Settings,
 }
@@ -58,6 +60,10 @@ struct Settings {
     /// The last answer, for the section of the command it answers: (fn, ok, message).
     note: Option<(String, bool, String)>,
     copied: bool,
+    /// Network: the pasted ticket, the last ping's answer, and whether ours was copied.
+    ping: String,
+    pong: Option<mesh::Pong>,
+    ticket_copied: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +90,9 @@ pub(crate) enum Msg {
     ExportTo(Option<PathBuf>),
     CheckInput(String),
     Check,
+    CopyTicket,
+    PingInput(String),
+    Ping,
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -160,10 +169,21 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             };
             s.note = Some((func, true, message.to_string()));
         }
+        mesh::Event::Net(net) => m.net = Some(net),
+        mesh::Event::Ticket(ticket) => {
+            m.settings.busy = None;
+            m.settings.ticket_copied = true;
+            return iced::clipboard::write(ticket);
+        }
+        mesh::Event::Ping(pong) => {
+            m.settings.busy = None;
+            m.settings.pong = Some(pong);
+        }
         mesh::Event::Disconnected => {
             m.node = None;
             m.identity = None;
             m.qr = None;
+            m.net = None;
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -280,6 +300,26 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
                 node.safety_number(s.check.trim());
             }
         }
+        Msg::CopyTicket => {
+            if s.busy.is_none() {
+                s.busy = Some("netTicket");
+                s.note = None;
+                node.ticket();
+            }
+        }
+        Msg::PingInput(value) => {
+            s.ping = value;
+            s.pong = None;
+            s.note = None;
+        }
+        Msg::Ping => {
+            if s.busy.is_none() && !s.ping.trim().is_empty() {
+                s.busy = Some("netPing");
+                s.note = None;
+                s.pong = None;
+                node.ping(s.ping.trim());
+            }
+        }
     }
     f.error = None;
     // The password rule involves the username too, so either change rechecks it.
@@ -304,6 +344,36 @@ fn can_restore(f: &Form) -> bool {
 
 fn can_change(s: &Settings) -> bool {
     !s.old.is_empty() && s.verdict.as_ref().is_some_and(|(ok, _)| *ok) && s.new == s.confirm
+}
+
+/// Network's status line, for example "Online · relay aps1 · 1 connection, direct".
+fn net_line(net: Option<&mesh::Net>) -> String {
+    let Some(net) = net.filter(|n| n.state != mesh::NetState::Off) else { return "Offline".into() };
+    if net.state == mesh::NetState::Connecting {
+        return "Connecting…".into();
+    }
+    let mut line = format!("Online · relay {}", net.relay.as_deref().map(relay_name).unwrap_or("?"));
+    if net.connections > 0 {
+        let s = if net.connections == 1 { "" } else { "s" };
+        line.push_str(&format!(" · {} connection{s}{}", net.connections, if net.direct { ", direct" } else { "" }));
+    }
+    line
+}
+
+/// n0's relays by their short name (`aps1`); any other relay by its host.
+fn relay_name(url: &str) -> &str {
+    let host = url.split("://").nth(1).unwrap_or(url).split(['/', ':']).next().unwrap_or(url);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    match host.strip_suffix(".relay.n0.iroh.link") {
+        Some(name) => name.split('-').next().unwrap_or(name),
+        None => host,
+    }
+}
+
+/// "direct · 0.7 ms", "relay · 24 ms".
+fn pong_line(pong: &mesh::Pong) -> String {
+    let ms = if pong.ms < 10.0 { format!("{:.1}", pong.ms) } else { format!("{:.0}", pong.ms) };
+    format!("{} · {ms} ms", pong.path)
 }
 
 /// The new-password hint: the helper's verdict, or that the two don't match.
@@ -499,6 +569,29 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
         }
     }
 
+    // Network: is this device on Mesh, and can it reach another (a test until friends exist).
+    let mut network = column![
+        heading("network", p),
+        ui::sans(net_line(m.net.as_ref()), 13.0, Weight::Normal, p.text_bright()),
+        text("To test a connection, copy your ticket and send it to someone on another Mesh; paste theirs below.")
+            .size(12)
+            .color(p.text()),
+        button(ui::sans(if s.ticket_copied { "Ticket copied" } else { "Copy test ticket" }, 13.0, Weight::Normal, p.text_bright()))
+            .on_press_maybe(s.busy.is_none().then_some(Message::MeshForm(Msg::CopyTicket)))
+            .padding([6, 12])
+            .style(flat_button_style(p)),
+    ]
+    .spacing(8)
+    .extend(note("netTicket"))
+    .push(field("THEIR TICKET", &s.ping, Msg::PingInput, false, Msg::Ping, p))
+    .push(action("Ping", "netPing", (!s.ping.trim().is_empty()).then_some(Msg::Ping)))
+    .extend(note("netPing"));
+    if let Some(pong) = &s.pong {
+        network = network
+            .push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 13.0, Weight::Normal, p.success()))
+            .push(ui::mono(pong.id.clone(), 11.0, p.text_muted()));
+    }
+
     let mut devices = column![heading("devices", p)].spacing(6);
     for d in &identity.devices {
         let added = Local.timestamp_opt(d.created_at as i64, 0).single().map(|t| t.format("%-d %b %Y").to_string()).unwrap_or_default();
@@ -542,7 +635,7 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     .spacing(8)
     .extend(note("idExport"));
 
-    scrollable(column![id, check, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
+    scrollable(column![id, check, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
         .height(Length::Fill)
         .into()
 }
@@ -568,6 +661,22 @@ mod tests {
         f.confirm.pop();
         f.username = "  ".into();
         assert!(!can_continue(&f), "no username");
+    }
+
+    #[test]
+    fn network_lines() {
+        let mut net = mesh::Net { state: mesh::NetState::Online, relay: Some("https://aps1-1.relay.n0.iroh.link./".into()), direct: false, connections: 0 };
+        assert_eq!(net_line(Some(&net)), "Online · relay aps1");
+        (net.connections, net.direct) = (2, true);
+        assert_eq!(net_line(Some(&net)), "Online · relay aps1 · 2 connections, direct");
+        net.relay = Some("https://relay.example.org:8443/".into());
+        assert!(net_line(Some(&net)).starts_with("Online · relay relay.example.org ·"));
+        net.state = mesh::NetState::Connecting;
+        assert_eq!(net_line(Some(&net)), "Connecting…");
+        assert_eq!(net_line(None), "Offline");
+        let pong = mesh::Pong { id: "mesh1abc".into(), name: "box".into(), path: "direct".into(), ms: 0.74 };
+        assert_eq!(pong_line(&pong), "direct · 0.7 ms");
+        assert_eq!(pong_line(&mesh::Pong { ms: 24.4, path: "relay".into(), ..pong }), "relay · 24 ms");
     }
 
     #[test]
