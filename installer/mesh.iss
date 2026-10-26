@@ -5,6 +5,10 @@
 #define Root ".."
 #define AppExe Root + "\target\release\mesh-app.exe"
 #define AppVersion GetVersionNumbersString(AppExe)
+; The Mesh-Node checkout (build.ps1 passes /DNode=…).
+#ifndef Node
+  #define Node Root + "\..\Mesh-Node"
+#endif
 
 [Setup]
 AppId={{D5884734-20BD-4787-83B8-C0C7491957AD}
@@ -40,6 +44,7 @@ Name: autostart; Description: "Start Mesh when I sign in to Windows"; Flags: unc
 Source: "{#AppExe}"; DestDir: "{app}"; DestName: "Mesh.exe"; Flags: ignoreversion
 Source: "{#Root}\mesh-wa\target\release\mesh-wa.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\mesh-dc\target\release\mesh-dc.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Node}\target\release\mesh-node.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{userprograms}\Mesh"; Filename: "{app}\Mesh.exe"; Comment: "Matrix, Discord and WhatsApp in one place"
@@ -52,4 +57,4 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Filename: "{app}\Mesh.exe"; Description: "Start Mesh"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM Mesh.exe /IM mesh-wa.exe /IM mesh-dc.exe"; Flags: runhidden; RunOnceId: "StopMesh"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM Mesh.exe /IM mesh-wa.exe /IM mesh-dc.exe /IM mesh-node.exe"; Flags: runhidden; RunOnceId: "StopMesh"

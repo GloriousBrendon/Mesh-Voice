@@ -347,6 +347,14 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - Files: `installer/install-linux.sh`, `installer/build.ps1`,
     `installer/mesh.iss`.
   - Size S. Depends on Task 11.
+  - **Result (2026-10-26):** done on Linux. Both installers build
+    `mesh-node` from a sibling `Mesh-Node` checkout or `MESH_NODE`, and
+    install it next to Mesh. Mesh-Voice is public and Mesh-Node private, so
+    without a checkout they warn and leave it out, and Mesh runs without
+    its own network. Checked: `install-linux.sh` into a scratch home
+    installs `mesh-node` next to `mesh`; with `MESH_NODE=/nonexistent` it
+    warns and installs the rest. `build.ps1` and `mesh.iss` (`/DNode`,
+    `skipifsourcedoesntexist`) are untested until Checkpoint D.
 
 **Checkpoint D: module gate (needs you on the Windows PC).** The spec's
 two-machine check:
