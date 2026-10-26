@@ -161,7 +161,7 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
       nothing to pace. A failed dial reconnects on the next call; modules
       that retry by themselves (`routing`, `mailbox`) pace their retries.
       The spec says so now.
-- [ ] **Task 6: The relay path**
+- [x] **Task 6: The relay path** (Mesh-Node `523c5b5`)
   - What: a test with a local relay (`test-utils`) and direct paths blocked,
     so traffic must go through the relay; an `--ignored` test against n0's
     relays, as in the spike.
@@ -170,9 +170,31 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
   - Verify: `cargo test -p mesh-transport`, then with `-- --ignored`.
   - Files: `tests/relay.rs`, `crates/mesh-transport/Cargo.toml`.
   - Size S.
+  - **Result (2026-10-26):** done.
+    - Offline: with iroh's in-process relay and direct paths switched off,
+      a ping dialled with only the key and relay goes through the relay and
+      reports `relay`.
+    - Real n0 relays (`--ignored`): dialled with key and relay only, it was
+      on a direct path from the first ping (about 0.6 ms on this box); home
+      relay `aps1`, as in the spike.
+    - The test relay needs its self-signed certificate trusted, which iroh
+      only allows with its `test-utils` feature. `mesh-transport` has its own
+      `test-utils` feature (trust the test relay; no direct paths) that only
+      its tests turn on; `cargo tree` shows it in neither `mesh-node` nor
+      any normal build.
+    - Found on the way: iroh can drop direct paths entirely
+      (`clear_ip_transports`), which is what a "hide my IP (relay only)"
+      setting would use. That answers the open part of spec Q2 for when
+      `social` decides it.
 
 **Checkpoint B (short report):** the library is done, with the test counts,
 and the ping times through the real relays.
+
+**Checkpoint B result (2026-10-26):** the library is done. 69 workspace
+tests pass (22 in `mesh-transport`, stable over repeated runs), plus 1
+ignored real-relay test that passes; clippy and fmt clean. Ping through
+n0's relays: direct from the first ping, about 0.6 ms between two nodes on
+this box.
 
 ### Phase 3: Helper and Mesh-Voice
 
@@ -233,6 +255,7 @@ sitting with identity's Checkpoint D.
 | n0's public relays are slow from here (the spike picked Asia-Pacific, 250 ms), rate-limited or down | Medium | Only until `seed`: `--relay` already points the node at any relay, and `seed` puts ours first. |
 | iroh's API changes in a 1.x release | Low | Pinned to `=1.4.1`; upgrades are a deliberate change with tests. |
 | The relay-path test needs `test-utils`, which pulls in a relay server | Low | Dev-dependency only, not in the shipped binary. |
+| Task 8's protocol test planned two `mesh-node` processes on a local test relay, but a normal `mesh-node` won't trust its self-signed certificate | Low | Decided in Task 8: either an off-by-default `test-utils` feature on `mesh-node` for its test build, or an in-process helper test. Never a trust-any-relay switch in the shipped binary. |
 | Windows Firewall asks to allow `mesh-node` | Low | Expected for anything that listens. The gate checks that cancelling it still connects (outbound hole punching and the relay). |
 | The binary grows a lot (rustls, QUIC) | Low | Task 1 records it. `metrics` is off; more features can be trimmed if needed. |
 | The device secret is handed to iroh | Medium | It stays in the process, built from the zeroized bytes, only while unlocked; locking drops the endpoint (D7). |
