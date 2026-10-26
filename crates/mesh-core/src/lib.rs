@@ -602,12 +602,12 @@ impl MeshClient {
     }
 
     /// Available microphone device names.
-    pub fn audio_input_devices(&self) -> Vec<String> {
+    pub fn audio_input_devices() -> Vec<String> {
         audio::input_device_names()
     }
 
     /// Available speaker device names.
-    pub fn audio_output_devices(&self) -> Vec<String> {
+    pub fn audio_output_devices() -> Vec<String> {
         audio::output_device_names()
     }
 

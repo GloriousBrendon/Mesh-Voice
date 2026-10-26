@@ -62,10 +62,11 @@ pub(crate) struct Panel {
 pub(crate) fn link(state: &App, network: Network) -> Link {
     match network {
         Network::Matrix => match &state.screen {
-            Screen::LoggedIn(session) => match &session.my_profile {
+            Screen::LoggedIn(session) if session.client.is_some() => match &session.my_profile {
                 Some(me) => Link::Linked { name: me.user_id.to_string(), meta: my_server(session) },
                 None => Link::Connecting,
             },
+            _ if state.matrix_login.busy => Link::Connecting,
             _ => Link::SignedOut,
         },
         Network::Discord => match (&state.discord_state, &state.discord) {
@@ -107,6 +108,35 @@ fn phone(id: &str) -> String {
 /// Whether a step-2 switch is on: `sync_off` holds `<network id>:<key>`.
 pub(crate) fn synced(state: &App, network: Network, key: &str) -> bool {
     !state.sync_off.iter().any(|off| off.split_once(':') == Some((network.spec().id, key)))
+}
+
+/// Mesh's own identity, as an account: open once it's unlocked.
+pub(crate) fn mesh_link(state: &App) -> Link {
+    match (&state.mesh_node, &state.mesh.identity) {
+        (None, _) => Link::Offline,
+        (Some(_), None) => Link::Connecting,
+        (Some(_), Some(identity)) => match (&identity.username, &identity.id) {
+            (Some(name), Some(id)) => Link::Linked { name: name.clone(), meta: short_id(id) },
+            _ => Link::SignedOut,
+        },
+    }
+}
+
+/// `mesh1qyfz…8k2d`: enough to recognise, not to copy (Your ID has the whole one).
+fn short_id(id: &str) -> String {
+    match (id.get(..9), id.get(id.len().saturating_sub(4)..)) {
+        (Some(head), Some(tail)) if id.len() > 16 => format!("{head}…{tail}"),
+        _ => id.to_string(),
+    }
+}
+
+/// Where any registry entry's account stands; `None` for ones Mesh can't link.
+fn spec_link(state: &App, spec: &NetworkSpec) -> Option<Link> {
+    match Network::from_id(spec.id) {
+        Some(network) => Some(link(state, network)),
+        None if spec.id == "mesh" => Some(mesh_link(state)),
+        None => None,
+    }
 }
 
 fn all_synced(state: &App, network: Network) -> bool {
@@ -183,7 +213,7 @@ pub(crate) fn default_pick(state: &App) -> &'static str {
     NETWORKS
         .iter()
         .filter(|n| !n.soon())
-        .find(|n| Network::from_id(n.id).is_some_and(|net| !matches!(link(state, net), Link::Linked { .. })))
+        .find(|n| spec_link(state, n).is_some_and(|link| !matches!(link, Link::Linked { .. })))
         .unwrap_or(&NETWORKS[0])
         .id
 }
@@ -222,17 +252,16 @@ pub(crate) fn page<'a>(state: &'a App, columns: usize) -> Element<'a, Message> {
     let mut rows = column![];
     let mut count = 0;
     for spec in NETWORKS {
-        let Some(network) = Network::from_id(spec.id) else { continue };
-        let link = link(state, network);
+        let Some(link) = spec_link(state, spec) else { continue };
         let (name, meta, label, color, warn) = match &link {
             Link::Linked { name, meta } => (name.clone(), meta.clone(), "● synced", p.success(), false),
-            _ if network != Network::Matrix && !state.linked.iter().any(|id| id == spec.id) => continue,
+            _ if !state.linked.iter().any(|id| id == spec.id) => continue,
             Link::Offline => (spec.name.to_string(), "the engine isn't running".to_string(), "▲ offline", p.warning(), true),
             Link::Connecting => (spec.name.to_string(), "not answering yet".to_string(), "… connecting", p.text_muted(), false),
             Link::SignedOut => (spec.name.to_string(), "signed out".to_string(), "▲ needs relink", p.warning(), true),
         };
         let mut title = row![ui::sans(name, 14.0, Weight::Semibold, p.text_bright())].spacing(8).align_y(iced::Alignment::Center);
-        if network == Network::Matrix {
+        if spec.id == "mesh" {
             title = title.push(badge("PRIMARY", p.accent_text(), Some(p.accent()), p.accent()));
         }
         let sub: Element<'a, Message> = if warn {
@@ -299,7 +328,7 @@ pub(crate) fn page<'a>(state: &'a App, columns: usize) -> Element<'a, Message> {
 
 fn network_card<'a>(state: &'a App, spec: &'static NetworkSpec, on: bool) -> Element<'a, Message> {
     let p = &state.palette;
-    let linked = Network::from_id(spec.id).is_some_and(|n| matches!(link(state, n), Link::Linked { .. } | Link::Connecting));
+    let linked = matches!(spec_link(state, spec), Some(Link::Linked { .. } | Link::Connecting));
     let tag = if spec.soon() {
         badge("soon", p.text_muted(), None, p.border())
     } else if linked {
@@ -349,7 +378,7 @@ pub(crate) fn panel<'a>(state: &'a App) -> Element<'a, Message> {
         return Space::new().into();
     };
     let network = Network::from_id(spec.id);
-    let link = network.map(|n| link(state, n));
+    let link = spec_link(state, spec);
     let panel = &state.accounts;
     let ever_linked = state.linked.iter().any(|l| l == spec.id);
     let linked = matches!(link, Some(Link::Linked { .. }));
@@ -414,9 +443,11 @@ pub(crate) fn panel<'a>(state: &'a App) -> Element<'a, Message> {
                     (_, Some(Link::Offline)) => "Starting…",
                     _ if spec.id == "dc" && state.discord_native.is_some() => "Waiting for sign-in…",
                     (Auth::Qr, _) => "Waiting for your phone…",
+                    (Auth::Password, _) if state.matrix_login.busy => "Signing in…",
+                    (Auth::Password, _) => "Sign in",
                     _ => "Continue",
                 },
-                None,
+                (spec.auth == Auth::Password && !state.matrix_login.busy).then_some(Message::LoginSubmitted),
             ),
             Step::Sync => ("Connect", Some(Message::AccountsStep(at + 1))),
             Step::Done => ("Done", Some(Message::AccountsDone)),
@@ -518,14 +549,31 @@ fn sign_in<'a>(state: &'a App, spec: &'static NetworkSpec, link: Option<&Link>) 
             .spacing(12)
             .into()
         }
-        Auth::Password => column![
-            field("HOMESERVER", "matrix.org"),
-            field("USERNAME", "@you:matrix.org"),
-            field("PASSWORD", ""),
-            text("Mesh holds one Matrix account for now; you're signed in with it.").size(12).color(p.text_muted()),
-        ]
-        .spacing(12)
-        .into(),
+        Auth::Identity => text("Mesh's own network needs mesh-node, installed next to Mesh. Without it, Mesh starts without an identity.")
+            .size(13)
+            .color(p.text())
+            .into(),
+        Auth::Password => {
+            let form = &state.matrix_login;
+            let input = |label: &'static str, placeholder: &'static str, value: &str, on: fn(String) -> Message, secure: bool| {
+                column![
+                    ui::mono(label, 11.0, p.text_muted()),
+                    text_input(placeholder, value).on_input(on).on_submit(Message::LoginSubmitted).secure(secure).padding([10, 12]).size(13),
+                ]
+                .spacing(6)
+            };
+            let mut col = column![
+                input("HOMESERVER", "https://matrix.org", &form.homeserver, Message::HomeserverChanged, false),
+                input("USERNAME", "@you:matrix.org", &form.username, Message::UsernameChanged, false),
+                input("PASSWORD", "", &form.password, Message::PasswordChanged, true),
+                text("Optional. Mesh holds one Matrix account.").size(12).color(p.text_muted()),
+            ]
+            .spacing(12);
+            if let Some(error) = &form.error {
+                col = col.push(text(error.clone()).size(12).color(p.danger()));
+            }
+            col.into()
+        }
         Auth::Phone => column![
             field("PHONE NUMBER", "+27 …"),
             text(format!("{} sends you a login code. Type it on the next screen.", spec.name)).size(13).color(p.text()),

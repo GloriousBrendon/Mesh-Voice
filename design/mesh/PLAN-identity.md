@@ -281,6 +281,17 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     to `whatsapp.rs`), `mesh-app/src/main.rs`, `mesh-app/src/accounts.rs`,
     `mesh-app/src/mesh_ui.rs` (new).
   - Size M. Depends on Task 11.
+- [ ] **Task 12b: Mesh-Voice: Matrix becomes optional** (added and approved
+  2026-10-26: "Matrix is optional")
+  - Why: you chose Mesh's screens to come before everything. Task 12 puts
+    them first, but the app session is still built on the Matrix client, so
+    after unlocking, Mesh still asks for a Matrix login.
+  - What: `Session` stops requiring a Matrix client (about 43 uses in
+    `main.rs`); Matrix signs in from its Accounts card like Discord; the
+    PRIMARY badge moves to Mesh.
+  - Accept: a fresh install with no Matrix account opens straight into the
+    app after Mesh's onboarding; signing Matrix in and out from Accounts works.
+  - Size M–L. Depends on Task 12.
 - [ ] **Task 13: Mesh-Voice: Your ID, keep unlocked, password and backup**
   - What:
     - the Your ID page (`mesh1…` with a copy button, a QR code of the

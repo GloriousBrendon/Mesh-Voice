@@ -5,6 +5,8 @@
 /// How an account on the network signs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
+    /// Mesh's own identity: a username and password that open the keystore.
+    Identity,
     Password,
     Qr,
     Phone,
@@ -24,6 +26,7 @@ pub enum Step {
 impl Auth {
     pub fn label(self) -> &'static str {
         match self {
+            Auth::Identity => "Username + password",
             Auth::Password => "Homeserver sign-in",
             Auth::Qr => "Scan a QR code",
             Auth::Phone => "Phone number + code",
@@ -125,6 +128,16 @@ const BASE: NetworkSpec = NetworkSpec {
 };
 
 pub const NETWORKS: &[NetworkSpec] = &[
+    // Mesh's own network, first; the rest are add-ons (PLAN-identity P1).
+    NetworkSpec {
+        id: "mesh",
+        code: "me",
+        name: "Mesh",
+        color: "#e6c07b",
+        auth: Auth::Identity,
+        availability: Availability::Ready,
+        ..BASE
+    },
     NetworkSpec {
         id: "mx",
         code: "mx",
@@ -265,7 +278,7 @@ mod tests {
 
     #[test]
     fn registry_lookups() {
-        assert_eq!(NETWORKS.len(), 8);
+        assert_eq!(NETWORKS.len(), 9);
         assert_eq!(spec("wa").map(|n| n.name), Some("WhatsApp"));
         assert_eq!(spec("nope"), None);
         let ids: std::collections::HashSet<_> = NETWORKS.iter().map(|n| n.id).collect();
@@ -273,11 +286,11 @@ mod tests {
         for n in NETWORKS {
             assert_eq!(n.code.len(), 2, "{}", n.id);
             assert!(n.color.starts_with('#') && n.color.len() == 7, "{}", n.id);
-            assert!(n.id == "mx" || !n.sync.is_empty(), "{} has nothing to sync", n.id);
+            assert!(matches!(n.id, "mx" | "mesh") || !n.sync.is_empty(), "{} has nothing to sync", n.id);
             assert!(n.auth != Auth::Qr || !n.how.is_empty(), "{} QR needs phone steps", n.id);
         }
         let ready: Vec<_> = NETWORKS.iter().filter(|n| !n.soon()).map(|n| n.id).collect();
-        assert_eq!(ready, ["mx", "dc", "wa"]);
+        assert_eq!(ready, ["mesh", "mx", "dc", "wa"]);
         assert_eq!(protocol_network("discordgo").map(|n| n.id), Some("dc"));
         assert_eq!(protocol_network("irc"), None);
         assert_eq!(spec("mx").map(NetworkSpec::via).as_deref(), Some("native, no bridge"));
@@ -300,6 +313,7 @@ mod tests {
     #[test]
     fn step_order_per_auth() {
         use Step::*;
+        assert_eq!(Auth::Identity.steps(), [SignIn, Sync, Done]);
         assert_eq!(Auth::Password.steps(), [SignIn, Sync, Done]);
         assert_eq!(Auth::Qr.steps(), [SignIn, Sync, Done]);
         assert_eq!(Auth::Browser.steps(), [SignIn, Sync, Done]);

@@ -4,6 +4,7 @@
 
 mod accounts;
 mod cache;
+mod mesh_ui;
 mod rain;
 mod theme;
 mod titlebar;
@@ -22,7 +23,7 @@ use mesh_core::{
     MediaRef, MessageKind, Network, OwnedEventId, PendingContact, RoomSummary, SasEmoji, SpaceGroup, TimelineMessage,
     group_by_space,
 };
-use mesh_discord::whatsapp;
+use mesh_discord::{mesh, whatsapp};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,24 +138,31 @@ struct App {
     /// Theme source files and their last-seen mtimes, polled for hot reload.
     theme_files: Vec<PathBuf>,
     theme_stamps: Vec<Option<std::time::SystemTime>>,
+    /// `mesh-node` beside Mesh's own binary, when it's there; Mesh then opens
+    /// with its identity screens (`mesh_ui`) before anything else.
+    mesh_node: Option<PathBuf>,
+    mesh: mesh_ui::Mesh,
+    matrix_login: LoginForm,
     screen: Screen,
     /// Elapsed seconds driving the animated background.
     rain_time: f32,
 }
 
 enum Screen {
+    /// Before Mesh opens (its identity screens draw over this).
     Booting,
-    LoggedOut(LoginForm),
-    LoggingIn(LoginForm),
     LoggedIn(Session),
 }
 
+/// Matrix's sign-in form, on its Accounts card.
 #[derive(Default, Clone)]
-struct LoginForm {
-    homeserver: String,
-    username: String,
-    password: String,
-    error: Option<String>,
+pub(crate) struct LoginForm {
+    pub homeserver: String,
+    pub username: String,
+    pub password: String,
+    /// Sent; waiting for the homeserver.
+    pub busy: bool,
+    pub error: Option<String>,
 }
 
 /// The new WhatsApp chat picker: a name to search contacts, or a number.
@@ -229,7 +237,8 @@ impl Player {
 }
 
 struct Session {
-    client: Arc<MeshClient>,
+    /// Matrix, while it's signed in; it's optional, like the other networks.
+    client: Option<Arc<MeshClient>>,
     rooms: Vec<RoomSummary>,
     selected_room: Option<OwnedRoomId>,
     timeline: Vec<TimelineMessage>,
@@ -241,6 +250,8 @@ struct Session {
     call: Option<CallUi>,
     members: Vec<MemberInfo>,
     my_profile: Option<MyProfile>,
+    /// Your Mesh username, for the user panel when Matrix isn't signed in.
+    mesh_name: Option<String>,
     self_muted: bool,
     self_deafened: bool,
     backup: BackupUi,
@@ -392,7 +403,7 @@ struct BackupUi {
 }
 
 impl Session {
-    fn new(client: Arc<MeshClient>) -> Self {
+    fn new(client: Option<Arc<MeshClient>>) -> Self {
         Self {
             client,
             rooms: Vec::new(),
@@ -406,6 +417,7 @@ impl Session {
             call: None,
             members: Vec::new(),
             my_profile: None,
+            mesh_name: None,
             self_muted: false,
             self_deafened: false,
             backup: BackupUi::default(),
@@ -1015,6 +1027,8 @@ enum Message {
     OpenSettings(SettingsPage),
     Discord(mesh_discord::Event),
     WhatsApp(whatsapp::Event),
+    Mesh(mesh::Event),
+    MeshForm(mesh_ui::Msg),
     /// Join a Discord voice channel, or call a Discord DM.
     DiscordJoin(String),
     DiscordLeave,
@@ -1154,6 +1168,59 @@ fn boot() -> (App, Task<Message>) {
 
     let whatsapp_native = whatsapp_native();
     let discord_native = discord_native();
+    let mesh_node = mesh_node();
+    let screen = Screen::Booting;
+
+    let mut app = App {
+            palette,
+            theme_choice,
+            color_edit: None,
+            background: config.background_image.as_ref().map(PathBuf::from).filter(|p| p.is_file()).map(|p| (p.clone(), iced::widget::image::Handle::from_path(p))),
+            iced_theme,
+            layout: theme::layout_for_config(&config_path()),
+            layout_from_hyprland: config.layout_from_hyprland.unwrap_or(true),
+            density: config.density.unwrap_or_default(),
+            extras: config.extras,
+            theme_reloaded: Local::now().format("%H:%M").to_string(),
+            discord_socket: discord_socket(&config),
+            discord_command: config.discord_engine_command.clone(),
+            whatsapp_native: whatsapp_native.clone(),
+            discord_native,
+            tray: tray::create(),
+            discord_native_wrapper: config.discord_native_wrapper.clone().unwrap_or_default(),
+            dc_sign_in: accounts::DcSignIn::default(),
+            discord: None,
+            discord_state: None,
+            whatsapp: None,
+            whatsapp_state: None,
+            login_qr: HashMap::new(),
+            discord_shown: None,
+            whatsapp_shown: None,
+            linked: config.linked.clone(),
+            sync_off: config.sync_off.clone(),
+            accounts: accounts::Panel::default(),
+            video: HashMap::new(),
+            wa_call: None,
+            wa_share: None,
+            window_focused: true,
+            theme_stamps: theme::stamps(&theme_files),
+            theme_files,
+            mesh_node,
+            mesh: mesh_ui::Mesh::default(),
+            matrix_login: LoginForm::default(),
+            screen,
+            rain_time: 0.0,
+        };
+    // With mesh-node, everything else waits until the Mesh identity is open.
+    let task = if app.mesh_node.is_some() { Task::none() } else { start_app(&mut app) };
+    (app, Task::batch([task, open_window()]))
+}
+
+/// Starts the engine browser and its linked sites' tabs, where the native
+/// helpers don't replace them.
+fn start_engine() {
+    let config = theme::load_config(&config_path());
+    let (whatsapp_native, discord_native) = (whatsapp_native(), discord_native());
     // Start the hidden Discord client (once) if it isn't running yet, unless the
     // native helper has replaced it.
     if discord_native.is_none()
@@ -1193,61 +1260,24 @@ fn boot() -> (App, Task<Message>) {
             }
         });
     }
+}
 
-    let (screen, task) = if MeshClient::has_saved_session(&data_dir()) {
-        let task = Task::perform(
-            async move {
-                match MeshClient::restore(data_dir()).await {
-                    Ok(client) => Ok(start_session(client).await),
-                    Err(err) => Err(err.to_string()),
-                }
-            },
-            Message::RestoreFinished,
-        );
-        (Screen::Booting, task)
-    } else {
-        (Screen::LoggedOut(LoginForm::default()), Task::none())
-    };
-
-    (
-        App {
-            palette,
-            theme_choice,
-            color_edit: None,
-            background: config.background_image.as_ref().map(PathBuf::from).filter(|p| p.is_file()).map(|p| (p.clone(), iced::widget::image::Handle::from_path(p))),
-            iced_theme,
-            layout: theme::layout_for_config(&config_path()),
-            layout_from_hyprland: config.layout_from_hyprland.unwrap_or(true),
-            density: config.density.unwrap_or_default(),
-            extras: config.extras,
-            theme_reloaded: Local::now().format("%H:%M").to_string(),
-            discord_socket: discord_socket(&config),
-            discord_command: config.discord_engine_command.clone(),
-            whatsapp_native: whatsapp_native.clone(),
-            discord_native,
-            tray: tray::create(),
-            discord_native_wrapper: config.discord_native_wrapper.clone().unwrap_or_default(),
-            dc_sign_in: accounts::DcSignIn::default(),
-            discord: None,
-            discord_state: None,
-            whatsapp: None,
-            whatsapp_state: None,
-            login_qr: HashMap::new(),
-            discord_shown: None,
-            whatsapp_shown: None,
-            linked: config.linked.clone(),
-            sync_off: config.sync_off.clone(),
-            accounts: accounts::Panel::default(),
-            video: HashMap::new(),
-            wa_call: None,
-            wa_share: None,
-            window_focused: true,
-            theme_stamps: theme::stamps(&theme_files),
-            theme_files,
-            screen,
-            rain_time: 0.0,
+/// Starts the app proper: the engine, the session, and Matrix in the
+/// background when it was signed in before.
+fn start_app(state: &mut App) -> Task<Message> {
+    start_engine();
+    enter_session(state);
+    if !MeshClient::has_saved_session(&data_dir()) {
+        return Task::none();
+    }
+    Task::perform(
+        async move {
+            match MeshClient::restore(data_dir()).await {
+                Ok(client) => Ok(start_session(client).await),
+                Err(err) => Err(err.to_string()),
+            }
         },
-        Task::batch([task, open_window()]),
+        Message::RestoreFinished,
     )
 }
 
@@ -1271,14 +1301,24 @@ fn window_settings() -> iced::window::Settings {
 
 /// Enters the logged-in screen and kicks off the room list load plus the
 /// push-update stream.
-fn enter_session(state: &mut App, client: Arc<MeshClient>) -> Task<Message> {
-    state.screen = Screen::LoggedIn(Session::new(client.clone()));
+fn enter_session(state: &mut App) {
+    let mut session = Session::new(None);
+    session.mesh_name = state.mesh.identity.as_ref().and_then(|i| i.username.clone());
+    state.screen = Screen::LoggedIn(session);
     // Discord often connects before the session exists; catch up on its pictures.
     if let (Screen::LoggedIn(session), Some(snapshot), Some(engine)) =
         (&mut state.screen, &state.discord_state, &state.discord)
     {
         load_snapshot_media(session, snapshot, engine);
     }
+}
+
+/// Matrix signed in (restored or just now): attach it to the session and
+/// kick off the room list load plus the push-update stream.
+fn attach_matrix(state: &mut App, client: Arc<MeshClient>) -> Task<Message> {
+    let Screen::LoggedIn(session) = &mut state.screen else { return Task::none() };
+    session.client = Some(client.clone());
+    accounts::remember_linked(state, Network::Matrix);
     let rooms_client = client.clone();
     let profile_client = client.clone();
     let backup_client = client.clone();
@@ -1297,7 +1337,8 @@ fn enter_session(state: &mut App, client: Arc<MeshClient>) -> Task<Message> {
     ])
 }
 
-fn load_members(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message> {
+fn load_members(client: Option<Arc<MeshClient>>, room_id: OwnedRoomId) -> Task<Message> {
+    let Some(client) = client else { return Task::none() };
     Task::perform(
         async move {
             let members = client.room_members(&room_id).await;
@@ -1316,7 +1357,7 @@ fn load_avatars(session: &mut Session, media: impl IntoIterator<Item = MediaRef>
         if media.web_url().is_some() || !wants(&mut session.avatars, cache::Kind::Avatar, &key) {
             continue;
         }
-        let client = session.client.clone();
+        let Some(client) = session.client.clone() else { continue };
         tasks.push(Task::perform(
             async move { client.avatar_thumbnail(&media).await.map_err(|e| e.to_string()) },
             move |result| Message::AvatarLoaded(key.clone(), result),
@@ -1341,7 +1382,7 @@ fn load_images(session: &mut Session) -> Task<Message> {
         if info.media.web_url().is_some() || !wants(&mut session.images, cache::Kind::Media, &key) {
             continue;
         }
-        let (client, media) = (session.client.clone(), info.media.clone());
+        let (Some(client), media) = (session.client.clone(), info.media.clone()) else { continue };
         tasks.push(Task::perform(
             async move { client.media(&media).await.map_err(|e| e.to_string()) },
             move |result| Message::ImageLoaded(key.clone(), result),
@@ -1350,7 +1391,8 @@ fn load_images(session: &mut Session) -> Task<Message> {
     Task::batch(tasks)
 }
 
-fn load_timeline(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message> {
+fn load_timeline(client: Option<Arc<MeshClient>>, room_id: OwnedRoomId) -> Task<Message> {
+    let Some(client) = client else { return Task::none() };
     Task::perform(
         async move {
             let timeline = client
@@ -1365,39 +1407,34 @@ fn load_timeline(client: Arc<MeshClient>, room_id: OwnedRoomId) -> Task<Message>
 
 fn update(state: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::RestoreFinished(Ok(client)) => enter_session(state, client),
+        Message::RestoreFinished(Ok(client)) => attach_matrix(state, client),
+        Message::Mesh(event) => mesh_ui::event(state, event),
+        Message::MeshForm(msg) => mesh_ui::update(state, msg),
         Message::RestoreFinished(Err(err)) => {
-            state.screen = Screen::LoggedOut(LoginForm {
-                error: Some(format!("Session expired, please log in again ({err})")),
-                ..LoginForm::default()
-            });
+            state.matrix_login.error = Some(format!("Your Matrix session expired; sign in again ({err})"));
             Task::none()
         }
         Message::HomeserverChanged(value) => {
-            if let Screen::LoggedOut(form) = &mut state.screen {
-                form.homeserver = value;
-            }
+            state.matrix_login.homeserver = value;
             Task::none()
         }
         Message::UsernameChanged(value) => {
-            if let Screen::LoggedOut(form) = &mut state.screen {
-                form.username = value;
-            }
+            state.matrix_login.username = value;
             Task::none()
         }
         Message::PasswordChanged(value) => {
-            if let Screen::LoggedOut(form) = &mut state.screen {
-                form.password = value;
-            }
+            state.matrix_login.password = value;
             Task::none()
         }
         Message::LoginSubmitted => {
-            let Screen::LoggedOut(form) = &state.screen else {
+            let form = &mut state.matrix_login;
+            if form.busy {
                 return Task::none();
-            };
+            }
             let (homeserver, username, password) =
                 (form.homeserver.clone(), form.username.clone(), form.password.clone());
-            state.screen = Screen::LoggingIn(form.clone());
+            form.busy = true;
+            form.error = None;
             Task::perform(
                 async move {
                     match MeshClient::login_with_password(
@@ -1415,16 +1452,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 Message::LoginFinished,
             )
         }
-        Message::LoginFinished(Ok(client)) => enter_session(state, client),
+        Message::LoginFinished(Ok(client)) => {
+            state.matrix_login = LoginForm::default();
+            attach_matrix(state, client)
+        }
         Message::LoginFinished(Err(err)) => {
-            let form = match &state.screen {
-                Screen::LoggingIn(form) => form.clone(),
-                _ => LoginForm::default(),
-            };
-            state.screen = Screen::LoggedOut(LoginForm {
-                error: Some(err),
-                ..form
-            });
+            state.matrix_login.busy = false;
+            state.matrix_login.error = Some(err);
             Task::none()
         }
         Message::RoomsLoaded(rooms) => {
@@ -1492,8 +1526,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         if !plain {
                             tasks.push(load_images(session));
                         }
-                        if let Some(event_id) = session.timeline.iter().rev().find_map(|m| m.event_id.clone()) {
-                            let client = session.client.clone();
+                        if let Some(event_id) = session.timeline.iter().rev().find_map(|m| m.event_id.clone())
+                            && let Some(client) = session.client.clone()
+                        {
                             tasks.push(Task::perform(
                                 async move { client.mark_read(&room_id, &event_id).await },
                                 |()| Message::Noop,
@@ -1546,7 +1581,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Some(room_id) = session.selected_room.clone() else {
                 return Task::none();
             };
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move {
                     match mine {
@@ -1572,7 +1607,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             };
             match update {
                 MeshUpdate::RoomsChanged(ids) => {
-                    let client = session.client.clone();
+                    let Some(client) = session.client.clone() else { return Task::none() };
                     let mut tasks = vec![Task::perform(
                         async move { client.rooms().await },
                         Message::RoomsLoaded,
@@ -1648,7 +1683,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         call.state = CallUiState::Connecting;
                     }
                     // Carry the user's mic/deafen state into the new call.
-                    let client = session.client.clone();
+                    let Some(client) = session.client.clone() else { return Task::none() };
                     let (muted, deafened) = (session.self_muted, session.self_deafened);
                     Task::perform(
                         async move {
@@ -1782,8 +1817,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             session.status = Some("Pick a chat first.".to_string());
                             return Task::none();
                         };
+                        let Some(client) = session.client.clone() else { return Task::none() };
                         session.sending_attachment = true;
-                        let client = session.client.clone();
                         return Task::perform(
                             async move {
                                 client
@@ -1821,7 +1856,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Some(room_id) = session.selected_room.clone() else {
                 return Task::none();
             };
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             let body = std::mem::take(&mut session.message_draft);
             Task::perform(
                 async move { client.send_message(&room_id, &body).await.map_err(|e| e.to_string()) },
@@ -1845,11 +1880,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             prompt.stage = VerifyStage::Accepted;
-            let (client, user_id, flow_id) = (
+            let (Some(client), user_id, flow_id) = (
                 session.client.clone(),
                 prompt.user_id.clone(),
                 prompt.flow_id.clone(),
-            );
+            ) else {
+                return Task::none();
+            };
             Task::perform(
                 async move {
                     client
@@ -1868,11 +1905,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             prompt.stage = VerifyStage::Confirmed;
-            let (client, user_id, flow_id) = (
+            let (Some(client), user_id, flow_id) = (
                 session.client.clone(),
                 prompt.user_id.clone(),
                 prompt.flow_id.clone(),
-            );
+            ) else {
+                return Task::none();
+            };
             Task::perform(
                 async move {
                     client
@@ -1890,7 +1929,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Some(prompt) = session.verification.take() else {
                 return Task::none();
             };
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move {
                     client
@@ -1920,6 +1959,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Some(room_id) = session.selected_room.clone() else {
                 return Task::none();
             };
+            let Some(client) = session.client.clone() else { return Task::none() };
             let peer = session
                 .rooms
                 .iter()
@@ -1931,7 +1971,6 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 peer,
                 state: CallUiState::OutgoingRinging,
             });
-            let client = session.client.clone();
             Task::perform(
                 async move { client.place_call(&room_id).await },
                 Message::CallActionFinished,
@@ -1948,7 +1987,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             {
                 return Task::none();
             }
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move { client.accept_call().await },
                 Message::CallActionFinished,
@@ -1959,7 +1998,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             session.call = None;
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move { client.hangup().await },
                 Message::CallActionFinished,
@@ -2461,7 +2500,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             };
             session.self_muted = !session.self_muted;
             let muted = session.self_muted;
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move {
                     client.set_call_muted(muted).await;
@@ -2478,7 +2517,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             // Deafening also mutes the mic; undeafening unmutes it.
             session.self_muted = session.self_deafened;
             let (deafened, muted) = (session.self_deafened, session.self_muted);
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move {
                     client.set_call_deafened(deafened).await;
@@ -2528,7 +2567,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         );
                     }
                     Ok(None) => {
-                        session.backup.status = Some(session.client.backup_status());
+                        session.backup.status = session.client.as_ref().map(|c| c.backup_status());
                     }
                     Err(err) => tracing::warn!("auto backup enable failed: {err}"),
                 }
@@ -2591,13 +2630,13 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 session.settings_page = page;
                 session.focused = Pane::Chat;
                 {
-                    session.backup.status = Some(session.client.backup_status());
+                    session.backup.status = session.client.as_ref().map(|c| c.backup_status());
                     // Refresh the audio device lists (default sentinel first).
                     session.input_devices = std::iter::once(DEFAULT_DEVICE.to_string())
-                        .chain(session.client.audio_input_devices())
+                        .chain(MeshClient::audio_input_devices())
                         .collect();
                     session.output_devices = std::iter::once(DEFAULT_DEVICE.to_string())
-                        .chain(session.client.audio_output_devices())
+                        .chain(MeshClient::audio_output_devices())
                         .collect();
                 }
             }
@@ -2607,9 +2646,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
+            let Some(client) = session.client.clone() else { return Task::none() };
             session.backup.busy = true;
             session.backup.message = Some("Setting up Secure Backup…".to_string());
-            let client = session.client.clone();
             Task::perform(
                 async move { client.enable_secure_backup().await },
                 Message::BackupSetupFinished,
@@ -2625,7 +2664,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             "Secure Backup enabled. Save the recovery key below — it will not be shown again."
                                 .to_string(),
                         );
-                        session.backup.status = Some(session.client.backup_status());
+                        session.backup.status = session.client.as_ref().map(|c| c.backup_status());
                     }
                     Err(err) => session.backup.message = Some(format!("Setup failed: {err}")),
                 }
@@ -2646,9 +2685,9 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if key.is_empty() {
                 return Task::none();
             }
+            let Some(client) = session.client.clone() else { return Task::none() };
             session.backup.busy = true;
             session.backup.message = Some("Restoring from backup…".to_string());
-            let client = session.client.clone();
             Task::perform(
                 async move { client.restore_secure_backup(&key).await },
                 Message::BackupRestoreFinished,
@@ -2665,7 +2704,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                             "Restored from backup. Previously unreadable messages should decrypt shortly."
                                 .to_string(),
                         );
-                        session.backup.status = Some(session.client.backup_status());
+                        session.backup.status = session.client.as_ref().map(|c| c.backup_status());
                         // Reload the open room so newly-decryptable messages appear.
                         if let Some(room_id) = session.selected_room.clone() {
                             reload = load_timeline(session.client.clone(), room_id);
@@ -3345,7 +3384,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let Ok(user_id) = OwnedUserId::try_from(id.as_str()) else {
                 return Task::none();
             };
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::perform(
                 async move { (id, client.display_name_of(&user_id).await) },
                 |(id, name)| Message::FriendProfile(id, name),
@@ -3377,8 +3416,8 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             if dialog.busy {
                 return Task::none();
             }
+            let Some(client) = session.client.clone() else { return Task::none() };
             dialog.busy = true;
-            let client = session.client.clone();
             Task::perform(
                 async move { client.start_dm(&user_id).await.map_err(|e| e.to_string()) },
                 Message::FriendSent,
@@ -3399,7 +3438,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.active_space = None;
                     session.active_guild = None;
                     session.active_wa_groups = false;
-                    let client = session.client.clone();
+                    let Some(client) = session.client.clone() else { return Task::none() };
                     Task::batch([
                         Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
                         update(state, Message::RoomSelected(room_id)),
@@ -3440,7 +3479,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     session.status = result.err().map(|err| format!("That didn't work: {err}"));
                 }
             }
-            let client = session.client.clone();
+            let Some(client) = session.client.clone() else { return Task::none() };
             Task::batch([
                 load_pending(session.client.clone()),
                 Task::perform(async move { client.rooms().await }, Message::RoomsLoaded),
@@ -3453,20 +3492,23 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::LogOut => {
-            let task = match &state.screen {
-                Screen::LoggedIn(session) => {
-                    let client = session.client.clone();
-                    Task::future(async move {
-                        if let Err(err) = client.logout().await {
-                            tracing::warn!("logout: {err}");
-                        }
-                    })
-                    .discard()
+            // Signs Matrix out and drops what came from it; the rest stays.
+            let Screen::LoggedIn(session) = &mut state.screen else { return Task::none() };
+            let Some(client) = session.client.take() else { return Task::none() };
+            session.rooms.clear();
+            session.groups = group_by_space(&[]);
+            session.active_space = None;
+            session.selected_room = None;
+            session.timeline.clear();
+            session.members.clear();
+            session.my_profile = None;
+            session.call = None;
+            Task::future(async move {
+                if let Err(err) = client.logout().await {
+                    tracing::warn!("logout: {err}");
                 }
-                _ => Task::none(),
-            };
-            state.screen = Screen::LoggedOut(LoginForm::default());
-            task
+            })
+            .discard()
         }
     }
 }
@@ -3480,7 +3522,8 @@ where
     let Screen::LoggedIn(session) = &state.screen else {
         return Task::none();
     };
-    let job = action(session.client.clone());
+    let Some(client) = session.client.clone() else { return Task::none() };
+    let job = action(client);
     Task::perform(async move { job.await.map_err(|e| e.to_string()) }, Message::PendingDone)
 }
 
@@ -3523,12 +3566,19 @@ fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
         iced::window::close_requests().map(Message::CloseRequested),
         if state.tray { Subscription::run(tray::events) } else { Subscription::none() },
+        match &state.mesh_node {
+            Some(exe) => Subscription::run_with(exe.clone(), mesh_events),
+            None => Subscription::none(),
+        },
+        // The other networks start once Mesh is open.
         match (&state.discord_native, &state.discord_socket) {
+            _ if !mesh_ui::started(state) => Subscription::none(),
             (Some(exe), _) => Subscription::run_with((exe.clone(), state.discord_native_wrapper.clone()), discord_native_events),
             (None, Some(socket)) => Subscription::run_with(socket.clone(), discord_events),
             (None, None) => Subscription::none(),
         },
         match (&state.whatsapp_native, &state.discord_socket) {
+            _ if !mesh_ui::started(state) => Subscription::none(),
             (Some(exe), _) => Subscription::run_with(exe.clone(), whatsapp_native_events),
             (None, Some(socket)) => Subscription::run_with(socket.clone(), whatsapp_events),
             (None, None) => Subscription::none(),
@@ -3642,6 +3692,27 @@ fn whatsapp_native() -> Option<PathBuf> {
     exe.is_file().then_some(exe)
 }
 
+/// `mesh-node` next to Mesh's own binary, if it was installed with it.
+fn mesh_node() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "mesh-node.exe" } else { "mesh-node" });
+    exe.is_file().then_some(exe)
+}
+
+/// Streams `mesh-node`'s events (restarting it by itself).
+fn mesh_events(exe: &PathBuf) -> impl iced::futures::Stream<Item = Message> + use<> {
+    let exe = exe.clone();
+    iced::stream::channel(64, async move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        use iced::futures::SinkExt;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(mesh::run(exe, data_dir().join("node"), tx));
+        while let Some(event) = rx.recv().await {
+            if output.send(Message::Mesh(event)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
 /// `mesh-dc` next to Mesh's own binary, if it was installed with it.
 fn discord_native() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.with_file_name(if cfg!(windows) { "mesh-dc.exe" } else { "mesh-dc" });
@@ -3704,9 +3775,8 @@ fn jump_matches(session: &Session) -> Vec<&RoomSummary> {
 
 fn view(state: &App, _: iced::window::Id) -> Element<'_, Message> {
     let content = match &state.screen {
-        Screen::Booting => center_text("Restoring session..."),
-        Screen::LoggedOut(form) => login_view(form, false, state),
-        Screen::LoggingIn(form) => login_view(form, true, state),
+        _ if !mesh_ui::open(state) => mesh_ui::view(state),
+        Screen::Booting => center_text("Starting…"),
         Screen::LoggedIn(session) => session_view(session, state),
     };
 
@@ -3724,53 +3794,6 @@ fn view(state: &App, _: iced::window::Id) -> Element<'_, Message> {
 
 fn center_text(label: &str) -> Element<'_, Message> {
     container(text(label.to_string()))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
-}
-
-fn login_view<'a>(form: &'a LoginForm, busy: bool, state: &'a App) -> Element<'a, Message> {
-    let (p, l) = (&state.palette, &state.layout);
-    let mut form_column = column![
-        row![
-            ui::mono_bold(">_", 28.0, p.accent()),
-            ui::mono_bold("mesh", 28.0, p.text_bright()),
-        ]
-        .spacing(10),
-        ui::mono("a lightweight matrix client", 12.0, p.text_muted()),
-        Space::new().height(12),
-        text_input("Homeserver (e.g. https://matrix.org)", &form.homeserver)
-            .on_input(Message::HomeserverChanged)
-            .padding(10),
-        text_input("Username", &form.username)
-            .on_input(Message::UsernameChanged)
-            .padding(10),
-        text_input("Password", &form.password)
-            .on_input(Message::PasswordChanged)
-            .secure(true)
-            .on_submit(Message::LoginSubmitted)
-            .padding(10),
-    ]
-    .spacing(12);
-
-    if let Some(error) = &form.error {
-        form_column = form_column.push(text(error.clone()).size(13).color(p.danger()));
-    }
-
-    let (label, msg) = if busy {
-        ("Logging in…", None)
-    } else {
-        ("Log in", Some(Message::LoginSubmitted))
-    };
-    form_column = form_column.push(
-        ui::primary_button(ui::sans(label, 14.0, Weight::Semibold, p.accent_text()), msg, p, l)
-            .padding(10),
-    );
-
-    let translucent = state.extras.translucent_panes;
-    container(ui::pane(form_column.padding(28), true, p, l, translucent).max_width(420))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -4942,7 +4965,7 @@ fn user_panel<'a>(
         .my_profile
         .as_ref()
         .map(|me| (me.display_name.clone(), me.user_id.to_string()))
-        .unwrap_or_else(|| ("…".to_string(), String::new()));
+        .unwrap_or_else(|| (session.mesh_name.clone().unwrap_or_else(|| "…".to_string()), String::new()));
     // In Discord voice, the buttons drive that call; otherwise Matrix calls.
     let discord = discord.filter(|v| v.connected());
     let (muted, deafened) = match discord {
@@ -6431,7 +6454,9 @@ fn apply_audio_devices(session: &Session) {
         (session.selected_input != DEFAULT_DEVICE).then(|| session.selected_input.clone());
     let output =
         (session.selected_output != DEFAULT_DEVICE).then(|| session.selected_output.clone());
-    session.client.set_audio_devices(input, output);
+    if let Some(client) = &session.client {
+        client.set_audio_devices(input, output);
+    }
 }
 
 /// Microphone / speaker pickers for the settings screen.
@@ -7289,7 +7314,8 @@ const FRIEND_INPUT: &str = "friend";
 
 const DISCORD_REQUESTS_UNSUPPORTED: &str = "mautrix-discord can't send Discord friend requests. Message them in a server you share; the DM shows up here once it's bridged.";
 
-fn load_pending(client: Arc<MeshClient>) -> Task<Message> {
+fn load_pending(client: Option<Arc<MeshClient>>) -> Task<Message> {
+    let Some(client) = client else { return Task::none() };
     Task::perform(async move { client.pending_contacts().await }, Message::PendingLoaded)
 }
 
