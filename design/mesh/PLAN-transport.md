@@ -1,6 +1,6 @@
 # Plan: `transport` (Mesh)
 
-Status: **DRAFT 2026-10-26, for your review.** Implements
+Status: **APPROVED 2026-10-26.** Implements
 [SPEC-transport.md](SPEC-transport.md) (approved 2026-10-26).
 
 As with identity, the plan and its checklist live here; the code goes in
@@ -43,7 +43,7 @@ module ends with the two-machine check on the Windows PC and the Linux box.
 
 ### Phase 1: Foundation
 
-- [ ] **Task 1: Scaffold `mesh-transport`, and answer the unknowns**
+- [x] **Task 1: Scaffold `mesh-transport`, and answer the unknowns** (Mesh-Node `1e74a9d`)
   - What:
     - the crate with its dependencies;
     - `fn secret_key(&DeviceKey) -> iroh::SecretKey`, with a test that iroh's
@@ -56,6 +56,22 @@ module ends with the two-machine check on the Windows PC and the Linux box.
   - Verify: the spec's Commands.
   - Files: `Cargo.toml`, `crates/mesh-transport/{Cargo.toml,src/lib.rs}`.
   - Size S.
+  - **Result (2026-10-26):** done. 48 workspace tests pass; clippy and fmt
+    clean.
+    - **Network changes:** iroh runs its own network monitor (`netwatch`)
+      and detects changes by itself on desktop systems.
+      `Endpoint::network_change()` exists for platforms like Android that
+      hide those events from native code; calling it is harmless but not
+      needed. So no extra code; the gate tests a real switch.
+    - **Binary size:** iroh with our features adds about 14 MiB stripped
+      (measured on the spike: 15.6 MiB against 0.6 MiB for tokio alone).
+      `mesh-node` is 7.1 MiB stripped now (9.4 MiB as built), so expect
+      about 22 MiB once Task 8 links iroh in. Neither repo strips release
+      builds yet; `strip = true` would be a later, separate change.
+    - **Duplicate crates:** iroh's QUIC stack brings older copies of
+      `aead`, `aes`, `cipher` and `getrandom` (through `aes-gcm` 0.10 and
+      `ring`), and its network monitor two `netlink` versions. They're inside
+      iroh, so not ours to fix; noted.
 - [ ] **Task 2: Frames and service tags** (`frame.rs`)
   - What: write and read a service tag, then length-prefixed frames, over
     any async stream; the 32-byte tag and 1 MiB frame limits.
@@ -187,9 +203,7 @@ sitting with identity's Checkpoint D.
 Tasks 2 and 3 are independent of each other; Task 7 is independent of
 Tasks 2–6. I'll do them in order unless you want otherwise.
 
-## Open questions
+## Resolved questions (2026-10-26)
 
-- **P1. Checkpoints.** Proposed: short reports at A and B (I carry on), and
-  a hard stop at C, the module gate on Windows. Identity had hard stops at B
-  and D; transport's library has no security decision as big as the
-  keystore's, so I'd only stop at the gate. OK?
+- **P1. Checkpoints.** Short reports at A and B; a hard stop at C, the module
+  gate on Windows. `test-utils` as a dev-dependency approved with the plan.
