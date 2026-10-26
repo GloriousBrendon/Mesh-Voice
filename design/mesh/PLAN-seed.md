@@ -50,7 +50,7 @@ infrastructure.
     limit, a repeat hold keeping its count, restart and a damaged file.
     Identity gained `HeldCode::revoke_tag`, so the store doesn't read the
     record's layout itself. 80 workspace tests pass; clippy and fmt clean.
-- [ ] **Task 2: Seed mode** (D1, D2, D6, D10)
+- [x] **Task 2: Seed mode** (D1, D2, D6, D10)
   - What: `mesh-node seed --data <dir> [--relay <url>]`: makes or loads
     `seed.key` (0600), prints its ticket, runs a node serving `ping` and the
     three code services, sweeps hourly, logs counts only, stops on SIGTERM
@@ -63,6 +63,14 @@ infrastructure.
   - Files: `crates/mesh-node/src/{seed.rs,main.rs}`, `crates/mesh-transport`
     (if a service hook is needed), `crates/mesh-node/tests/seed.rs`.
   - Size M.
+  - Result (2026-10-26): transport gained service streams
+    (`Config::services`, `Node::next_stream`, with the caller's IP only
+    while direct) and `Node::open` for clients, plus a test. The process
+    test holds, fetches (single use), revokes, sends junk, stops the seed
+    with SIGTERM and starts it again: same ticket, and a used code stays
+    `gone`. The key file is 0600; the log holds no ID, code or lookup ID.
+    The store is saved every 5 s when changed, and on stop. On n0's relays
+    a fresh seed has its ticket in about 3.5 s. 83 workspace tests pass.
 - [ ] **Task 3: The helper uses seeds**
   - What: `--seed <ticket>`; `codeCreate` holds, `codeRevoke` revokes,
     holding again on node start and every 10 minutes; `held` in
