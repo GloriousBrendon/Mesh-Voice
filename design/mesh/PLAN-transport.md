@@ -105,7 +105,7 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
 
 ### Phase 2: Connections (the risky part)
 
-- [ ] **Task 4: Endpoint and handshake** (`endpoint.rs`, `handshake.rs`)
+- [x] **Task 4: Endpoint and handshake** (`endpoint.rs`, `handshake.rs`) (Mesh-Node `7a6f9b4`)
   - What:
     - `Node::start(device key, own cert, relays)` binds with the `Minimal`
       preset and ALPN `mesh/1`;
@@ -119,6 +119,19 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
   - Verify: `cargo test -p mesh-transport`.
   - Files: `src/{lib.rs,endpoint.rs,handshake.rs}`, `tests/two_nodes.rs`.
   - Size M.
+  - **Result (2026-10-26):** done. 64 workspace tests pass; clippy and fmt
+    clean; the two-node tests passed 5 runs in a row.
+    - Both sides authenticate each other over real QUIC on loopback. Raw
+      iroh endpoints play the bad peers: another identity's certificate gets
+      `key-mismatch` in both directions, garbage gets `bad-cert`, a silent
+      dialler and a silent listener both time out, and a key alone is
+      `Unreachable`. `Node::start` refuses a certificate that isn't its own.
+    - Close codes carry the reason to the other side (1 bad-cert,
+      2 key-mismatch, 3 timeout, 4 dropped).
+    - `MeshAddr` now has an optional relay and direct addresses (spec D3
+      allows both); tickets still require a relay and never carry IPs.
+    - Left for Task 5, as planned: limits on incoming connections and
+      handshakes (D9), and a bound on the queue of newly accepted peers.
 - [ ] **Task 5: Ping, reuse, limits and lock**
   - What:
     - the `ping` service (8-byte nonce) returning the round-trip time and the
