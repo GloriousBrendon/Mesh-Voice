@@ -100,7 +100,7 @@ this box.
 
 ### Phase 2: Mesh-Voice
 
-- [ ] **Task 4: Friend codes on Your ID**
+- [x] **Task 4: Friend codes on Your ID** (by-hand check after Task 7)
   - What: `meshCodes` (with `held`) and `meshResolved` in `mesh.rs`; a
     Friend codes section (make with expiry and uses, copy, revoke, "not
     saved to a seed yet"); Check an ID takes a code too.
@@ -109,6 +109,15 @@ this box.
   - Verify: `cargo test -p mesh-app -p mesh-discord`.
   - Files: `crates/mesh-discord/src/mesh.rs`, `crates/mesh-app/src/mesh_ui.rs`.
   - Size M.
+  - Result (2026-10-26): built. Your ID has Friend codes at the top
+    (expiry and uses pickers with identity's choices, defaults 7 days and
+    single use; a warning on "never"; each live code with its limits, "not
+    saved to a seed yet" until a seed holds it, Copy and Revoke). Check an
+    ID takes an ID, link or code; a code resolves first, then shows "The
+    code … is this ID" and the safety number. Tests: 26 in `mesh-app`, 15
+    in `mesh-discord`; it launches clean. The by-hand check waits for Task
+    7: until there's a built-in seed, the app can't point its helper at one
+    (no test-only setting added for it).
 
 ### Phase 3: Deployment
 

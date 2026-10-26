@@ -4,7 +4,7 @@
 //! open. Once it's open, Mesh's Accounts panel is Your ID (`manage`).
 
 use super::*;
-use iced::widget::{column, qr_code, row, scrollable};
+use iced::widget::{column, pick_list, qr_code, row, scrollable};
 use mesh::State;
 
 /// The `mesh-node` side of the app.
@@ -20,6 +20,8 @@ pub(crate) struct Mesh {
     qr: Option<qr_code::Data>,
     /// The node's latest `meshNet`.
     net: Option<mesh::Net>,
+    /// This device's live friend codes.
+    codes: Vec<mesh::Code>,
     form: Form,
     settings: Settings,
 }
@@ -64,7 +66,22 @@ struct Settings {
     ping: String,
     pong: Option<mesh::Pong>,
     ticket_copied: bool,
+    /// Friend codes: the chosen expiry and uses (labels; `None` is the default).
+    expiry: Option<&'static str>,
+    uses: Option<&'static str>,
+    /// The code just made, and the one last copied.
+    made: Option<String>,
+    code_copied: Option<String>,
+    /// The code Check an ID resolved, shown with the safety number.
+    resolved: Option<String>,
 }
+
+/// Friend-code expiry choices (identity's), as labels and `codeCreate` arguments.
+const EXPIRIES: [(&str, &str); 7] =
+    [("30 minutes", "1800"), ("1 hour", "3600"), ("6 hours", "21600"), ("12 hours", "43200"), ("24 hours", "86400"), ("7 days", ""), ("Never expires", "never")];
+const USES: [(&str, &str); 5] = [("Single use", ""), ("5 uses", "5"), ("10 uses", "10"), ("25 uses", "25"), ("Unlimited uses", "unlimited")];
+const DEFAULT_EXPIRY: &str = "7 days";
+const DEFAULT_USES: &str = "Single use";
 
 #[derive(Debug, Clone)]
 pub(crate) enum Msg {
@@ -93,6 +110,11 @@ pub(crate) enum Msg {
     CopyTicket,
     PingInput(String),
     Ping,
+    Expiry(&'static str),
+    Uses(&'static str),
+    MakeCode,
+    CopyCode(String),
+    RevokeCode(String),
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -113,6 +135,9 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
         mesh::Event::Identity(identity) => {
             let now_unlocked = identity.state == State::Unlocked;
             m.qr = identity.link.as_deref().filter(|_| now_unlocked).and_then(|link| qr_code::Data::new(link).ok());
+            if !now_unlocked {
+                m.codes.clear();
+            }
             m.identity = Some(identity);
             m.settings.busy = None;
             if !now_unlocked {
@@ -179,11 +204,31 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.settings.busy = None;
             m.settings.pong = Some(pong);
         }
+        mesh::Event::Codes(codes) => {
+            m.codes = codes.codes;
+            let s = &mut m.settings;
+            // Also comes by itself when a seed answers, so only end our own wait.
+            if matches!(s.busy, Some("codeCreate" | "codeRevoke")) {
+                s.busy = None;
+            }
+            if codes.created.is_some() {
+                s.made = codes.created;
+            }
+        }
+        mesh::Event::Resolved(resolved) => {
+            // Check an ID took a code: now the safety number with the ID it points to.
+            if let Some(node) = &m.node {
+                m.settings.busy = Some("safetyNumber");
+                m.settings.resolved = Some(resolved.code);
+                node.safety_number(&resolved.id);
+            }
+        }
         mesh::Event::Disconnected => {
             m.node = None;
             m.identity = None;
             m.qr = None;
             m.net = None;
+            m.codes.clear();
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -291,13 +336,43 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
         Msg::CheckInput(value) => {
             s.check = value;
             s.safety = None;
+            s.resolved = None;
             s.note = None;
         }
         Msg::Check => {
             if s.busy.is_none() && !s.check.trim().is_empty() {
-                s.busy = Some("safetyNumber");
                 s.note = None;
-                node.safety_number(s.check.trim());
+                s.resolved = None;
+                if is_code(&s.check) {
+                    s.busy = Some("codeResolve");
+                    node.resolve(s.check.trim());
+                } else {
+                    s.busy = Some("safetyNumber");
+                    node.safety_number(s.check.trim());
+                }
+            }
+        }
+        Msg::Expiry(label) => s.expiry = Some(label),
+        Msg::Uses(label) => s.uses = Some(label),
+        Msg::MakeCode => {
+            if s.busy.is_none() {
+                let arg = |choices: &[(&str, &'static str)], label: Option<&str>| {
+                    label.and_then(|l| choices.iter().find(|(c, _)| *c == l)).map_or("", |(_, a)| *a)
+                };
+                s.busy = Some("codeCreate");
+                s.note = None;
+                node.create_code(arg(&EXPIRIES, s.expiry), arg(&USES, s.uses));
+            }
+        }
+        Msg::CopyCode(code) => {
+            s.code_copied = Some(code.clone());
+            return iced::clipboard::write(code);
+        }
+        Msg::RevokeCode(code) => {
+            if s.busy.is_none() {
+                s.busy = Some("codeRevoke");
+                s.note = None;
+                node.revoke_code(&code);
             }
         }
         Msg::CopyTicket => {
@@ -344,6 +419,26 @@ fn can_restore(f: &Form) -> bool {
 
 fn can_change(s: &Settings) -> bool {
     !s.old.is_empty() && s.verdict.as_ref().is_some_and(|(ok, _)| *ok) && s.new == s.confirm
+}
+
+/// Whether Check an ID's text is a friend code rather than an ID.
+fn is_code(text: &str) -> bool {
+    let text = text.trim().to_ascii_lowercase();
+    text.starts_with("mesh://code/") || !(text.starts_with("mesh1") || text.starts_with("mesh://"))
+}
+
+/// A code's limits, for example "until 3 Nov 14:00 · single use".
+fn describe(c: &mesh::Code) -> String {
+    let until = match c.expires_at.and_then(|t| Local.timestamp_opt(t as i64, 0).single()) {
+        Some(t) => format!("until {}", t.format("%-d %b %H:%M")),
+        None => "never expires".into(),
+    };
+    let uses = match c.max_uses {
+        Some(1) => "single use".into(),
+        Some(n) => format!("up to {n} uses"),
+        None => "unlimited uses".into(),
+    };
+    format!("{until} · {uses}")
 }
 
 /// Network's status line, for example "Online · relay aps1 · 1 connection, direct".
@@ -545,19 +640,23 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     // Check an ID: the safety number both people read out (D7).
     let mut check = column![
         heading("check an id", p),
-        text("Paste a friend's ID or mesh:// link. Read the number to each other: if it matches, nobody is in the middle.")
+        text("Paste a friend's ID, mesh:// link or friend code. Read the number to each other: if it matches, nobody is in the middle.")
             .size(12)
             .color(p.text()),
-        field("THEIR ID", &s.check, Msg::CheckInput, false, Msg::Check, p),
-        action("Check", "safetyNumber", (!s.check.trim().is_empty()).then_some(Msg::Check)),
+        field("THEIR ID OR CODE", &s.check, Msg::CheckInput, false, Msg::Check, p),
+        action("Check", if s.busy == Some("codeResolve") { "codeResolve" } else { "safetyNumber" }, (!s.check.trim().is_empty()).then_some(Msg::Check)),
     ]
     .spacing(8)
+    .extend(note("codeResolve"))
     .extend(note("safetyNumber"));
     if let Some((safety, qr)) = &s.safety {
         let groups: Vec<&str> = safety.number.split_whitespace().collect();
         let mut digits = column![].spacing(4);
         for line in groups.chunks(4) {
             digits = digits.push(text(line.join("  ")).font(iced::Font::MONOSPACE).size(15).color(p.text_bright()));
+        }
+        if let Some(code) = &s.resolved {
+            check = check.push(ui::sans(format!("The code {code} is this ID:"), 12.0, Weight::Normal, p.text()));
         }
         check = check.push(ui::mono(format!("with {}", safety.id), 11.0, p.text_muted())).push(digits);
         if let Some(qr) = qr {
@@ -568,6 +667,51 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
             );
         }
     }
+
+    // Friend codes: short, expiring stand-ins for the ID, held by the seeds.
+    let expiry = s.expiry.unwrap_or(DEFAULT_EXPIRY);
+    let mut codes = column![
+        heading("friend codes", p),
+        text("Give someone a short code instead of your ID. Whoever types it in sees your ID; check the safety number together after.")
+            .size(12)
+            .color(p.text()),
+        row![
+            pick_list(EXPIRIES.map(|(l, _)| l).to_vec(), Some(expiry), |l| Message::MeshForm(Msg::Expiry(l))).padding(6),
+            pick_list(USES.map(|(l, _)| l).to_vec(), Some(s.uses.unwrap_or(DEFAULT_USES)), |l| Message::MeshForm(Msg::Uses(l))).padding(6),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8);
+    if expiry == "Never expires" {
+        codes = codes.push(text("A code that never expires works until you revoke it.").size(12).color(p.warning()));
+    }
+    codes = codes.push(action("Make a code", "codeCreate", Some(Msg::MakeCode))).extend(note("codeCreate"));
+    for c in &m.codes {
+        let mut info = column![ui::mono(describe(c), 11.0, p.text_muted())].spacing(2);
+        if !c.held {
+            info = info.push(ui::mono("not saved to a seed yet", 11.0, p.warning()));
+        }
+        let new = s.made.as_deref() == Some(c.code.as_str());
+        let copied = s.code_copied.as_deref() == Some(c.code.as_str());
+        codes = codes.push(
+            row![
+                ui::mono_bold(c.code.clone(), 15.0, if new { p.accent() } else { p.text_bright() }),
+                info,
+                Space::new().width(Length::Fill),
+                button(ui::sans(if copied { "Copied" } else { "Copy" }, 12.0, Weight::Normal, p.text_bright()))
+                    .on_press(Message::MeshForm(Msg::CopyCode(c.code.clone())))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+                button(ui::sans("Revoke", 12.0, Weight::Normal, p.danger()))
+                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::RevokeCode(c.code.clone()))))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    codes = codes.extend(note("codeRevoke"));
 
     // Network: is this device on Mesh, and can it reach another (a test until friends exist).
     let mut network = column![
@@ -635,7 +779,7 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     .spacing(8)
     .extend(note("idExport"));
 
-    scrollable(column![id, check, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
+    scrollable(column![id, codes, check, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
         .height(Length::Fill)
         .into()
 }
@@ -661,6 +805,23 @@ mod tests {
         f.confirm.pop();
         f.username = "  ".into();
         assert!(!can_continue(&f), "no username");
+    }
+
+    #[test]
+    fn codes() {
+        for code in ["K7QM-3XPA", "k7qm3xpa", "mesh://code/K7QM-3XPA", " MESH://CODE/k7qm-3xpa "] {
+            assert!(is_code(code), "{code}");
+        }
+        for id in ["mesh1qch7juuwr5jfh3ue964tak2jhx3qj5mt2dhnf8j4lusjfyl6llmsrutrz3", "mesh://id/mesh1abc", "MESH1ABC"] {
+            assert!(!is_code(id), "{id}");
+        }
+        let mut c = mesh::Code { code: "K7QM-3XPA".into(), link: String::new(), created_at: 0, expires_at: None, max_uses: Some(1), held: true };
+        assert_eq!(describe(&c), "never expires · single use");
+        (c.max_uses, c.expires_at) = (None, Some(1_800_000_000));
+        assert!(describe(&c).starts_with("until "), "{}", describe(&c));
+        assert!(describe(&c).ends_with(" · unlimited uses"));
+        c.max_uses = Some(25);
+        assert!(describe(&c).ends_with("up to 25 uses"));
     }
 
     #[test]

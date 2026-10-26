@@ -25,6 +25,11 @@ pub enum Event {
     Ticket(String),
     /// A ping's answer (`Node::ping`).
     Ping(Pong),
+    /// This device's live friend codes; comes after making or revoking one,
+    /// and when a seed confirms holding them.
+    Codes(Codes),
+    /// The ID a friend code points to (`Node::resolve`).
+    Resolved(Resolved),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -115,6 +120,39 @@ pub struct Pong {
     pub ms: f64,
 }
 
+/// A `meshCodes` report.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Codes {
+    pub codes: Vec<Code>,
+    /// The code just made, if this report answers `create_code`.
+    pub created: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Code {
+    /// `K7QM-3XPA`.
+    pub code: String,
+    /// `mesh://code/…`.
+    pub link: String,
+    pub created_at: u64,
+    /// Seconds since the epoch; `None` never expires.
+    pub expires_at: Option<u64>,
+    /// `None` is unlimited.
+    pub max_uses: Option<u32>,
+    /// A seed holds it, so others can look it up.
+    #[serde(default)]
+    pub held: bool,
+}
+
+/// A `meshResolved`: the code and the ID it points to.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Resolved {
+    pub code: String,
+    pub id: String,
+    pub link: String,
+}
+
 /// A `meshError`: the command that failed, a stable kind and a message to show.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Error {
@@ -171,6 +209,21 @@ impl Node {
         self.call("idCheckPassword", &[username, password]);
     }
 
+    /// Makes a friend code; `expiry` is seconds, `never` or empty (7 days),
+    /// `uses` a count, `unlimited` or empty (1). Answers with `Codes`.
+    pub fn create_code(&self, expiry: &str, uses: &str) {
+        self.call("codeCreate", &[expiry, uses]);
+    }
+    /// Answers with `Codes`.
+    pub fn revoke_code(&self, code: &str) {
+        self.call("codeRevoke", &[code]);
+    }
+    /// Looks a friend code (or `mesh://code/` link) up on the seeds; answers
+    /// with `Resolved` or an `Error` (`not-found`, `slow-down`, `offline`, or
+    /// what's wrong with the text).
+    pub fn resolve(&self, code: &str) {
+        self.call("codeResolve", &[code]);
+    }
     /// Asks for the node's state; answers with `Net`.
     pub fn net_status(&self) {
         self.call("netStatus", &[]);
@@ -260,6 +313,8 @@ fn line_event(line: &str) -> Option<Event> {
             Some(Event::Ticket(v["ticket"].as_str()?.to_owned()))
         }
         "meshPing" => serde_json::from_str(payload).ok().map(Event::Ping),
+        "meshCodes" => serde_json::from_str(payload).ok().map(Event::Codes),
+        "meshResolved" => serde_json::from_str(payload).ok().map(Event::Resolved),
         _ => None,
     }
 }
@@ -316,7 +371,16 @@ mod tests {
         };
         assert_eq!((pong.id.as_str(), pong.path.as_str(), pong.ms), ("mesh1abc", "direct", 0.7));
 
-        assert!(line_event(&line("meshCodes", r#"{"codes":[]}"#)).is_none());
+        let codes = r#"{"codes":[{"code":"K7QM-3XPA","link":"mesh://code/K7QM-3XPA","createdAt":5,"expiresAt":null,"maxUses":1,"held":true}],"created":"K7QM-3XPA"}"#;
+        let Some(Event::Codes(c)) = line_event(&line("meshCodes", codes)) else { panic!("no codes") };
+        assert_eq!((c.codes[0].held, c.codes[0].expires_at, c.created.as_deref()), (true, None, Some("K7QM-3XPA")));
+
+        let Some(Event::Resolved(r)) = line_event(&line("meshResolved", r#"{"code":"K7QM-3XPA","id":"mesh1abc","link":"mesh://id/mesh1abc"}"#)) else {
+            panic!("no resolve")
+        };
+        assert_eq!(r.id, "mesh1abc");
+
+        assert!(line_event(&line("meshParsed", r#"{"kind":"id"}"#)).is_none());
         assert!(line_event("not json").is_none());
     }
 }
