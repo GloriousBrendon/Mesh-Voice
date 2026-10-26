@@ -88,8 +88,9 @@ A spike on 2026-10-26 backs D1–D4: two endpoints on the Linux box, with iroh
   connect and run the handshake (D5) within 10 s.
 - The connection reports its current path: direct or relay, and the
   round-trip time (spike: `Connection::paths()`).
-- When a connection drops, the next use reconnects; repeated failures back
-  off (1 s, 2 s, 4 s… up to 60 s).
+- When a connection drops, the next use reconnects. Transport has no retry
+  loop of its own; modules that retry by themselves (`routing`, `mailbox`)
+  pace their retries (changed 2026-10-26, Task 5).
 - Network changes (Wi-Fi to hotspot, VPN on or off): connections recover by
   themselves. How iroh 1.4.1 detects the change (automatically, or through
   `Endpoint::network_change()`) is checked in the plan's first task, with a

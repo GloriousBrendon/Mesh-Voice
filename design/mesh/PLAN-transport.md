@@ -132,7 +132,7 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
       allows both); tickets still require a relay and never carry IPs.
     - Left for Task 5, as planned: limits on incoming connections and
       handshakes (D9), and a bound on the queue of newly accepted peers.
-- [ ] **Task 5: Ping, reuse, limits and lock**
+- [x] **Task 5: Ping, reuse, limits and lock** (Mesh-Node `d768eb7`)
   - What:
     - the `ping` service (8-byte nonce) returning the round-trip time and the
       current path (direct or relay);
@@ -146,6 +146,21 @@ in `mesh-transport` plus its vector); clippy and fmt clean.
   - Verify: `cargo test -p mesh-transport`.
   - Files: `src/{lib.rs,endpoint.rs}`, `tests/two_nodes.rs`.
   - Size M.
+  - **Result (2026-10-26):** done. 68 workspace tests pass (11 two-node
+    tests, stable over 5 runs); clippy and fmt clean.
+    - Ping reports who answered, the round-trip time and the path (direct
+      on loopback); repeated pings and dials reuse one connection, and the
+      other side sees one peer.
+    - Over the connection limit, a new device is refused while the existing
+      one keeps working. The stream cap holds: with 2 allowed, a third stream
+      waits. After `close`, pinging the node is `Unreachable`.
+    - `Node::start` takes a `Config` (relays and limits; defaults 256
+      connections, 32 handshakes, 32 streams).
+    - **Changed from the spec: no retry backoff in transport.** Transport
+      connects only when asked and has no retry loop of its own, so there's
+      nothing to pace. A failed dial reconnects on the next call; modules
+      that retry by themselves (`routing`, `mailbox`) pace their retries.
+      The spec says so now.
 - [ ] **Task 6: The relay path**
   - What: a test with a local relay (`test-utils`) and direct paths blocked,
     so traffic must go through the relay; an `--ignored` test against n0's
