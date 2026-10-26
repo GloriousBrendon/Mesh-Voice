@@ -108,7 +108,7 @@ A spike on 2026-10-26 backs D1–D4: two endpoints on the Linux box, with iroh
 
 ### Services and framing (D6)
 
-- Stream start: a service tag (UTF-8, at most 32 bytes, length-prefixed).
+- Stream start: a service tag (1–32 printable ASCII bytes, length-prefixed).
 - Then frames: `u32` big-endian length + bytes. A frame over 1 MiB, or an
   unknown service, closes that stream with an error, not the connection.
 - Transport's own services: `hello` and `ping` (echoes an 8-byte nonce;

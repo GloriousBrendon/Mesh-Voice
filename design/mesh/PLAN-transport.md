@@ -72,7 +72,7 @@ module ends with the two-machine check on the Windows PC and the Linux box.
       `aead`, `aes`, `cipher` and `getrandom` (through `aes-gcm` 0.10 and
       `ring`), and its network monitor two `netlink` versions. They're inside
       iroh, so not ours to fix; noted.
-- [ ] **Task 2: Frames and service tags** (`frame.rs`)
+- [x] **Task 2: Frames and service tags** (`frame.rs`) (Mesh-Node `f9014d7`)
   - What: write and read a service tag, then length-prefixed frames, over
     any async stream; the 32-byte tag and 1 MiB frame limits.
   - Accept: unit tests for round trips, an empty frame, exactly 1 MiB, over
@@ -80,7 +80,7 @@ module ends with the two-machine check on the Windows PC and the Linux box.
   - Verify: `cargo test -p mesh-transport`.
   - Files: `crates/mesh-transport/src/frame.rs`.
   - Size S.
-- [ ] **Task 3: Test tickets** (`ticket.rs`)
+- [x] **Task 3: Test tickets** (`ticket.rs`) (Mesh-Node `f9014d7`)
   - What: `mesh://node/<device key>?relay=<url>` to and from `MeshAddr`
     (D10), with no IPs.
   - Accept: round trip; each malformed form (wrong scheme, bad key, missing
@@ -91,6 +91,17 @@ module ends with the two-machine check on the Windows PC and the Linux box.
 
 **Checkpoint A (short report):** pure parts done and tested; the network
 change and binary size answers recorded.
+
+**Checkpoint A result (2026-10-26):** done. 55 workspace tests pass (7 new
+in `mesh-transport` plus its vector); clippy and fmt clean.
+- Frames: round trips, an empty frame, exactly 1 MiB, over 1 MiB on write
+  and on read (a claimed 4 GiB length fails before allocating), a cut-off
+  length, body and tag, and bad tags.
+- Tags are printable ASCII (1–32 bytes) rather than any UTF-8: stricter and
+  simpler, and every planned service name fits. The spec says so now.
+- Tickets: round trip (also with spaces around a paste); wrong scheme,
+  missing relay, damaged key, an invalid key, a damaged relay and a non-HTTP
+  relay each give their own error. The vector's key matches OpenSSL's.
 
 ### Phase 2: Connections (the risky part)
 
