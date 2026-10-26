@@ -1,6 +1,6 @@
 # Spec: `transport` (Mesh)
 
-Status: **DRAFT 2026-10-26, for your review.** Module 2 of the build order in
+Status: **APPROVED 2026-10-26.** Plan: [PLAN-transport.md](PLAN-transport.md). Module 2 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Depends on
 [`identity`](SPEC-identity.md) (done, Checkpoint D pending on Windows).
 Replaces the original repo's TUNNEL_MANAGEMENT and WireGuard ADR.
@@ -268,24 +268,15 @@ fn check_hello(cert: &[u8], remote: &iroh::PublicKey) -> Result<Peer, HandshakeE
 7. Locking closes the endpoint: a ping to it afterwards fails with
    `unreachable`.
 
+## Resolved questions (2026-10-26)
+
+- **Q1. Relays until `seed` exists?** n0's public relays now; our own homelab
+  relay comes with `seed` (D4).
+- **Q2. Direct connections show each other's IP.** Direct for everyone you
+  connect to in v1; `social` decides whether non-friends get relay-only.
+- **Q3. The Network section in Mesh-Voice?** Yes: status, test ticket and
+  ping on Your ID.
+
 ## Open questions
 
-- **Q1. Which relays until `seed` exists?**
-  - **(a) n0's public relays now, ours in `seed` (recommended).** It works
-    today. The catch: another company's servers see which devices talk and
-    their IPs (not content), and a free public service has no guarantee. From
-    here, iroh picked its Asia-Pacific relay (250 ms), so our own will also be
-    faster.
-  - (b) Set up our own relay on the homelab as part of this module. It pulls
-    part of `seed` forward and makes this module bigger.
-- **Q2. Direct connections show each person the other's IP address.** That's
-  how any peer-to-peer connection works (Discord hides it by routing calls
-  through its servers). Options:
-  - **(a) Direct for everyone you connect to in v1 (recommended)**, and
-    decide in `social` whether people who aren't your friends get relay-only.
-  - (b) A "hide my IP (relay only)" switch now. Slower and heavier on the
-    relay, and I'd need to confirm iroh 1.4.1 supports refusing direct paths
-    per connection before promising it.
-- **Q3. The Network section in Mesh-Voice** (status, test ticket, ping). It's
-  small and makes the two-machine check easy from the app. The alternative is
-  helper commands only, from a terminal. Recommended: the section.
+None left for this module.
