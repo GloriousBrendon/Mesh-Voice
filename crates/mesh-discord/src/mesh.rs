@@ -15,6 +15,8 @@ pub enum Event {
     /// The verdict on a password being typed (`Node::check_password`).
     Password { ok: bool, message: String },
     Error(Error),
+    /// A command that answers with nothing else went through (`idChangePassword`, `idExport`).
+    Done(String),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -88,6 +90,24 @@ impl Node {
     pub fn lock(&self) {
         self.call("idLock", &[]);
     }
+    /// Turns "keep unlocked on this device" on or off; answers with `Identity`.
+    pub fn keep_unlocked(&self, on: bool) {
+        self.call("idKeepUnlocked", &[if on { "true" } else { "false" }]);
+    }
+    /// Answers with `Done` or `Error`.
+    pub fn change_password(&self, username: &str, old: &str, new: &str) {
+        self.call("idChangePassword", &[username, old, new]);
+    }
+    /// Writes an encrypted backup that opens with this username and password;
+    /// answers with `Done` or `Error`.
+    pub fn export(&self, path: &str, username: &str, password: &str) {
+        self.call("idExport", &[path, username, password]);
+    }
+    /// Restores a backup as this install's identity (a new device), with a new
+    /// password; answers with `Identity` (unlocked) or `Error`.
+    pub fn import(&self, path: &str, username: &str, backup_password: &str, new_password: &str) {
+        self.call("idImport", &[path, username, backup_password, new_password]);
+    }
     /// Asks whether a new password would be accepted; answers with `Password`.
     pub fn check_password(&self, username: &str, password: &str) {
         self.call("idCheckPassword", &[username, password]);
@@ -156,6 +176,10 @@ fn line_event(line: &str) -> Option<Event> {
             Some(Event::Password { ok: v["ok"].as_bool()?, message: v["message"].as_str().unwrap_or_default().to_owned() })
         }
         "meshError" => serde_json::from_str(payload).ok().map(Event::Error),
+        "meshDone" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(Event::Done(v["fn"].as_str()?.to_owned()))
+        }
         _ => None,
     }
 }
@@ -188,6 +212,9 @@ mod tests {
             panic!("no error")
         };
         assert_eq!((e.func.as_str(), e.kind.as_str()), ("idUnlock", "unlock"));
+
+        let Some(Event::Done(func)) = line_event(&line("meshDone", r#"{"fn":"idExport"}"#)) else { panic!("no done") };
+        assert_eq!(func, "idExport");
 
         assert!(line_event(&line("meshCodes", r#"{"codes":[]}"#)).is_none());
         assert!(line_event("not json").is_none());

@@ -408,7 +408,9 @@ pub(crate) fn panel<'a>(state: &'a App) -> Element<'a, Message> {
     .align_y(iced::Alignment::Center);
 
     let mut body = column![header].spacing(18).height(Length::Fill);
-    if managing {
+    if managing && spec.id == "mesh" {
+        body = body.push(mesh_ui::manage(state));
+    } else if managing {
         body = body.push(manage(state, spec, network, link.as_ref(), panel.confirm_sign_out));
     } else {
         let steps = spec.auth.steps();

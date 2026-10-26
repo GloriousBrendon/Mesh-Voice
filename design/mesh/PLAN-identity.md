@@ -281,6 +281,12 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     to `whatsapp.rs`), `mesh-app/src/main.rs`, `mesh-app/src/accounts.rs`,
     `mesh-app/src/mesh_ui.rs` (new).
   - Size M. Depends on Task 11.
+  - **Result (2026-10-26):** code done (Mesh-Voice `f9900a8`). The
+    screens come before everything and nothing else starts while locked;
+    Mesh is first in the registry with the tag `me` (2 letters, like the
+    rest). Checked by screenshot: onboarding on a fresh directory, unlock on
+    a locked one. The typed part of the accept run is left to you (no input
+    tool on the Linux box).
 - [ ] **Task 12b: Mesh-Voice: Matrix becomes optional** (added and approved
   2026-10-26: "Matrix is optional")
   - Why: you chose Mesh's screens to come before everything. Task 12 puts
@@ -292,6 +298,9 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - Accept: a fresh install with no Matrix account opens straight into the
     app after Mesh's onboarding; signing Matrix in and out from Accounts works.
   - Size M–L. Depends on Task 12.
+  - **Result (2026-10-26):** code done (`f9900a8`). Checked by screenshot:
+    the app opens with no Matrix session. Matrix sign-in and sign-out from
+    its card are left to your test run.
 - [ ] **Task 13: Mesh-Voice: Your ID, keep unlocked, password and backup**
   - What:
     - the Your ID page (`mesh1…` with a copy button, a QR code of the
@@ -306,6 +315,12 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - Files: `mesh-app/src/mesh_ui.rs`, `mesh-app/src/main.rs`,
     `mesh-discord/src/mesh.rs`.
   - Size M. Depends on Task 12.
+  - **Result (2026-10-26):** code done. Your ID is Mesh's Accounts panel
+    (ID with copy, QR of the `mesh://` link via iced's `qr_code` feature,
+    devices, the keep-unlocked switch, change password, export); restoring
+    is "I have a backup" on onboarding's first screen. The keep-unlocked
+    switch shows as unavailable here (no Secret Service). Not run by hand:
+    left to your test run, like 12 and 12b.
 - [ ] **Task 14: Mesh-Voice: Check an ID** (safety number)
   - What: paste an ID or `mesh://` link → the specific parse error or the
     60-digit safety number (and its QR). This is what the two-machine check
