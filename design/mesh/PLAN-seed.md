@@ -71,7 +71,7 @@ infrastructure.
     `gone`. The key file is 0600; the log holds no ID, code or lookup ID.
     The store is saved every 5 s when changed, and on stop. On n0's relays
     a fresh seed has its ticket in about 3.5 s. 83 workspace tests pass.
-- [ ] **Task 3: The helper uses seeds**
+- [x] **Task 3: The helper uses seeds**
   - What: `--seed <ticket>`; `codeCreate` holds, `codeRevoke` revokes,
     holding again on node start and every 10 minutes; `held` in
     `meshCodes`; `gone` drops a code; `codeResolve(code)` → `meshResolved`
@@ -84,6 +84,17 @@ infrastructure.
   - Files: `crates/mesh-node/src/helper.rs`, `crates/mesh-identity/src/keystore.rs`,
     `crates/mesh-node/tests/seed.rs`.
   - Size M.
+  - Result (2026-10-26): the process test passes, stable over three runs:
+    Bob resolves Alice's single-use code once, then `not-found` (code or
+    link); after Alice unlocks again it leaves her list; a revoked code
+    finds nothing; Bob gets `slow-down` within 15 guesses; a code made while
+    the seed is down is held after the seed is back and Alice unlocks. No
+    ID or code in the seed's log. `codeResolve` takes `K7QM-3XPA` or a
+    `mesh://code/` link. Idle cost with the second node: 0.13% of a core,
+    44.9 MiB (was 37.5). 84 workspace tests pass; clippy and fmt clean.
+
+**Checkpoint A result (2026-10-26):** seed and helper work end to end on
+this box.
 
 **Checkpoint A (short report):** seed and helper work end to end on this box.
 
