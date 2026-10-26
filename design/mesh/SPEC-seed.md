@@ -1,6 +1,6 @@
 # Spec: `seed` (Mesh)
 
-Status: **DRAFT 2026-10-26, for review.** Module 3 of the build order in
+Status: **APPROVED 2026-10-26** (with the recommended answers). Plan: [PLAN-seed.md](PLAN-seed.md). Module 3 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Depends on
 [`transport`](SPEC-transport.md) (built; Checkpoint C pending on Windows) and
 uses [`identity`](SPEC-identity.md)'s friend-code records as they are.
@@ -84,10 +84,19 @@ can find each other without pasting a 60-character ID.
 Each request is one stream: the service tag, one request frame, one answer
 frame.
 
-- `code-hold`: request `HeldCode` bytes. Answer `ok`, or `full` (this
-  device's 50, or the seed's 100,000), or `bad` (doesn't parse, or already
-  expired). Holding a `lookup_id` that already exists answers `taken`: a
-  40-bit collision is a fluke, and the client makes another code.
+- `code-hold`: request `HeldCode` bytes. Answers:
+  - `ok`: stored, or already held for the same owner (the record's revoke
+    tag matches). A repeat hold changes nothing, so its uses aren't reset;
+  - `gone`: this owner's code was used up or revoked; the client drops it
+    from its list;
+  - `taken`: a different owner's code has that `lookup_id` (a 40-bit
+    collision, a fluke; the client makes another code);
+  - `full` (this device's 50, or the seed's 100,000) or `bad` (doesn't
+    parse, or already expired).
+- When a record is used up or revoked, the seed keeps a marker (lookup ID,
+  revoke tag, expiry: 56 bytes) until the record would have expired, or for
+  good if it never expires, counted in the 100,000. Without it, a client
+  re-holding its codes would bring a used single-use code back.
 - `code-get`: request a 16-byte `lookup_id`. Answer the record (`found` +
   bytes), `none`, or `slow-down` (a limit hit). A found single-use record is
   deleted as it's sent.
@@ -100,8 +109,11 @@ frame.
 ### Client side (the helper)
 
 - `codeCreate` now also hands the held record to a seed. `meshCodes` marks
-  each code `held: true|false`; a code no seed holds still works once a later
-  try succeeds (the helper retries holding on unlock and every 10 minutes).
+  each code `held: true|false`. The helper holds every live code again when
+  the node starts and retries any not yet held every 10 minutes, rebuilding
+  the record from the keystore (identity gains `Keystore::held_record`). A
+  `gone` answer drops the code from the list, so used-up codes disappear
+  from Your ID too.
 - `codeRevoke` sends the revoke to the seeds too.
 - New `codeResolve(code)` → `meshResolved` (`{"id", "link"}`, after opening
   and checking the record), or `meshError` with `fn: codeResolve` and a kind:
@@ -229,19 +241,16 @@ const LOOKUPS_PER_DEVICE: u32 = 10;
    the homelab. Nothing but the relay is reachable from outside, and the
    seed's logs hold no identifying data.
 
+## Resolved questions (2026-10-26)
+
+"Just do whatever you recommend. We can always change and fix after."
+
+- **No port forwarding** for anyone, the homelab included (D0).
+- **Q1.** A `relay.` subdomain through the homelab's Caddy and existing 443.
+- **Q2.** None: D0.
+- **Q3.** Device-link rendezvous later, as its own small task.
+- **Q4.** Rendezvous by ID is `routing`'s.
+
 ## Open questions
 
-- **Q1. The relay's address.** (a) A `relay.` subdomain on the homelab's
-  domain, through the existing Caddy and 443 (recommended, D3: no new
-  forward). (b) A Cloudflare Tunnel, which doesn't even need the existing
-  443; the cost is that every relayed connection detours through Cloudflare,
-  which then sees who connects to the relay (never the contents).
-- **Q2. Router ports.** Resolved by D0: none.
-- **Q3. Device-link rendezvous.** Identity's "Link a device" needs a way for
-  the new device to find the existing one by a link code. It's the same
-  mechanism as friend codes (the seed holds the existing device's ticket
-  under the link code for 5 minutes). (a) Later, as its own small task once
-  the seed works (recommended: backups already cover a second device).
-  (b) In this module.
-- **Q4. Rendezvous by ID.** (a) Leave it to `routing`, which designs who may
-  ask where you are (recommended). (b) A basic version now.
+None.
