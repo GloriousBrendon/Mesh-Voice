@@ -64,7 +64,7 @@ can find each other without pasting a 60-character ID.
 | D8 | **Limits on the seed**, all enforced there: per device, 10 lookups a minute and 20 new held codes an hour; across everyone, 600 lookups a minute and 100,000 held codes; per source network (/24 or /48), 30 lookups a minute. A record is deleted when it expires, runs out of uses or is revoked. | A live-codes-per-person cap would need the seed to remember who held what, which D10 rules out; a rate doesn't. Keys are free to make, so per-device limits alone don't stop guessing; the per-network and global limits do. With 40-bit codes at the full 600 a minute, finding one *particular* code takes about 1,700 years on average. Finding *any* code among 100,000 live ones takes about two weeks, and gives the guesser a random stranger's ID (not access: the safety number and `social` still stand). The catch: someone using the whole global budget slows real lookups too. The per-network limit makes that take many networks; if it happens, the limits move. |
 | D9 | **Storage is one file** in the data directory, rewritten atomically on change (`postcard`, already a dependency). | 100,000 records of about 200 bytes is 20 MB: no database needed. |
 | D10 | **Nothing identifying is logged or kept.** No IPs, keys, lookup IDs or codes in logs; counts only (holds, lookups, refusals per hour). The store keeps no record of which device held or fetched a code; rate-limit counters (by throwaway device key and by network) live in memory for a minute or an hour. Nothing listens for admin: admin is ssh over Tailscale, and `docker logs`. | The map's hardening: the seed holds nothing readable and tells nothing about who used it. |
-| D11 | **Deployment**: a `Dockerfile` (multi-stage, static binary, non-root, read-only root filesystem, `/data` volume) and a `compose.yaml` for the homelab with the seed and relay containers. A systemd unit too, for running without Docker (the later VPS). | The map: "deployed with Docker or systemd". |
+| D11 | **Deployment**: a `Dockerfile` (multi-stage, distroless, non-root, read-only root filesystem, `/data` volume) and a `compose.yaml` for the homelab with the seed and relay containers. A systemd unit too, for running without Docker (the later VPS). | The map: "deployed with Docker or systemd". |
 
 ## Behaviour
 
@@ -140,8 +140,8 @@ On Your ID:
 | `iroh-relay` 1.4.1, feature `server`, **only in the relay's Docker image**, built with `cargo install` | The relay (D3). Not a dependency of any crate of ours. |
 | (nothing new in `mesh-node`) | Seed mode uses transport, identity, tokio and postcard, all already there. |
 
-Container base images: `rust` (pinned) to build, `gcr.io/distroless/static`
-(pinned digest) to run.
+Container base images: `rust` (pinned) to build, `gcr.io/distroless/cc`
+(pinned) to run: `mesh-node` links only glibc and libgcc, which `cc` has.
 
 ## Commands
 

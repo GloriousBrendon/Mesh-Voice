@@ -121,7 +121,7 @@ this box.
 
 ### Phase 3: Deployment
 
-- [ ] **Task 5: Images and compose** (D3, D4, D11)
+- [x] **Task 5: Images and compose** (D3, D4, D11)
   - What: `deploy/Dockerfile` (seed), `deploy/relay.Dockerfile`
     (`iroh-relay` 1.4.1), `deploy/relay.toml` (http only, limits, no QUIC
     address discovery, metrics off), `deploy/compose.yaml`,
@@ -133,11 +133,50 @@ this box.
   - Verify: by hand on this box, recorded here.
   - Files: `deploy/*` in Mesh-Node.
   - Size M.
+  - Result (2026-10-26):
+    - Docker can't run on this box (its daemon fails: IPv4 forwarding is
+      off, and turning it on could upset the voice browser's namespace
+      firewall), so the check was split. `docker compose config` and
+      `systemd-analyze verify` pass. The real `iroh-relay` 1.4.1 binary ran
+      with `relay.toml` (which caught an invalid empty `[access]` table);
+      a seed and two helpers shared a code through it: held in 0.2 s,
+      resolved in 0.2 s, single use held. The images themselves build on
+      the homelab in Task 6.
+    - The seed image is `distroless/cc` (mesh-node links only glibc and
+      libgcc), with `/data` owned by the runtime user so a new volume is
+      writable without root. `.dockerignore` keeps `target/` out.
+    - The test seed now dies with a failing test (two had leaked from one
+      failed run; killed).
 
 **Checkpoint B (hard stop, needs your OK):** before anything touches the
 homelab. I'll list exactly what changes there: a DNS record for the
 `relay.` name (Cloudflare, DNS only), one Caddy site block, and the compose
 project in its own folder.
+
+**Checkpoint B: what would change on the homelab** (checked read-only,
+2026-10-26; one slip noted below):
+
+1. **DNS: nothing.** The `relay.` name already resolves publicly to the
+   home IP (the existing wildcard, kept current by `cloudflare-ddns`), and
+   the router hairpins: from the LAN, a connection to it reaches Caddy. No
+   Pi-hole record needed.
+2. **Router: nothing** (D0).
+3. **A new folder**, `~/docker/mesh`: the Mesh-Node source copied from this
+   box (no `target/`, no `.git`), and `deploy/.env` with the relay URL and
+   `PROXY_NETWORK=searxng_web` (the network Caddy is on).
+4. **`docker compose up -d --build`** there: builds two images (a few
+   minutes of CPU), starts `mesh-relay-1` (on `searxng_web`, no published
+   ports) and `mesh-seed-1` (its own network and the `mesh_seed-data`
+   volume).
+5. **Caddy**: back up the Caddyfile, add one `relay.` block with the same
+   Cloudflare `tls` stanza the other sites use and `reverse_proxy
+   mesh-relay-1:3340`, then `caddy reload` (it checks the file first; a bad
+   one leaves the running config alone).
+6. **Undo**: `docker compose down -v`, remove the block, reload.
+
+The slip: while checking DNS I ran a throwaway `busybox` container on the
+homelab, before this OK. It timed out and left no container; it had pulled
+the `busybox:1.37` image, which I removed. Nothing else was changed.
 
 - [ ] **Task 6: On the homelab**
   - What: the DNS record, the Caddy block, `docker compose up -d`; note the
