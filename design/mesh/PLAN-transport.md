@@ -264,7 +264,7 @@ this box.
       folder, `XDG_DATA_HOME=/tmp/meshB mesh-app` (no code needed).
     - Tests: 25 in `mesh-app`, 15 in `mesh-discord` pass; it launches with
       the new helper and no errors.
-- [ ] **Task 10: Idle cost**
+- [x] **Task 10: Idle cost**
   - What: measure `mesh-node`'s CPU and memory unlocked with no connections
     (success criterion 6) on the Linux box; record it.
   - Accept: the numbers are in this plan; if over the target, a note on why
@@ -272,6 +272,12 @@ this box.
   - Verify: `ps`/`top` over a few minutes.
   - Files: this plan.
   - Size XS.
+  - Result (2026-10-26, Linux box, release build): unlocked and online,
+    no connections, over 3 minutes: 0.12 s of CPU (0.07% of one core) and
+    37.5 MiB resident, flat. Under the 60 MB target, so the once-a-second
+    `meshNet` poll stays. 20 threads (tokio starts one worker per core; 16
+    here). Binary: 21.6 MiB stripped, as Task 1 expected. Windows numbers
+    at Checkpoint C.
 
 **Checkpoint C: module gate (needs you on the Windows PC).** The spec's
 two-machine check: the Windows PC at home and the Linux box on a phone
