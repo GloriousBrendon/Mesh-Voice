@@ -1,6 +1,6 @@
 # Capability Map: Mesh (serverless Discord)
 
-Status: **APPROVED 2026-10-22.** `identity` is done (Checkpoint D pending on Windows); next: the `transport` spec (`design/mesh/SPEC-transport.md`, draft).
+Status: **APPROVED 2026-10-22.** `identity` and `transport` are built (their Windows checkpoints pending); next: the `seed` spec (`design/mesh/SPEC-seed.md`, draft).
 
 **What Mesh is:** Discord without servers. Every install is a node. There is
 no account to register: your identity is a keypair, and your ID is your public
