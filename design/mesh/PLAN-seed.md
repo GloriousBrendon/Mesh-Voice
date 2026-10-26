@@ -36,7 +36,7 @@ infrastructure.
 
 ### Phase 1: The seed (Mesh-Node)
 
-- [ ] **Task 1: The held-code store** (D7, D8, D9)
+- [x] **Task 1: The held-code store** (D7, D8, D9)
   - What: `codes.rs`: hold, get, revoke with the spec's answers; markers for
     used-up and revoked codes; per-device, per-network and global limits;
     expiry sweep; save to one file atomically, load it back, refuse a
@@ -46,11 +46,17 @@ infrastructure.
   - Verify: `cargo test -p mesh-node codes`.
   - Files: `crates/mesh-node/src/codes.rs`, `main.rs` (the `mod`).
   - Size M.
+  - Result (2026-10-26): 10 unit tests pass, covering every answer and
+    limit, a repeat hold keeping its count, restart and a damaged file.
+    Identity gained `HeldCode::revoke_tag`, so the store doesn't read the
+    record's layout itself. 80 workspace tests pass; clippy and fmt clean.
 - [ ] **Task 2: Seed mode** (D1, D2, D6, D10)
   - What: `mesh-node seed --data <dir> [--relay <url>]`: makes or loads
     `seed.key` (0600), prints its ticket, runs a node serving `ping` and the
     three code services, sweeps hourly, logs counts only, stops on SIGTERM
-    and saves.
+    and saves. The caller's network comes from the connection's direct path;
+    a relayed caller has none, so only the per-device and global limits
+    apply to it.
   - Accept: a test starts a seed process and holds, gets and revokes a code
     over a real connection; stderr has no keys, IDs or lookup IDs.
   - Verify: `cargo test -p mesh-node`.
@@ -61,7 +67,8 @@ infrastructure.
   - What: `--seed <ticket>`; `codeCreate` holds, `codeRevoke` revokes,
     holding again on node start and every 10 minutes; `held` in
     `meshCodes`; `gone` drops a code; `codeResolve(code)` → `meshResolved`
-    or the spec's error kinds. `Keystore::held_record`.
+    or the spec's error kinds. `Keystore::held_record`. Seed requests go
+    out from a second node with a throwaway identity (D7b).
   - Accept: the process test with a seed and two helpers (spec "Process
     test"): resolve, single use, revoke, `slow-down`, and a code made while
     the seed is down gets held once it's back.
@@ -132,7 +139,8 @@ transport's Checkpoint C and identity's Checkpoint D on the Windows PC.
 | The homelab is down or its home connection drops | Medium | n0's relays stay in the list (D5), so Mesh stays online; codes don't resolve until it's back. A VPS seed comes after testing (map). |
 | Caddy proxying the relay's websocket upgrade | Low | Caddy's `reverse_proxy` handles websockets by default; Task 5 runs the same setup locally first. |
 | Guessing codes at the global limit slows real lookups | Low | Per-network limit first; the counts in the log show it; limits move if needed (spec D8). |
-| Someone fills the store with junk codes | Low | 50 per device, 100,000 total, expiry; a full store refuses new holds, it doesn't drop real ones. |
+| Someone fills the store with junk codes | Low | 20 new an hour per device, 100,000 total, expiry; a full store refuses new holds, it doesn't drop real ones. Keys are free, so a determined filler can reach the cap; the counts in the log show it. |
+| The throwaway node (D7b) costs a second endpoint while unlocked | Low | It's idle almost always; Task 3 re-measures idle cost. |
 | The seed's key file is copied off the homelab | Low | It proves only "I'm the seed"; the copier still can't read any record. Rotating means a new key in the next release. |
 
 ## Open questions
