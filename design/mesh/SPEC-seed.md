@@ -41,20 +41,24 @@ can find each other without pasting a 60-character ID.
 - Someone trying codes at random gets slowed to a crawl long before they hit
   a real one.
 - Mesh's status line shows our own relay as home when it's the closest one.
-- Brendon runs the seed with one `docker compose up -d` on the homelab, and
-  nothing about it is reachable from the internet except the relay and the
-  node port.
+- I install Mesh and use it. I never forward a port, open a firewall or
+  set up anything on my router; neither does anyone I talk to.
+- Brendon runs the seed with one `docker compose up -d` on the homelab. It
+  needs no new router setting either: the relay rides on the HTTPS port
+  Caddy already has, and nothing else about the seed is reachable from the
+  internet.
 
 ### Decisions this spec makes (review these)
 
 | # | Decision | Why |
 |---|---|---|
+| D0 | **No port forwarding, anywhere.** People who install Mesh never touch their router (transport already works this way: hole punching, then a relay over HTTPS; `portmapper` may ask a home router for a port by itself, but nothing depends on it). The seed adds no router setting either: the relay uses the existing 443 → Caddy, and the seed node has no public port at all. | Mesh has to be install-and-use, like Discord. If a seed needed forwarding, so would anyone running one later. |
 | D1 | **`mesh-node seed --data <dir>`**: the same binary, a headless mode. No stdin protocol; logs to stderr; stops cleanly on SIGTERM. | The map's one-binary decision. Docker and systemd both handle a foreground process that logs to stderr. |
 | D2 | **The seed has its own key, stored unencrypted** in its data directory (file mode 0600, the container's volume). It's a device key with no root identity behind it: clients know a seed by its device key, from a built-in list. | A seed starts unattended, so there's nobody to type a password. It holds no one's secrets: its key only proves it is the seed. Losing it means shipping a new seed key in the next release, not anyone's identity. |
 | D3 | **The relay is upstream `iroh-relay` 1.4.1**, iroh's own relay server, in its own container next to the seed. Built from crates.io in our Dockerfile, the same pinned version as the client. TLS comes from the homelab's existing Caddy on a `relay.` subdomain; the relay itself listens on plain http inside the Docker network. | No relay code of ours to maintain, and nothing server-side gets linked into the client `mesh-node`. Caddy already terminates TLS for the homelab's other sites, so no new certificate setup. |
-| D4 | **The relay is open to every iroh endpoint**, rate-limited per client (iroh-relay's `limits`), with QUIC address discovery on. | A relay can't tell Mesh traffic from other iroh traffic, and a token compiled into a public app isn't a secret. It forwards only ciphertext, so the cost is bandwidth; the rate limits cap that. |
+| D4 | **The relay is open to every iroh endpoint**, rate-limited per client (iroh-relay's `limits`). QUIC address discovery is off: it needs its own UDP port, and clients get the same help from n0's relays, which have it. | A relay can't tell Mesh traffic from other iroh traffic, and a token compiled into a public app isn't a secret. It forwards only ciphertext, so the cost is bandwidth; the rate limits cap that. |
 | D5 | **Clients use our relay and n0's together** (`Relays::Custom` with both). iroh picks the home relay by latency, so ours wins from nearby. `--relay` still replaces the list. | Transport Q1: n0 until our own, then ours. Keeping n0 in the list means our homelab going down doesn't take Mesh offline. |
-| D6 | **The seed is reached like any device**: a built-in list of seed tickets (`mesh://node/<key>?relay=<our relay>`) in `mesh-node`, plus `--seed <ticket>` (repeatable) to replace it. The seed listens on a fixed UDP port so direct paths work through the router's port forward. | No discovery needed: seeds are few and known. A ticket never carries IPs (transport D3); the seed's public address is found the usual way. |
+| D6 | **The seed is reached like any device**: a built-in list of seed tickets (`mesh://node/<key>?relay=<our relay>`) in `mesh-node`, plus `--seed <ticket>` (repeatable) to replace it. It has no public port: clients reach it through our relay, and go direct when hole punching allows, as between any two devices. | No discovery needed: seeds are few and known. A ticket never carries IPs (transport D3). Seed requests are a few small frames, so going through the relay costs nothing that matters. |
 | D7 | **Friend-code services on the seed**, over transport streams (D6 there): `code-hold` (store a `HeldCode`), `code-get` (a `lookup_id` returns the encrypted record and counts a use) and `code-revoke` (a `CodeRevoke`). Any authenticated Mesh device may use them. | Identity's records are already designed for this: the seed sees a 16-byte lookup ID and ciphertext, never the ID it points to. |
 | D8 | **Limits on the seed**, all enforced there: per device, 10 lookups a minute and 50 live held codes; across everyone, 600 lookups a minute and 100,000 held codes; per source network (/24 or /48), 30 lookups a minute. A record is deleted when it expires, runs out of uses or is revoked. | Keys are free to make, so per-device limits alone don't stop guessing; the per-network and global limits do. With 40-bit codes at the full 600 a minute, finding one *particular* code takes about 1,700 years on average. Finding *any* code among 100,000 live ones takes about two weeks, and gives the guesser a random stranger's ID (not access: the safety number and `social` still stand). The catch: someone using the whole global budget slows real lookups too. The per-network limit makes that take many networks; if it happens, the limits move. |
 | D9 | **Storage is one file** in the data directory, rewritten atomically on change (`postcard`, already a dependency). | 100,000 records of about 200 bytes is 20 MB: no database needed. |
@@ -65,7 +69,7 @@ can find each other without pasting a 60-character ID.
 
 ### Seed mode
 
-- `mesh-node seed --data <dir> --port <udp port> [--relay <url>]`. On first
+- `mesh-node seed --data <dir> [--relay <url>]`. On first
   start it makes `seed.key` (0600) and prints its ticket, which goes into the
   built-in list.
 - It runs a transport `Node` with its own key and a certificate it makes for
@@ -130,7 +134,7 @@ Container base images: `rust` (pinned) to build, `gcr.io/distroless/static`
 
 ```
 cargo test --workspace                       # Mesh-Node, as now
-cargo run -p mesh-node -- seed --data /tmp/seed --port 7843
+cargo run -p mesh-node -- seed --data /tmp/seed
 docker compose -f deploy/compose.yaml up -d  # on the homelab
 cargo test -p mesh-app -p mesh-discord       # Mesh-Voice
 ```
@@ -185,8 +189,8 @@ const LOOKUPS_PER_DEVICE: u32 = 10;
   3. A single-use code fails the second time; a revoked code fails.
   4. Ping between the two machines through our relay (forced with
      `--relay`).
-  5. From outside, only the relay (443 via Caddy) and the seed's UDP port
-     answer; a port scan shows nothing else new.
+  5. No router setting was changed. From outside, only the relay (on the
+     existing 443 via Caddy) is new; a port scan shows nothing else.
   6. The seed restarts (`docker compose restart`) and still holds its codes.
 
 ## Boundaries
@@ -197,7 +201,8 @@ const LOOKUPS_PER_DEVICE: u32 = 10;
   - Counts-only logs (D10).
   - Pinned versions for images and crates.
 - **Ask first:**
-  - Opening any port on the homelab or router beyond the two in Q2.
+  - Anything that would need a port forwarded, on the homelab or anyone's
+    router.
   - Any dependency not in the table above.
   - Changing D1–D11.
   - Adding services to the seed (rendezvous and mail come with their own
@@ -220,19 +225,18 @@ const LOOKUPS_PER_DEVICE: u32 = 10;
    `slow-down` (test).
 5. Mesh shows our relay as home from the home network, and works with only
    our relay (`--relay`).
-6. Nothing but the relay and the seed's port is reachable from outside, and
-   the seed's logs hold no identifying data.
+6. No port forwarding anywhere: none for people using Mesh, none added on
+   the homelab. Nothing but the relay is reachable from outside, and the
+   seed's logs hold no identifying data.
 
 ## Open questions
 
 - **Q1. The relay's address.** (a) A `relay.` subdomain on the homelab's
-  domain, TLS by the existing Caddy (recommended, D3). (b) Its own port with
-  iroh-relay's built-in Let's Encrypt.
-- **Q2. Router ports.** The seed needs one UDP port forwarded (I'd use
-  7843), and the relay's QUIC address discovery another (7842/UDP, iroh's
-  default). 443/TCP is already forwarded to Caddy. (a) Both UDP ports
-  (recommended). (b) Only the seed's; the relay runs without address
-  discovery (direct paths get slightly worse for clients behind tricky NATs).
+  domain, through the existing Caddy and 443 (recommended, D3: no new
+  forward). (b) A Cloudflare Tunnel, which doesn't even need the existing
+  443; the cost is that every relayed connection detours through Cloudflare,
+  which then sees who connects to the relay (never the contents).
+- **Q2. Router ports.** Resolved by D0: none.
 - **Q3. Device-link rendezvous.** Identity's "Link a device" needs a way for
   the new device to find the existing one by a link code. It's the same
   mechanism as friend codes (the seed holds the existing device's ticket
