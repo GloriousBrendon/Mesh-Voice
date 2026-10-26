@@ -120,12 +120,21 @@ A spike on 2026-10-26 backs D1–D4: two endpoints on the Linux box, with iroh
 The same JSON lines as identity. New commands:
 
 - `netStatus` → `meshNet` (online, home relay, direct seen, connections).
-  Also sent by itself on every change.
-- `netTicket` → `meshTicket` (`mesh://node/…` for this device).
+  Also sent by itself on every change. As built:
+  `{"state": "off"|"connecting"|"online", "relay": url|null, "direct": bool,
+  "connections": n}`; `off` while locked.
+- `netTicket` → `meshTicket` (`{"ticket": "mesh://node/…"}` for this device).
 - `netPing(ticket)` → `meshPing` (the peer's `mesh1…` ID and device name from
   its certificate, `direct` or `relay`, round-trip time in ms), or
   `meshError` with `fn: netPing` and a kind: `bad-ticket`, `unreachable`,
   `timeout`, `bad-cert`, `key-mismatch`, `offline` (this device isn't online).
+  As built: `{"id", "name", "path", "ms"}`; the ping is answered when done
+  (up to 20 s) while other commands carry on. Net commands while locked
+  answer `locked`, as identity's do. Error messages are fixed text: iroh's
+  own errors can name addresses.
+- `--relay <url>` (repeatable) replaces n0's relays. It must be `https`;
+  plain `http` only on loopback (a local test relay), so a relay link is
+  never readable on the network.
 
 ### Mesh-Voice
 
@@ -146,7 +155,8 @@ New in **Mesh-Node**:
 |---|---|
 | `iroh` 1.4.1, `default-features = false`, features `tls-ring` and `portmapper` | The endpoint. `portmapper` asks the home router to open a port (UPnP / NAT-PMP / PCP) when it allows it, which helps direct paths. Leaving out the default `metrics` keeps it lighter; nothing in metrics leaves the machine either way. |
 | `tokio` 1 | The async runtime (D8). |
-| `url` (if not re-exported by iroh) | Parsing the ticket's relay URL. |
+| `url` (if not re-exported by iroh) | Parsing the ticket's relay URL. Not needed: iroh's `RelayUrl` does it. |
+| `iroh-relay` 1.4.1, feature `server` (dev-dependency of `mesh-node` only) | The two-helper protocol test runs a plain-http relay on loopback, so the helper never needs to trust a self-signed relay. The same crate and version iroh already builds in. |
 
 `iroh` brings `ed25519-dalek` 3, the version identity already uses, so the
 device key converts without copying through an intermediate type.

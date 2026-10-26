@@ -198,7 +198,7 @@ this box.
 
 ### Phase 3: Helper and Mesh-Voice
 
-- [ ] **Task 7: An async helper** (D8)
+- [x] **Task 7: An async helper** (D8)
   - What: `mesh-node` runs a tokio runtime; stdin is read on a thread and
     fed in (the mesh-dc pattern); identity commands are unchanged.
   - Accept: the existing protocol test passes unchanged; commands are still
@@ -206,7 +206,10 @@ this box.
   - Verify: `cargo test -p mesh-node`.
   - Files: `crates/mesh-node/src/{main.rs,helper.rs}`.
   - Size S.
-- [ ] **Task 8: The `net*` commands**
+  - Result (2026-10-26): done as planned; the protocol test passed
+    unchanged. Identity commands run on the runtime's own thread
+    (`block_on`), so a second of Argon2 doesn't hold up the workers.
+- [x] **Task 8: The `net*` commands**
   - What:
     - the node starts when the identity opens (create, unlock, import, or
       kept unlocked at start) and stops on lock (D7);
@@ -222,6 +225,26 @@ this box.
   - Files: `crates/mesh-node/src/helper.rs`, `crates/mesh-node/tests/protocol.rs`,
     `crates/mesh-node/Cargo.toml`.
   - Size M.
+  - Result (2026-10-26):
+    - Test relay: iroh's relay client takes plain `http://` relays, so the
+      test runs an http relay on loopback (`iroh-relay` `server`, as a
+      dev-dependency of `mesh-node`, added to the spec's table). `--relay`
+      accepts `http` only on loopback. Nothing in `mesh-node` trusts a
+      self-signed relay, in any build.
+    - The test passes, stable over repeated runs: both ping each other, one
+      connection reused both ways, `meshNet` holds only state, relay,
+      direct and connections; after Alice locks, Bob's ping is
+      `unreachable` (after the 10 s connect timeout, so the test takes
+      about 17 s). The identity test now uses the local relay too, so
+      neither test needs the internet.
+    - By hand on n0's relays, two helpers with their own data directories:
+      both online in 3 to 4 s from create; once 27 s (n0 or the network;
+      the spike saw one slow first connect too). Pings direct from the
+      first, 0.6 to 0.8 ms, home relay `aps1`. stderr empty.
+    - `meshNet` comes from polling the node once a second (a `ponytail:`
+      note); Task 10 checks the idle cost, and iroh's watchers replace it
+      if it shows.
+    - 70 workspace tests pass; clippy and fmt clean.
 - [ ] **Task 9: Network section in Mesh-Voice**
   - What: `meshNet`, `meshTicket` and `meshPing` in `mesh.rs`; on Your ID, a
     status line, "Copy test ticket", and a paste field with **Ping** showing
@@ -255,7 +278,7 @@ sitting with identity's Checkpoint D.
 | n0's public relays are slow from here (the spike picked Asia-Pacific, 250 ms), rate-limited or down | Medium | Only until `seed`: `--relay` already points the node at any relay, and `seed` puts ours first. |
 | iroh's API changes in a 1.x release | Low | Pinned to `=1.4.1`; upgrades are a deliberate change with tests. |
 | The relay-path test needs `test-utils`, which pulls in a relay server | Low | Dev-dependency only, not in the shipped binary. |
-| Task 8's protocol test planned two `mesh-node` processes on a local test relay, but a normal `mesh-node` won't trust its self-signed certificate | Low | Decided in Task 8: either an off-by-default `test-utils` feature on `mesh-node` for its test build, or an in-process helper test. Never a trust-any-relay switch in the shipped binary. |
+| Task 8's protocol test planned two `mesh-node` processes on a local test relay, but a normal `mesh-node` won't trust its self-signed certificate | Low | Resolved in Task 8: the test relay is plain http on loopback, which `--relay` allows only there. No trust switch anywhere. |
 | Windows Firewall asks to allow `mesh-node` | Low | Expected for anything that listens. The gate checks that cancelling it still connects (outbound hole punching and the relay). |
 | The binary grows a lot (rustls, QUIC) | Low | Task 1 records it. `metrics` is off; more features can be trimmed if needed. |
 | The device secret is handed to iroh | Medium | It stays in the process, built from the zeroized bytes, only while unlocked; locking drops the endpoint (D7). |
