@@ -15,6 +15,8 @@ pub enum Event {
     /// The verdict on a password being typed (`Node::check_password`).
     Password { ok: bool, message: String },
     Error(Error),
+    /// The safety number with someone (`Node::safety_number`).
+    Safety(Safety),
     /// A command that answers with nothing else went through (`idChangePassword`, `idExport`).
     Done(String),
     /// The helper exited; it's restarted by itself.
@@ -62,6 +64,17 @@ pub struct Device {
     pub this_device: bool,
 }
 
+/// A `meshSafety`: the 60-digit number two people compare, for the other ID.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Safety {
+    /// The other person's ID, as parsed.
+    pub id: String,
+    /// 12 groups of 5 digits.
+    pub number: String,
+    /// What the QR code holds.
+    pub qr: String,
+}
+
 /// A `meshError`: the command that failed, a stable kind and a message to show.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Error {
@@ -107,6 +120,11 @@ impl Node {
     /// password; answers with `Identity` (unlocked) or `Error`.
     pub fn import(&self, path: &str, username: &str, backup_password: &str, new_password: &str) {
         self.call("idImport", &[path, username, backup_password, new_password]);
+    }
+    /// The safety number with a pasted ID or `mesh://` link; answers with
+    /// `Safety`, or an `Error` naming what's wrong with the text.
+    pub fn safety_number(&self, other: &str) {
+        self.call("safetyNumber", &[other]);
     }
     /// Asks whether a new password would be accepted; answers with `Password`.
     pub fn check_password(&self, username: &str, password: &str) {
@@ -176,6 +194,7 @@ fn line_event(line: &str) -> Option<Event> {
             Some(Event::Password { ok: v["ok"].as_bool()?, message: v["message"].as_str().unwrap_or_default().to_owned() })
         }
         "meshError" => serde_json::from_str(payload).ok().map(Event::Error),
+        "meshSafety" => serde_json::from_str(payload).ok().map(Event::Safety),
         "meshDone" => {
             let v: serde_json::Value = serde_json::from_str(payload).ok()?;
             Some(Event::Done(v["fn"].as_str()?.to_owned()))
@@ -215,6 +234,11 @@ mod tests {
 
         let Some(Event::Done(func)) = line_event(&line("meshDone", r#"{"fn":"idExport"}"#)) else { panic!("no done") };
         assert_eq!(func, "idExport");
+
+        let Some(Event::Safety(n)) = line_event(&line("meshSafety", r#"{"id":"mesh1abc","number":"12345 67890","qr":"q"}"#)) else {
+            panic!("no safety number")
+        };
+        assert_eq!(n.number, "12345 67890");
 
         assert!(line_event(&line("meshCodes", r#"{"codes":[]}"#)).is_none());
         assert!(line_event("not json").is_none());

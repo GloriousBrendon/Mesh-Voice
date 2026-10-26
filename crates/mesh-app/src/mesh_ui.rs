@@ -50,6 +50,9 @@ struct Settings {
     confirm: String,
     verdict: Option<(bool, String)>,
     export_password: String,
+    /// Check an ID: what's pasted, and the safety number for it (with its QR).
+    check: String,
+    safety: Option<(mesh::Safety, Option<qr_code::Data>)>,
     /// The command waiting for an answer.
     busy: Option<&'static str>,
     /// The last answer, for the section of the command it answers: (fn, ok, message).
@@ -79,6 +82,8 @@ pub(crate) enum Msg {
     ExportPassword(String),
     Export,
     ExportTo(Option<PathBuf>),
+    CheckInput(String),
+    Check,
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -134,6 +139,11 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 s.old.clear();
             }
             s.note = Some((error.func, false, error.message));
+        }
+        mesh::Event::Safety(safety) => {
+            let qr = qr_code::Data::new(&safety.qr).ok();
+            m.settings.safety = Some((safety, qr));
+            m.settings.busy = None;
         }
         mesh::Event::Done(func) => {
             let s = &mut m.settings;
@@ -258,6 +268,18 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
             node.export(&path.to_string_lossy(), &username, &s.export_password);
         }
         Msg::ExportTo(None) => {}
+        Msg::CheckInput(value) => {
+            s.check = value;
+            s.safety = None;
+            s.note = None;
+        }
+        Msg::Check => {
+            if s.busy.is_none() && !s.check.trim().is_empty() {
+                s.busy = Some("safetyNumber");
+                s.note = None;
+                node.safety_number(s.check.trim());
+            }
+        }
     }
     f.error = None;
     // The password rule involves the username too, so either change rechecks it.
@@ -450,6 +472,33 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
         );
     }
 
+    // Check an ID: the safety number both people read out (D7).
+    let mut check = column![
+        heading("check an id", p),
+        text("Paste a friend's ID or mesh:// link. Read the number to each other: if it matches, nobody is in the middle.")
+            .size(12)
+            .color(p.text()),
+        field("THEIR ID", &s.check, Msg::CheckInput, false, Msg::Check, p),
+        action("Check", "safetyNumber", (!s.check.trim().is_empty()).then_some(Msg::Check)),
+    ]
+    .spacing(8)
+    .extend(note("safetyNumber"));
+    if let Some((safety, qr)) = &s.safety {
+        let groups: Vec<&str> = safety.number.split_whitespace().collect();
+        let mut digits = column![].spacing(4);
+        for line in groups.chunks(4) {
+            digits = digits.push(text(line.join("  ")).font(iced::Font::MONOSPACE).size(15).color(p.text_bright()));
+        }
+        check = check.push(ui::mono(format!("with {}", safety.id), 11.0, p.text_muted())).push(digits);
+        if let Some(qr) = qr {
+            check = check.push(
+                container(qr_code(qr).cell_size(3).style(|_| qr_code::Style { cell: iced::Color::BLACK, background: iced::Color::WHITE }))
+                    .padding(10)
+                    .style(|_| container::Style { background: Some(iced::Color::WHITE.into()), border: iced::border::rounded(8), ..container::Style::default() }),
+            );
+        }
+    }
+
     let mut devices = column![heading("devices", p)].spacing(6);
     for d in &identity.devices {
         let added = Local.timestamp_opt(d.created_at as i64, 0).single().map(|t| t.format("%-d %b %Y").to_string()).unwrap_or_default();
@@ -493,7 +542,7 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     .spacing(8)
     .extend(note("idExport"));
 
-    scrollable(column![id, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
+    scrollable(column![id, check, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
         .height(Length::Fill)
         .into()
 }

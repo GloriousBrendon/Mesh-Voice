@@ -331,6 +331,12 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - Verify: a manual run.
   - Files: `mesh-app/src/mesh_ui.rs`.
   - Size S. Depends on Task 13.
+  - **Result (2026-10-26):** code done; "Check an ID" is a section of Your
+    ID. It sends one `safetyNumber` command, which parses the text itself, so
+    `parseId` isn't needed here. Checked against the real helper with two
+    identities: alice→bob and bob→alice (pasted as a `mesh://id/` link) give
+    the same 60 digits; a one-letter typo answers `id-checksum`, and other
+    text `id-not-mesh`. The screen itself is left to your test run.
 - [ ] **Task 15: Ship `mesh-node` with Mesh-Voice**
   - What: `installer/install-linux.sh` and `installer/build.ps1` with
     `mesh.iss` build Mesh-Node (from a sibling checkout, or a path variable)
