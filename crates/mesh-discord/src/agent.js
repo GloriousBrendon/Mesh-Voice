@@ -231,12 +231,12 @@
       attachments: (m.attachments || []).map(attachment).concat((m.stickerItems || []).map(sticker).filter(Boolean)),
     };
   };
-  // Stickers as 160 px images: PNG/APNG (first frame) and GIF through the
-  // media proxy; Lottie ones (format 3) aren't images, so they're left out.
+  // Stickers as 160 px images: PNG/APNG (animated) from the CDN, GIF through
+  // the media proxy; Lottie ones (format 3) aren't images, so they're left out.
   const sticker = (s) => {
     const format = s.format_type || s.formatType;
     if (format === 3) return null;
-    const url = `https://media.discordapp.net/stickers/${s.id}.${format === 4 ? "gif" : "png"}?size=160`;
+    const url = format === 4 ? `https://media.discordapp.net/stickers/${s.id}.gif?size=160` : `https://cdn.discordapp.com/stickers/${s.id}.png?size=160`;
     return { filename: s.name || "sticker", url, preview: url, width: 160, height: 160, size: null };
   };
   // Images get a preview URL from Discord's resizing proxy (at most 480 wide),

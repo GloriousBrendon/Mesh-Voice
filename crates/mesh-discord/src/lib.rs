@@ -147,6 +147,16 @@ pub struct Snapshot {
     /// DMs and group DMs, most recent first.
     #[serde(default)]
     pub dms: Vec<Dm>,
+    /// DM/group calls ringing us that we haven't joined (native helper only).
+    #[serde(default)]
+    pub ringing: Vec<Ring>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Ring {
+    /// Join it with `Engine::join`.
+    pub channel_id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

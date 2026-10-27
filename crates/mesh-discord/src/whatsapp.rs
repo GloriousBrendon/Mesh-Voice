@@ -316,6 +316,9 @@ pub struct Message {
     /// What this message replies to.
     #[serde(default)]
     pub quote: Option<Quote>,
+    /// Forwarded from another chat.
+    #[serde(default)]
+    pub forwarded: bool,
     #[serde(default)]
     pub reactions: Vec<Reaction>,
 }

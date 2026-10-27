@@ -9,8 +9,11 @@ use image::{DynamicImage, ImageFormat, RgbImage};
 use mesh_media::H264Decoder;
 
 /// Shrinks a picture so Mesh gets a few KB: photos to `width` px as JPEG, stickers to 160 px as
-/// PNG (keeping their transparency). ponytail: an animated sticker shows its first frame.
+/// PNG (keeping their transparency). An animated sticker goes as it is, for Mesh to play.
 pub fn shrink(bytes: &[u8], sticker: bool, width: u32) -> Result<Vec<u8>> {
+    if sticker && image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).is_ok_and(|d| d.has_animation()) {
+        return Ok(bytes.to_vec());
+    }
     let img = image::load_from_memory(bytes).context("can't read the picture")?;
     let max = if sticker { 160 } else { width };
     let img = fit(img, max);

@@ -9,7 +9,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 dirs = "6.0.0"
 iced = { version = "0.14.0", features = ["tokio", "image", "canvas", "svg", "qr_code"] }
 # Already in the tree through iced; decodes GIF frames into one sprite sheet.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 # Pasting screenshots: iced's clipboard is text-only.
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 mesh-core = { version = "0.1.0", path = "../mesh-core" }
@@ -19,6 +19,8 @@ once_cell = "1.21.4"
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1.0.228", features = ["derive"] }
+# Decodes sound files people pick (WAV, OGG, FLAC by default; MP3 added).
+symphonia = { version = "0.5.4", features = ["mp3"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
 toml = "1.1.2"
 tracing = { version = "0.1.44", default-features = false }
@@ -30,10 +32,4 @@ winresource = "0.1"
 
 # Theme-colored title bar (DWM); already in the tree through winit.
 [target.'cfg(windows)'.dependencies]
-# Notification-area icon; Linux needs none (and would pull in GTK).
-tray-icon = { version = "0.26.1", default-features = false }
 windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm", "Win32_Foundation"] }
-
-# Tray icon over D-Bus (StatusNotifierItem: Waybar, KDE, …); zbus is already in the tree, no GTK.
-[target.'cfg(target_os = "linux")'.dependencies]
-ksni = "0.3.7"

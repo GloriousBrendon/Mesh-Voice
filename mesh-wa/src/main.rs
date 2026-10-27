@@ -397,6 +397,7 @@ impl App {
             file: body.file,
             media: body.media,
             quote,
+            forwarded: store::forwarded(&m.message),
             ..Default::default()
         };
         let author = msg.author.clone();
@@ -501,6 +502,7 @@ impl App {
                     file: shown.file,
                     media: shown.media,
                     quote,
+                    forwarded: store::forwarded(body),
                     reacts,
                     ..Default::default()
                 });
@@ -601,6 +603,7 @@ impl App {
                         file: body.file,
                         media: body.media,
                         quote,
+                        forwarded: store::forwarded(&message),
                         ..Default::default()
                     };
                     self.store.add(&chat_id, msg);

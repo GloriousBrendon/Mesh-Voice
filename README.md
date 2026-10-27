@@ -138,10 +138,6 @@ for your user: `mesh`, `mesh-wa` and `mesh-dc` in `~/.local/bin`, Mesh's icon
 and a `.desktop` entry. `mesh-dc` is left out until `discord_native_wrapper`
 is set. `--uninstall` removes them and keeps your accounts and chats.
 
-With a tray (Waybar's `tray` module, KDE, …) Mesh puts its icon there, and
-closing the window keeps Mesh running, calls and helpers included; click the
-icon to bring it back, or quit from its menu. Without one, closing quits.
-
 ## Windows
 
 `installer\build.ps1` builds Mesh, both helpers and `dist\Mesh-Setup-<version>.exe`

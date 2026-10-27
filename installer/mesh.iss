@@ -45,12 +45,16 @@ Source: "{#AppExe}"; DestDir: "{app}"; DestName: "Mesh.exe"; Flags: ignoreversio
 Source: "{#Root}\mesh-wa\target\release\mesh-wa.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\mesh-dc\target\release\mesh-dc.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Node}\target\release\mesh-node.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#Root}\crates\mesh-app\assets\mesh.png"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\Mesh"; Filename: "{app}\Mesh.exe"; Comment: "Matrix, Discord and WhatsApp in one place"
 Name: "{userdesktop}\Mesh"; Filename: "{app}\Mesh.exe"; Tasks: desktopicon
 
 [Registry]
+; Mesh's name and icon on its notifications (see `notify` in main.rs), instead of PowerShell's.
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Mesh.Mesh"; ValueType: string; ValueName: "DisplayName"; ValueData: "Mesh"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Mesh.Mesh"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\mesh.png"
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Mesh"; ValueData: """{app}\Mesh.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]

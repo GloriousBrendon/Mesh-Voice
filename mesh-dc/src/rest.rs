@@ -217,7 +217,19 @@ pub fn snapshot(s: &State) -> Value {
         })
     };
 
-    json!({ "me": me, "voice": voice, "guilds": guilds, "dms": dms })
+    // Calls ringing us that we haven't joined, named like their DM.
+    let me_id = s.me_id();
+    let ringing: Vec<Value> = s
+        .calls
+        .iter()
+        .filter(|(cid, ids)| me_id.as_ref().is_some_and(|me| ids.contains(me)) && s.voice_channel.as_ref() != Some(*cid))
+        .map(|(cid, _)| {
+            let dm = dms.iter().find(|d| d["id"] == cid.as_str());
+            json!({ "channel_id": cid, "name": dm.map(|d| d["name"].clone()).unwrap_or(json!("Discord call")) })
+        })
+        .collect();
+
+    json!({ "me": me, "voice": voice, "guilds": guilds, "dms": dms, "ringing": ringing })
 }
 
 // Discord message types Mesh draws as plain text; the rest are system lines.
@@ -237,7 +249,8 @@ fn message(m: &Value, s: &State) -> Value {
     } else {
         system_line(mtype)
     };
-    let attachments: Vec<Value> = m.get("attachments").and_then(Value::as_array).into_iter().flatten().map(attachment).collect();
+    let stickers = m.get("sticker_items").and_then(Value::as_array).into_iter().flatten().filter_map(sticker);
+    let attachments: Vec<Value> = m.get("attachments").and_then(Value::as_array).into_iter().flatten().map(attachment).chain(stickers).collect();
     let _ = s;
     json!({
         "id": m.get("id").cloned().unwrap_or(Value::Null),
@@ -261,6 +274,18 @@ fn system_line(t: u64) -> String {
         _ => "did something Mesh can't show yet",
     }
     .to_owned()
+}
+
+/// A sticker as a 160 px picture: PNG and APNG (animated) from the CDN as they are, GIF
+/// through the media proxy; Lottie ones (format 3) aren't pictures, so they're left out.
+fn sticker(s: &Value) -> Option<Value> {
+    let id = s.get("id").and_then(Value::as_str)?;
+    let url = match s.get("format_type").and_then(Value::as_u64) {
+        Some(3) => return None,
+        Some(4) => format!("https://media.discordapp.net/stickers/{id}.gif?size=160"),
+        _ => format!("https://cdn.discordapp.com/stickers/{id}.png?size=160"),
+    };
+    Some(json!({ "filename": s.get("name").cloned().unwrap_or(json!("sticker")), "url": url, "preview": url, "width": 160, "height": 160, "size": Value::Null }))
 }
 
 fn attachment(a: &Value) -> Value {
@@ -309,12 +334,24 @@ mod tests {
         assert_eq!(parsed.guilds[0].voice_channels[0].name, "Voice");
         assert_eq!(parsed.dms[0].recipient_id.as_deref(), Some("2"));
         assert!(parsed.dms.iter().all(|d| d.recipient_id.as_deref() == Some("2")), "recipient_ids DMs resolve too");
+
+        // A call ringing us shows, named like its DM; one ringing someone else doesn't.
+        s.calls.insert("500".into(), vec!["1".into()]);
+        s.calls.insert("501".into(), vec!["2".into()]);
+        let parsed: mesh_snapshot::Snapshot = serde_json::from_value(snapshot(&s)).unwrap();
+        assert_eq!(parsed.ringing.len(), 1);
+        assert_eq!((parsed.ringing[0].channel_id.as_str(), parsed.ringing[0].name.as_str()), ("500", "friend"));
     }
 
     #[test]
     fn messages_are_oldest_first_and_system_lines_named() {
         let s = State::default();
         let raw = json!({ "id": "900", "type": 3, "author": { "id": "2", "username": "x", "avatar": null }, "content": "", "attachments": [] });
+        let with_stickers = json!({ "id": "901", "type": 0, "author": { "id": "2", "username": "x", "avatar": null }, "content": "",
+            "sticker_items": [{ "id": "7", "name": "wave", "format_type": 2 }, { "id": "8", "format_type": 3 }] });
+        let atts = message(&with_stickers, &State::default())["attachments"].clone();
+        assert_eq!(atts.as_array().unwrap().len(), 1, "lottie stickers are left out");
+        assert_eq!(atts[0]["preview"], "https://cdn.discordapp.com/stickers/7.png?size=160");
         let m = message(&raw, &s);
         assert_eq!(m["system"], true);
         assert_eq!(m["content"], "started a call");
@@ -328,6 +365,12 @@ mod tests {
             pub me: Option<User>,
             pub guilds: Vec<Guild>,
             pub dms: Vec<Dm>,
+            pub ringing: Vec<Ring>,
+        }
+        #[derive(Deserialize)]
+        pub struct Ring {
+            pub channel_id: String,
+            pub name: String,
         }
         #[derive(Deserialize)]
         pub struct User {

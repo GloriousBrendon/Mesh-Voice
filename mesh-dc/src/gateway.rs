@@ -84,6 +84,8 @@ pub struct State {
     pub voice: HashMap<String, HashMap<String, Value>>,
     /// Private (DM/group) voice states live under this key.
     pub dm_channels: Vec<Value>,
+    /// DM/group calls going on: channel id -> who it's ringing (user ids).
+    pub calls: HashMap<String, Vec<String>>,
     /// channel id -> (last_message_id, mention_count).
     pub read_state: HashMap<String, (String, u64)>,
     /// ssrc/user speaking right now (user id -> speaking), from the voice side.
@@ -283,6 +285,9 @@ async fn dispatch(t: &str, d: &Value, state: &tokio::sync::Mutex<State>, events:
             for g in d.get("guilds").and_then(Value::as_array).into_iter().flatten() {
                 index_guild(&mut s, g);
             }
+            // A re-identify (reconnect without resume) sends READY again with the full list.
+            s.dm_channels.clear();
+            s.calls.clear();
             for ch in d.get("private_channels").and_then(Value::as_array).into_iter().flatten() {
                 if let Some(id) = ch.get("id").and_then(Value::as_str) {
                     s.channels.insert(id.to_owned(), ch.clone());
@@ -335,6 +340,20 @@ async fn dispatch(t: &str, d: &Value, state: &tokio::sync::Mutex<State>, events:
         "CHANNEL_DELETE" => {
             if let Some(id) = d.get("id").and_then(Value::as_str) {
                 s.channels.remove(id);
+            }
+            true
+        }
+        // DM and group calls (a user account's gateway only): who's being rung.
+        "CALL_CREATE" | "CALL_UPDATE" => {
+            if let Some(id) = d.get("channel_id").and_then(Value::as_str) {
+                let ringing = d.get("ringing").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+                s.calls.insert(id.to_owned(), ringing);
+            }
+            true
+        }
+        "CALL_DELETE" => {
+            if let Some(id) = d.get("channel_id").and_then(Value::as_str) {
+                s.calls.remove(id);
             }
             true
         }
@@ -548,6 +567,17 @@ mod tests {
             let out = inflate_payload(&Ws::binary(packet), &mut inflate, &mut buf).unwrap().unwrap();
             assert_eq!(out, msg.as_bytes());
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_ready_does_not_duplicate_dms() {
+        let state = tokio::sync::Mutex::new(State::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ready = json!({ "private_channels": [{ "id": "500", "type": 1, "recipient_ids": ["2"] }] });
+        for _ in 0..3 {
+            dispatch("READY", &ready, &state, &tx).await;
+        }
+        assert_eq!(state.lock().await.dm_channels.len(), 1);
     }
 
     #[test]

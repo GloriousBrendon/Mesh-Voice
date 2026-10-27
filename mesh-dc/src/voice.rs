@@ -102,6 +102,16 @@ impl Voice {
     }
 }
 
+/// Adds `pcm` onto `mix` sample by sample, saturating.
+fn mix_into(mix: &mut Vec<i16>, pcm: &[i16]) {
+    if mix.len() < pcm.len() {
+        mix.resize(pcm.len(), 0);
+    }
+    for (m, &p) in mix.iter_mut().zip(pcm) {
+        *m = m.saturating_add(p);
+    }
+}
+
 fn parse(id: &str) -> anyhow::Result<NonZeroU64> {
     id.parse::<NonZeroU64>().map_err(|_| anyhow::anyhow!("bad id {id}"))
 }
@@ -138,19 +148,38 @@ impl Shared {
     async fn play_tick(&self, speaking: &HashMap<u32, VoiceData>) {
         let ssrc = self.ssrc.lock().await;
         let mut now: HashMap<String, bool> = HashMap::new();
+        let mut mix: Vec<i16> = Vec::new();
         for (s, data) in speaking {
             if let Some(pcm) = &data.decoded_voice {
-                let _ = self.speaker.try_send(pcm.clone());
+                mix_into(&mut mix, pcm);
             }
             if let Some(uid) = ssrc.get(s) {
                 now.insert(uid.clone(), true);
             }
         }
         drop(ssrc);
+        // One mixed 20 ms frame per tick; queueing each speaker's frame in
+        // turn played them back to back at N x real time (robotic).
+        if !mix.is_empty() {
+            let _ = self.speaker.try_send(mix);
+        }
         let mut state = self.state.lock().await;
         if state.speaking != now {
             state.speaking = now;
             let _ = self.notify.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mix_into;
+
+    #[test]
+    fn mixes_speakers_into_one_frame() {
+        let mut mix = Vec::new();
+        mix_into(&mut mix, &[100, -200, 30_000]);
+        mix_into(&mut mix, &[1, 2, 30_000]);
+        assert_eq!(mix, vec![101, -198, i16::MAX]); // same length, summed, clamped
     }
 }

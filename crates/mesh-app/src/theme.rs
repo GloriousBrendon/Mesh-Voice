@@ -367,6 +367,8 @@ pub struct Config {
     /// Accounts sync switches that are off, as `<network id>:<key>`.
     #[serde(default)]
     pub sync_off: Vec<String>,
+    #[serde(default)]
+    pub sounds: crate::sounds::Settings,
 }
 
 /// The animated backgrounds (see rain.rs).

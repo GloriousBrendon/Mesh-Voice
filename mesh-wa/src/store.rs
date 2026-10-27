@@ -34,6 +34,9 @@ pub struct Message {
     /// Mesh's `FileMeta` (video, voice note, audio, document).
     pub file: Option<Value>,
     pub quote: Option<Quote>,
+    /// Forwarded from another chat (WhatsApp's "Forwarded" label).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forwarded: bool,
     /// Filled from `reacts` when shown.
     pub reactions: Vec<Value>,
     /// The media part of the message, protobuf as base64, for downloading or forwarding it.
@@ -402,6 +405,11 @@ pub fn body(msg: &wa::Message) -> Option<Body> {
 pub fn media(m: &Message) -> Option<wa::Message> {
     let bytes = B64.decode(m.media.as_deref()?).ok()?;
     wa::Message::decode_from_slice(&bytes).ok()
+}
+
+/// Whether `msg` was forwarded from another chat.
+pub fn forwarded(msg: &wa::Message) -> bool {
+    msg.get_base_message().context_info().is_some_and(|c| c.is_forwarded == Some(true))
 }
 
 /// The quoted message's author jid and text, if `msg` is a reply.

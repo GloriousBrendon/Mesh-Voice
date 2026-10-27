@@ -32,11 +32,13 @@ pub struct TimelineMessage {
     pub reactions: Vec<Reaction>,
     /// Origin server timestamp in milliseconds since the epoch.
     pub timestamp_ms: u64,
-    /// A web client's own id for the message (WhatsApp), for replying,
-    /// reacting and forwarding through it.
+    /// A web client's own id for the message (WhatsApp, Discord), for replying,
+    /// reacting and forwarding through it (WhatsApp).
     pub web_id: Option<String>,
     /// The message this one replies to.
     pub reply_to: Option<Quote>,
+    /// Forwarded from another chat (WhatsApp).
+    pub forwarded: bool,
 }
 
 /// A quoted message, shown above a reply.
@@ -215,6 +217,7 @@ pub(crate) async fn build(room: &Room, chunk: Vec<TimelineEvent>, me: Option<&Us
             timestamp_ms: event.origin_server_ts().0.into(),
             web_id: None,
             reply_to: None,
+            forwarded: false,
         });
     }
 

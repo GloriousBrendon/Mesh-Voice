@@ -261,4 +261,25 @@ mod tests {
         resample(&[0, 0, 0], 48_000, 48_000, &mut pos, &mut out);
         assert_eq!(out.len(), 3); // pass-through at equal rate
     }
+
+    /// Live check: speak while it runs. `cargo test mic_hears -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn mic_hears() {
+        let mut mic = open_mic().unwrap();
+        let mut buf = [0u8; 3840];
+        let (mut sum, mut n) = (0f64, 0usize);
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(4) {
+            let len = mic.read(&mut buf).unwrap();
+            for c in buf[..len].chunks_exact(4) {
+                let s = f32::from_le_bytes(c.try_into().unwrap()) as f64;
+                sum += s * s;
+                n += 1;
+            }
+        }
+        let rms = (sum / n.max(1) as f64).sqrt();
+        println!("rate {} samples {n} rms {rms:.5}", mic.rate);
+        assert!(rms > 0.001, "mic is silent");
+    }
 }

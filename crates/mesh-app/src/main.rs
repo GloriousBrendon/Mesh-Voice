@@ -6,9 +6,9 @@ mod accounts;
 mod cache;
 mod mesh_ui;
 mod rain;
+mod sounds;
 mod theme;
 mod titlebar;
-mod tray;
 mod ui;
 
 use chrono::{DateTime, Local, TimeZone};
@@ -101,12 +101,16 @@ struct App {
     /// The native Discord helper (`mesh-dc`) beside Mesh's own binary, when it's
     /// there; Discord then runs in it instead of the engine browser.
     discord_native: Option<PathBuf>,
-    /// Mesh has a notification-area icon (Windows), so closing hides to it.
-    tray: bool,
     /// What it runs under (`discord_native_wrapper`), if anything.
     discord_native_wrapper: Vec<String>,
     /// Its email + password sign-in form.
     dc_sign_in: accounts::DcSignIn,
+    /// Sound settings (config.toml `[sounds]`).
+    sounds: sounds::Settings,
+    /// The ring playing, and what for.
+    ringer: Option<(sounds::Sound, sounds::Ringer)>,
+    /// Discord calls declined here (Discord rings on until the caller gives up).
+    dc_ring_dismissed: Vec<String>,
     /// Handle to drive it, while connected.
     discord: Option<mesh_discord::Engine>,
     /// Its latest voice state.
@@ -244,6 +248,8 @@ struct Session {
     timeline: Vec<TimelineMessage>,
     message_draft: String,
     status: Option<String>,
+    /// The status `StatusTick` last saw and since when; it goes after `STATUS_FOR`.
+    status_seen: Option<(String, std::time::Instant)>,
     verification: Option<VerificationPrompt>,
     show_settings: bool,
     settings_page: SettingsPage,
@@ -359,6 +365,7 @@ enum SettingsPage {
     Rice,
     Keybinds,
     Voice,
+    Sounds,
 }
 
 /// A color being edited: its theme.toml key, the hex field as typed, and HSL
@@ -411,6 +418,7 @@ impl Session {
             timeline: Vec::new(),
             message_draft: String::new(),
             status: None,
+            status_seen: None,
             verification: None,
             show_settings: false,
             settings_page: SettingsPage::Rice,
@@ -578,6 +586,7 @@ fn whatsapp_timeline(messages: whatsapp::Messages) -> Vec<TimelineMessage> {
             timestamp_ms: m.timestamp_ms,
             web_id: Some(m.id.clone()),
             reply_to: None,
+            forwarded: m.forwarded,
         };
         let first = timeline.len();
         if m.system {
@@ -665,8 +674,9 @@ fn discord_timeline(messages: mesh_discord::Messages) -> Vec<TimelineMessage> {
             kind,
             reactions: Vec::new(),
             timestamp_ms: m.timestamp_ms,
-            web_id: None,
+            web_id: Some(m.id.clone()),
             reply_to: None,
+            forwarded: false,
         };
         let body = if m.system { format!("{} {}", m.author, m.content) } else { m.content.clone() };
         let body = body.trim().to_string();
@@ -720,6 +730,32 @@ fn web_media_loaded(state: &mut App, url: String, bytes: Result<Vec<u8>, String>
         update(state, Message::ImageLoaded(url, bytes))
     } else {
         Task::none()
+    }
+}
+
+/// What changed between Discord snapshots that makes a sound or a notification:
+/// someone joining or leaving our voice channel, a call starting to ring us.
+fn discord_cues(state: &mut App, new: &mesh_discord::Snapshot) {
+    use sounds::Sound;
+    state.dc_ring_dismissed.retain(|id| new.ringing.iter().any(|r| &r.channel_id == id));
+    let Some(old) = &state.discord_state else { return };
+    for ring in new.ringing.iter().filter(|r| !old.ringing.contains(r)) {
+        notify("Discord call".into(), format!("{} is calling", ring.name));
+    }
+    // Only within the same live channel: joining or leaving it ourselves is quiet.
+    let (was, now) = (&old.voice, &new.voice);
+    if was.channel_id.is_none() || was.channel_id != now.channel_id || !was.connected() || !now.connected() {
+        return;
+    }
+    let me = new.me.as_ref().map(|m| m.id.as_str());
+    let others = |v: &mesh_discord::Voice| {
+        v.members.iter().filter(|m| Some(m.id.as_str()) != me).map(|m| m.id.clone()).collect::<std::collections::HashSet<_>>()
+    };
+    let (before, after) = (others(was), others(now));
+    if after.difference(&before).next().is_some() {
+        sounds::play(Sound::VoiceJoin, &state.sounds, speaker(state));
+    } else if before.difference(&after).next().is_some() {
+        sounds::play(Sound::VoiceLeave, &state.sounds, speaker(state));
     }
 }
 
@@ -781,6 +817,9 @@ fn stretched_key(key: &str, speed: f32) -> String {
     format!("{key}@{speed}")
 }
 
+/// How long a status line ("Forwarded.", "Copied.", an error) stays up.
+const STATUS_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How often `MediaTick` fires (a GIF frame is ~83 ms).
 const MEDIA_TICK_MS: u64 = 80;
 
@@ -793,11 +832,21 @@ fn show_frames(
     delay_ms: u64,
     frames: Vec<Vec<u8>>,
 ) {
-    let decoded: Vec<image::RgbaImage> =
-        frames.iter().filter_map(|f| image::load_from_memory(f).ok().map(|i| i.to_rgba8())).collect();
-    let (Some(first), Some(still)) = (decoded.first(), frames.into_iter().next()) else {
+    let decoded = frames.iter().filter_map(|f| image::load_from_memory(f).ok().map(|i| i.to_rgba8())).collect();
+    show_decoded(images, animations, key, delay_ms, decoded);
+}
+
+fn show_decoded(
+    images: &mut HashMap<String, Option<iced::widget::image::Handle>>,
+    animations: &mut HashMap<String, Animation>,
+    key: &str,
+    delay_ms: u64,
+    decoded: Vec<image::RgbaImage>,
+) {
+    let Some(first) = decoded.first() else {
         return;
     };
+    let still = iced::widget::image::Handle::from_rgba(first.width(), first.height(), first.as_raw().clone());
     let (w, h) = first.dimensions();
     let count = decoded.len() as u32;
     let cols = (count as f32).sqrt().ceil() as u32;
@@ -806,8 +855,69 @@ fn show_frames(
         image::imageops::replace(&mut sheet, frame, i64::from(i % cols * w), i64::from(i / cols * h));
     }
     let sheet = iced::widget::image::Handle::from_rgba(sheet.width(), sheet.height(), sheet.into_raw());
-    images.insert(key.to_string(), Some(iced::widget::image::Handle::from_bytes(still)));
+    images.insert(key.to_string(), Some(still));
     animations.insert(key.to_string(), Animation { sheet, frame: (w, h), cols, count, delay_ms: delay_ms.max(20) });
+}
+
+/// A downloaded picture: animated (GIF, APNG, WebP: stickers, Discord GIFs) plays, the rest is a still.
+fn show_image(
+    images: &mut HashMap<String, Option<iced::widget::image::Handle>>,
+    animations: &mut HashMap<String, Animation>,
+    key: &str,
+    bytes: Vec<u8>,
+) {
+    match animated_frames(&bytes) {
+        Some((delay_ms, frames)) => show_decoded(images, animations, key, delay_ms, frames),
+        None => {
+            images.insert(key.to_string(), Some(iced::widget::image::Handle::from_bytes(bytes)));
+        }
+    }
+}
+
+/// Largest frame side an animation keeps; frames live decoded in one sprite sheet.
+const ANIM_MAX_SIDE: u32 = 256;
+/// ponytail: frames past this are dropped (a long GIF loops early); stream frames if that shows.
+const ANIM_MAX_FRAMES: usize = 150;
+
+/// An animated picture's frames (shrunk to `ANIM_MAX_SIDE`) and its first frame's delay;
+/// `None` for a still or anything that isn't GIF, APNG or animated WebP.
+fn animated_frames(bytes: &[u8]) -> Option<(u64, Vec<image::RgbaImage>)> {
+    use image::AnimationDecoder as _;
+    let cursor = std::io::Cursor::new(bytes);
+    let frames = match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Gif => image::codecs::gif::GifDecoder::new(cursor).ok()?.into_frames(),
+        image::ImageFormat::Png => {
+            let png = image::codecs::png::PngDecoder::new(cursor).ok()?;
+            if !png.is_apng().ok()? {
+                return None;
+            }
+            png.apng().ok()?.into_frames()
+        }
+        image::ImageFormat::WebP => {
+            let webp = image::codecs::webp::WebPDecoder::new(cursor).ok()?;
+            if !webp.has_animation() {
+                return None;
+            }
+            webp.into_frames()
+        }
+        _ => return None,
+    };
+    let frames: Vec<image::Frame> = frames.take(ANIM_MAX_FRAMES).collect::<Result<_, _>>().ok()?;
+    if frames.len() < 2 {
+        return None;
+    }
+    let (num, den) = frames[0].delay().numer_denom_ms();
+    let delay_ms = u64::from(num / den.max(1)).max(20);
+    let shrink = |img: image::RgbaImage| {
+        let (w, h) = img.dimensions();
+        if w.max(h) <= ANIM_MAX_SIDE {
+            return img;
+        }
+        let scale = ANIM_MAX_SIDE as f32 / w.max(h) as f32;
+        let (nw, nh) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+    };
+    Some((delay_ms, frames.into_iter().map(|f| shrink(f.into_buffer())).collect()))
 }
 
 /// GIF frames for the disk cache: the delay, then each frame length-prefixed.
@@ -883,8 +993,14 @@ fn load_web_media(session: &mut Session, clients: &Clients) {
                         }
                     }
                 }
-            } else if wants(&mut session.images, cache::Kind::Media, url) {
-                clients.fetch_media(url);
+            } else if !session.images.contains_key(url) {
+                match cache::get(cache::Kind::Media, url) {
+                    Some(bytes) => show_image(&mut session.images, &mut session.animations, url, bytes),
+                    None => {
+                        session.images.insert(url.to_string(), None);
+                        clients.fetch_media(url);
+                    }
+                }
             }
         }
     }
@@ -940,10 +1056,8 @@ enum VerifyStage {
 
 #[derive(Debug, Clone)]
 enum Message {
-    /// The notification-area icon was clicked (Windows).
-    Tray(tray::Action),
-    /// The window's close button: hide to the tray if there is one, else quit.
-    CloseRequested(iced::window::Id),
+    /// The window's close button: quit.
+    CloseRequested,
     /// The main window's raw id (its HWND on Windows), for the title bar.
     WindowReady(u64),
     /// The native Discord sign-in form.
@@ -1031,6 +1145,16 @@ enum Message {
     MeshForm(mesh_ui::Msg),
     /// Join a Discord voice channel, or call a Discord DM.
     DiscordJoin(String),
+    /// Stop ringing for this Discord call here.
+    DiscordRingDismiss(String),
+    SoundsEnabled(bool),
+    SoundVolume(f32),
+    /// The volume slider let go: save it.
+    SoundVolumeSaved,
+    SoundTest(sounds::Sound),
+    SoundPick(sounds::Sound),
+    SoundPicked(sounds::Sound, Option<PathBuf>),
+    SoundReset(sounds::Sound),
     DiscordLeave,
     /// Camera on or off in the Discord call.
     ToggleVideo,
@@ -1089,6 +1213,8 @@ enum Message {
     React { id: String, emoji: String },
     /// Reply to a web message with the next send.
     ReplyTo(String, mesh_core::Quote),
+    /// Copy a message's text to the clipboard.
+    CopyText(String),
     CancelReply,
     /// Play or pause a voice note (by media key).
     VoiceToggle(String),
@@ -1100,6 +1226,8 @@ enum Message {
     VoiceStretched { key: String, speed: f32, samples: Arc<Vec<i16>>, from: usize },
     /// Advances GIFs and the voice player's progress.
     MediaTick,
+    /// Clears a status line that's been up for `STATUS_FOR`.
+    StatusTick,
     /// Show an image full screen: (its media key, a bigger copy's key).
     OpenImage(String, Option<String>),
     CloseLightbox,
@@ -1186,9 +1314,11 @@ fn boot() -> (App, Task<Message>) {
             discord_command: config.discord_engine_command.clone(),
             whatsapp_native: whatsapp_native.clone(),
             discord_native,
-            tray: tray::create(),
             discord_native_wrapper: config.discord_native_wrapper.clone().unwrap_or_default(),
             dc_sign_in: accounts::DcSignIn::default(),
+            sounds: config.sounds.clone(),
+            ringer: None,
+            dc_ring_dismissed: Vec::new(),
             discord: None,
             discord_state: None,
             whatsapp: None,
@@ -1290,7 +1420,7 @@ fn open_window() -> Task<Message> {
 fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
         icon: iced::window::icon::from_file_data(include_bytes!("../assets/mesh.png"), None).ok(),
-        // Closing goes to the tray, or quits: see `CloseRequested`.
+        // Closing quits (helpers and calls included): see `CloseRequested`.
         exit_on_close_request: false,
         // Wayland takes the icon from the .desktop file named after this.
         #[cfg(target_os = "linux")]
@@ -1406,6 +1536,57 @@ fn load_timeline(client: Option<Arc<MeshClient>>, room_id: OwnedRoomId) -> Task<
 }
 
 fn update(state: &mut App, message: Message) -> Task<Message> {
+    let task = handle(state, message);
+    sync_ringer(state);
+    task
+}
+
+/// The speaker picked in settings (`None`: the system's), for sounds.
+fn speaker_of(session: &Session) -> Option<String> {
+    (session.selected_output != DEFAULT_DEVICE).then(|| session.selected_output.clone())
+}
+
+fn speaker(state: &App) -> Option<String> {
+    match &state.screen {
+        Screen::LoggedIn(session) => speaker_of(session),
+        _ => None,
+    }
+}
+
+/// The ring a call wants right now: a call ringing us (each network its own),
+/// else ours ringing out. ponytail: no ringback for Discord DM calls, Mesh can't
+/// tell who a call of ours is still ringing.
+fn wanted_ring(state: &App) -> Option<sounds::Sound> {
+    use sounds::Sound;
+    let matrix = match &state.screen {
+        Screen::LoggedIn(session) => session.call.as_ref().map(|c| &c.state),
+        _ => None,
+    };
+    let whatsapp = state.wa_call.as_ref().map(|c| c.phase.as_str());
+    let discord = state.discord_state.as_ref().is_some_and(|d| d.ringing.iter().any(|r| !state.dc_ring_dismissed.contains(&r.channel_id)));
+    if matrix == Some(&CallUiState::IncomingRinging) {
+        Some(Sound::Ring(Network::Matrix))
+    } else if discord {
+        Some(Sound::Ring(Network::Discord))
+    } else if whatsapp == Some("incoming") {
+        Some(Sound::Ring(Network::WhatsApp))
+    } else if matrix == Some(&CallUiState::OutgoingRinging) || whatsapp == Some("outgoing") {
+        Some(Sound::Ringback)
+    } else {
+        None
+    }
+}
+
+/// Starts, swaps or stops the ring to match the calls.
+fn sync_ringer(state: &mut App) {
+    let wanted = wanted_ring(state).filter(|_| state.sounds.enabled);
+    if state.ringer.as_ref().map(|(sound, _)| *sound) != wanted {
+        state.ringer = None; // stops the old one
+        state.ringer = wanted.map(|sound| (sound, sounds::ring(sound, &state.sounds, speaker(state))));
+    }
+}
+
+fn handle(state: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::RestoreFinished(Ok(client)) => attach_matrix(state, client),
         Message::Mesh(event) => mesh_ui::event(state, event),
@@ -1561,9 +1742,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 match result {
                     Ok(bytes) => {
                         cache::put(cache::Kind::Media, &key, &bytes);
-                        session
-                            .images
-                            .insert(key, Some(iced::widget::image::Handle::from_bytes(bytes)));
+                        show_image(&mut session.images, &mut session.animations, &key, bytes);
                     }
                     Err(err) => {
                         // Leave it out of the cache so the next timeline load retries.
@@ -1715,6 +1894,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                 }
                 MeshUpdate::Notify { room_id, title, body } => {
                     if !(state.window_focused && session.selected_room.as_ref() == Some(&room_id)) {
+                        sounds::play(sounds::Sound::Message(Network::Matrix), &state.sounds, speaker_of(session));
                         notify(title, body);
                     }
                     Task::none()
@@ -2082,26 +2262,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::Tray(tray::Action::Quit) => iced::exit(),
-        Message::Tray(tray::Action::Show) => iced::window::latest().then(|id| match id {
-            Some(id) => Task::batch([iced::window::set_mode(id, iced::window::Mode::Windowed), iced::window::gain_focus(id)]),
-            None => open_window(),
-        }),
-        Message::Tray(tray::Action::Gone) => {
-            state.tray = false;
-            Task::none()
-        }
-        // Wayland can't hide a window, so there it closes and the tray opens a new one.
-        // Unfocused, so notifications show while it's away (a closed window may not say so).
-        Message::CloseRequested(id) if state.tray && cfg!(windows) => {
-            state.window_focused = false;
-            iced::window::set_mode(id, iced::window::Mode::Hidden)
-        }
-        Message::CloseRequested(id) if state.tray => {
-            state.window_focused = false;
-            iced::window::close(id)
-        }
-        Message::CloseRequested(_) => iced::exit(),
+        Message::CloseRequested => iced::exit(),
         Message::WindowReady(raw_id) => {
             titlebar::set_window(raw_id);
             titlebar::paint(&state.palette);
@@ -2162,6 +2323,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         state.login_qr.remove("dc");
                         accounts::remember_linked(state, Network::Discord);
                     }
+                    discord_cues(state, &snapshot);
                     let was_sharing = state.discord_state.as_ref().is_some_and(|s| s.voice.self_stream);
                     let shared = snapshot.voice.self_stream && !was_sharing;
                     state.discord_state = Some(snapshot);
@@ -2204,6 +2366,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         _ => false,
                     };
                     if !(state.window_focused && open) {
+                        sounds::play(sounds::Sound::Message(Network::Discord), &state.sounds, speaker(state));
                         notify(n.title, n.body);
                     }
                 }
@@ -2322,6 +2485,7 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                         _ => false,
                     };
                     if !(state.window_focused && open) {
+                        sounds::play(sounds::Sound::Message(Network::WhatsApp), &state.sounds, speaker(state));
                         notify(n.title, n.body);
                     }
                 }
@@ -2475,6 +2639,64 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
                     }
                 }
             }
+            Task::none()
+        }
+        Message::DiscordRingDismiss(channel_id) => {
+            state.dc_ring_dismissed.push(channel_id);
+            Task::none()
+        }
+        Message::SoundsEnabled(on) => {
+            state.sounds.enabled = on;
+            persist(|c| c.sounds.enabled = on);
+            Task::none()
+        }
+        Message::SoundVolume(volume) => {
+            state.sounds.volume = volume;
+            Task::none()
+        }
+        Message::SoundVolumeSaved => {
+            let volume = state.sounds.volume;
+            persist(|c| c.sounds.volume = volume);
+            sounds::play(sounds::Sound::Message(Network::Matrix), &state.sounds, speaker(state));
+            Task::none()
+        }
+        Message::SoundTest(sound) => {
+            // Plays once (a ring too), even with sounds switched off.
+            let once = sounds::Settings { enabled: true, ..state.sounds.clone() };
+            sounds::play(sound, &once, speaker(state));
+            Task::none()
+        }
+        Message::SoundPick(sound) => Task::perform(
+            async {
+                rfd::AsyncFileDialog::new()
+                    .set_title("Pick a sound")
+                    .add_filter("Sounds", &["wav", "mp3", "ogg", "oga", "flac"])
+                    .pick_file()
+                    .await
+                    .map(|f| f.path().to_path_buf())
+            },
+            move |path| Message::SoundPicked(sound, path),
+        ),
+        Message::SoundPicked(sound, Some(path)) => {
+            let path = path.to_string_lossy().into_owned();
+            if let Err(err) = sounds::decode(&path) {
+                if let Screen::LoggedIn(session) = &mut state.screen {
+                    session.status = Some(format!("Can't use that sound: {err}"));
+                }
+                return Task::none();
+            }
+            state.sounds.files.insert(sound.key(), path.clone());
+            persist(|c| {
+                c.sounds.files.insert(sound.key(), path);
+            });
+            update(state, Message::SoundTest(sound))
+        }
+        Message::SoundPicked(_, None) => Task::none(),
+        Message::SoundReset(sound) => {
+            state.sounds.files.remove(&sound.key());
+            persist(|c| {
+                c.sounds.files.remove(&sound.key());
+            });
             Task::none()
         }
         Message::DiscordJoin(channel_id) => {
@@ -3079,6 +3301,12 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             }
             iced::clipboard::write(toml)
         }
+        Message::CopyText(body) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.status = Some("Copied.".to_string());
+            }
+            iced::clipboard::write(body)
+        }
         Message::OpenUrl(url) => {
             if let Err(err) = open_url(&url) {
                 tracing::warn!("open url {url}: {err}");
@@ -3192,6 +3420,20 @@ fn update(state: &mut App, message: Message) -> Task<Message> {
             let waiting = session.player.as_ref().is_some_and(|pl| pl.key == key && pl.loading);
             if waiting && session.voice_speed == speed {
                 return play_voice(session, key, from);
+            }
+            Task::none()
+        }
+        Message::StatusTick => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                match (&session.status, &session.status_seen) {
+                    (Some(now), Some((seen, at))) if now == seen => {
+                        if at.elapsed() >= STATUS_FOR {
+                            (session.status, session.status_seen) = (None, None);
+                        }
+                    }
+                    (Some(now), _) => session.status_seen = Some((now.clone(), std::time::Instant::now())),
+                    (None, _) => session.status_seen = None,
+                }
             }
             Task::none()
         }
@@ -3564,8 +3806,7 @@ fn theme(state: &App, _: iced::window::Id) -> IcedTheme {
 
 fn subscription(state: &App) -> Subscription<Message> {
     Subscription::batch([
-        iced::window::close_requests().map(Message::CloseRequested),
-        if state.tray { Subscription::run(tray::events) } else { Subscription::none() },
+        iced::window::close_requests().map(|_| Message::CloseRequested),
         match &state.mesh_node {
             Some(exe) => Subscription::run_with(exe.clone(), mesh_events),
             None => Subscription::none(),
@@ -3586,6 +3827,12 @@ fn subscription(state: &App) -> Subscription<Message> {
         // Drive the animated background at ~15 fps (only while it's on).
         if state.extras.digital_rain {
             iced::time::every(std::time::Duration::from_millis(66)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        },
+        // The status line's timeout, only while one is up.
+        if matches!(&state.screen, Screen::LoggedIn(s) if s.status.is_some()) {
+            iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::StatusTick)
         } else {
             Subscription::none()
         },
@@ -3629,12 +3876,15 @@ fn media_moving(state: &App) -> bool {
 }
 
 /// A desktop notification, shown off the UI thread (the D-Bus / WinRT call
-/// can block for a moment). ponytail: on Windows it shows under PowerShell's
-/// name; give the Start Menu shortcut an AppUserModelID and pass it to
-/// `app_id` for "Mesh".
+/// can block for a moment). On Windows it goes out as `Mesh.Mesh`, which the
+/// installer registers with Mesh's name and icon (else it'd show as PowerShell).
 fn notify(title: String, body: String) {
     std::thread::spawn(move || {
-        if let Err(err) = notify_rust::Notification::new().appname("Mesh").summary(&title).body(&body).show() {
+        let mut n = notify_rust::Notification::new();
+        n.appname("Mesh").summary(&title).body(&body);
+        #[cfg(windows)]
+        n.app_id("Mesh.Mesh");
+        if let Err(err) = n.show() {
             tracing::warn!("notification failed: {err}");
         }
     });
@@ -5128,6 +5378,11 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     if let Some(call) = &session.call {
         col = col.push(container(call_bar(call, p)).padding([8, 16]));
     }
+    if let Some(snapshot) = &state.discord_state {
+        for ring in snapshot.ringing.iter().filter(|r| !state.dc_ring_dismissed.contains(&r.channel_id)) {
+            col = col.push(container(discord_ring_bar(ring, p, l)).padding([8, 16]));
+        }
+    }
     if let Some(snapshot) = state.discord_state.as_ref().filter(|s| s.voice.connected()) {
         let discord_video = state.video.iter().filter(|(id, _)| !id.starts_with("wa-")).map(|(_, t)| t);
         col = col.push(container(discord_call_bar(session, &snapshot.voice, discord_video, p, l)).padding([8, 16]));
@@ -5598,6 +5853,33 @@ fn video_tiles<'a>(video: impl Iterator<Item = &'a VideoTile>, p: &theme::Palett
     Some(container(tiles).center_x(Length::Fill).into())
 }
 
+/// A Discord DM/group call ringing us: answer joins it, decline stops it ringing here.
+fn discord_ring_bar<'a>(ring: &'a mesh_discord::Ring, p: &'a theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+    let answer = ui::primary_button(ui::sans("Answer", 13.0, Weight::Semibold, p.accent_text()), Some(Message::DiscordJoin(ring.channel_id.clone())), p, l)
+        .padding([6, 12]);
+    let (fill, edge) = (p.surface_alt(), p.border());
+    container(
+        row![
+            ui::icon(ui::Icon::Phone, 17.0, p.warning()),
+            ui::mono_bold(Network::Discord.tag(), 12.0, net_color(Network::Discord, p)),
+            ui::sans(&ring.name, 14.0, Weight::Semibold, p.text_bright()),
+            text("calling you").size(12).color(p.text_muted()).width(Length::Fill),
+            answer,
+            ui::icon_button(ui::Icon::PhoneOff, Some(Message::DiscordRingDismiss(ring.channel_id.clone())), true, p, l),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(fill.into()),
+        border: iced::border::rounded(8).color(edge).width(1),
+        ..container::Style::default()
+    })
+    .into()
+}
+
 fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Message> {
     let mut controls = row![].spacing(8).align_y(iced::Alignment::Center);
     match call.state {
@@ -5619,6 +5901,7 @@ fn call_bar<'a>(call: &'a CallUi, palette: &'a theme::Palette) -> Element<'a, Me
     container(
         row![
             ui::icon(ui::Icon::Phone, 17.0, palette.accent()),
+            ui::mono_bold(Network::Matrix.tag(), 12.0, net_color(Network::Matrix, palette)),
             text(title).size(15).color(palette.text_bright()).width(Length::Fill),
             controls,
         ]
@@ -5825,6 +6108,9 @@ fn message_content<'a>(
     let body_color = theme::mix(p.text(), p.text_bright(), 0.4);
     let mut col = column![].spacing(6).width(Length::Fill);
 
+    if message.forwarded {
+        col = col.push(ui::mono("↪ Forwarded", 11.0, p.text_muted()));
+    }
     if let Some(quote) = &message.reply_to {
         col = col.push(quote_block(quote, p));
     }
@@ -5904,8 +6190,9 @@ fn message_content<'a>(
         col = col.push(pills);
     }
 
-    // WhatsApp messages get an action bar on hover: react, reply, forward.
-    let Some(id) = message.web_id.as_deref().filter(|_| message.sender_network == Network::WhatsApp) else {
+    // Every message gets an action bar on hover (copy); WhatsApp's also react, reply, forward.
+    let event_id = message.event_id.as_ref().map(|e| e.to_string());
+    let Some(id) = message.web_id.as_deref().or(event_id.as_deref()) else {
         return col.into();
     };
     let picking = session.reacting.as_deref() == Some(id);
@@ -5915,7 +6202,7 @@ fn message_content<'a>(
     let mut layers = stack![col];
     if picking || session.hovered.as_deref() == Some(id) {
         layers = layers.push(
-            container(message_actions(message, id, p))
+            container(message_actions(message, id, message.sender_network == Network::WhatsApp, p))
                 .width(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Right),
         );
@@ -5957,8 +6244,8 @@ fn quote_of(message: &TimelineMessage) -> mesh_core::Quote {
     mesh_core::Quote { author: message.sender_name.clone(), text }
 }
 
-/// The hover bar on a WhatsApp message.
-fn message_actions<'a>(message: &TimelineMessage, id: &str, p: &'a theme::Palette) -> Element<'a, Message> {
+/// The hover bar on a message: copy, and on WhatsApp react, reply, forward.
+fn message_actions<'a>(message: &TimelineMessage, id: &str, whatsapp: bool, p: &'a theme::Palette) -> Element<'a, Message> {
     let action = |glyph: &'static str, tip: &'static str, press: Message| {
         iced::widget::tooltip(
             button(text(glyph).size(15)).on_press(press).padding([2, 7]).style(flat_button_style(p)),
@@ -5967,14 +6254,18 @@ fn message_actions<'a>(message: &TimelineMessage, id: &str, p: &'a theme::Palett
         )
     };
     let (fill, edge) = (p.surface(), p.border_ctrl());
-    container(
-        row![
-            action("🙂", "React", Message::ToggleReactPicker(id.to_string())),
-            action("↩", "Reply", Message::ReplyTo(id.to_string(), quote_of(message))),
-            action("↪", "Forward", Message::ForwardStart(id.to_string())),
-        ]
-        .spacing(2),
-    )
+    let mut bar = row![].spacing(2);
+    // An image's or file's body is just its filename.
+    if !message.body.is_empty() && !matches!(message.kind, MessageKind::Image(_) | MessageKind::File(_)) {
+        bar = bar.push(action("⧉", "Copy", Message::CopyText(message.body.clone())));
+    }
+    if whatsapp {
+        bar = bar
+            .push(action("🙂", "React", Message::ToggleReactPicker(id.to_string())))
+            .push(action("↩", "Reply", Message::ReplyTo(id.to_string(), quote_of(message))))
+            .push(action("↪", "Forward", Message::ForwardStart(id.to_string())));
+    }
+    container(bar)
     .padding(2)
     .style(move |_| container::Style {
         background: Some(fill.into()),
@@ -6540,13 +6831,6 @@ fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         .padding(iced::Padding { top: 6.0, right: 8.0, bottom: 6.0, left: 0.0 })
         .into()
     };
-    let disabled = |label: &'static str, why: &'static str| {
-        ui::not_yet(
-            container(ui::sans(label, 14.0, Weight::Normal, p.text_muted())).padding([7, 10]),
-            why,
-            p,
-        )
-    };
     column![
         button(
             row![
@@ -6570,7 +6854,7 @@ fn settings_nav<'a>(session: &'a Session, p: &'a theme::Palette, l: &theme::Layo
         item("Rice", SettingsPage::Rice),
         item("Keybinds", SettingsPage::Keybinds),
         item("Voice & audio", SettingsPage::Voice),
-        disabled("Notifications", "Desktop notifications aren't supported yet."),
+        item("Sounds", SettingsPage::Sounds),
         Space::new().height(Length::Fill),
         container(ui::mono(
             concat!("mesh ", env!("CARGO_PKG_VERSION"), "\niced · matrix-rust-sdk"),
@@ -6597,6 +6881,7 @@ fn settings_page<'a>(session: &'a Session, state: &'a App, width: f32) -> Elemen
         .spacing(20)
         .into(),
         SettingsPage::Voice => voice_page(session, p),
+        SettingsPage::Sounds => sounds_page(&state.sounds, p),
         SettingsPage::Keybinds => keybinds_page(p),
     };
     scrollable(container(page).padding([24, 28]).width(Length::Fill))
@@ -7209,6 +7494,52 @@ fn voice_page<'a>(session: &'a Session, p: &'a theme::Palette) -> Element<'a, Me
     .into()
 }
 
+fn sounds_page<'a>(settings: &'a sounds::Settings, p: &'a theme::Palette) -> Element<'a, Message> {
+    use sounds::Sound;
+    let row_of = |sound: Sound| -> Element<'a, Message> {
+        let file = settings.files.get(&sound.key());
+        let name = file
+            .and_then(|f| std::path::Path::new(f).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "built-in".into());
+        let small = |label: &'static str, msg: Message| button(text(label).size(12)).on_press(msg).padding([4, 10]).style(flat_button_style(p));
+        let mut actions = row![small("▶ Play", Message::SoundTest(sound)), small("Choose…", Message::SoundPick(sound))].spacing(4);
+        if file.is_some() {
+            actions = actions.push(small("Reset", Message::SoundReset(sound)));
+        }
+        column![
+            row![
+                text(sound.label()).size(14).color(p.text_bright()).width(Length::FillPortion(3)),
+                container(ui::mono(name, 12.0, p.text_muted())).width(Length::FillPortion(2)),
+                actions,
+            ]
+            .spacing(12)
+            .padding([6, 0])
+            .align_y(iced::Alignment::Center),
+            ui::hline(p),
+        ]
+        .into()
+    };
+    let group = |title: &'static str, list: &[Sound]| list.iter().fold(column![heading(title, p)].spacing(2), |col, &s| col.push(row_of(s)));
+    let volume = row![
+        text("Volume").size(14).color(p.text_bright()).width(90),
+        slider(0.0..=1.0, settings.volume, Message::SoundVolume).step(0.05_f32).on_release(Message::SoundVolumeSaved),
+        container(ui::mono(format!("{:>3}%", (settings.volume * 100.0).round()), 12.0, p.text_muted())).width(48),
+    ]
+    .spacing(12)
+    .align_y(iced::Alignment::Center);
+    column![
+        page_header("Sounds", "Built-in sounds, or your own: WAV, MP3, OGG or FLAC. Each network rings its own way.", p),
+        switch_row("Play sounds", "Message chirps, call rings and voice channel cues", settings.enabled, Some(Message::SoundsEnabled(!settings.enabled)), p),
+        volume,
+        group("Messages", &Sound::ALL[0..3]),
+        group("Calls", &Sound::ALL[3..7]),
+        group("Voice channels", &Sound::ALL[7..9]),
+    ]
+    .spacing(20)
+    .into()
+}
+
 fn keybinds_page<'a>(p: &theme::Palette) -> Element<'a, Message> {
     let mut rows = column![].spacing(2);
     for (keys, what) in [
@@ -7774,6 +8105,25 @@ mod tests {
         // Not a link mid-word (no boundary), and unicode before it is fine.
         assert_eq!(link_segments("café https://é.example"), [(false, "café "), (true, "https://é.example")]);
         assert_eq!(link_segments("email=http://x"), [(false, "email=http://x")]);
+    }
+
+    #[test]
+    fn animated_pictures_play_and_stills_dont() {
+        use image::codecs::gif::GifEncoder;
+        let mut gif = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut gif);
+            for shade in [0u8, 255] {
+                let img = image::RgbaImage::from_pixel(512, 300, image::Rgba([shade, 0, 0, 255]));
+                enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        let (delay, frames) = animated_frames(&gif).expect("a two-frame GIF animates");
+        assert_eq!((delay, frames.len()), (100, 2));
+        assert_eq!(frames[0].dimensions(), (ANIM_MAX_SIDE, 150), "shrunk to fit, aspect kept");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::new(4, 4).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        assert!(animated_frames(png.get_ref()).is_none(), "a plain PNG is a still");
     }
 
     #[test]
