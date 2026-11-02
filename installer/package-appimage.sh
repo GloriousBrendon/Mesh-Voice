@@ -21,6 +21,11 @@ for f in "$app" "$wa" "$icon"; do [[ -f $f ]] || { echo "missing $f (build first
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# Drop debug symbols: Mesh goes from ~136 MB to ~34 MB.
+strip -o "$work/mesh" "$app"
+strip -o "$work/mesh-wa" "$wa"
+app="$work/mesh" wa="$work/mesh-wa"
+
 desktop() {
   cat <<EOF
 [Desktop Entry]
