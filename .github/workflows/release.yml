@@ -1,0 +1,67 @@
+# Builds Mesh and the WhatsApp helper for Linux and attaches an AppImage and a
+# tarball to a GitHub Release. Runs when a tag like v0.1.0 is pushed, or by hand
+# from the Actions tab (that run uploads the files as a workflow artifact only).
+#
+# The AppImage bundles only Mesh's own binaries: audio (ALSA/PipeWire), Wayland,
+# X11, xkbcommon and Vulkan come from the host, so it uses the desktop's own
+# drivers and audio server. glibc also comes from the host, which is why this
+# builds on the oldest runner that has the libraries Mesh needs.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # opus's bundled CMakeLists asks for CMake < 3.5, which CMake 4 refuses.
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang pkg-config libasound2-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libwayland-dev libdbus-1-dev file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            mesh-wa -> target
+
+      - name: Build
+        run: |
+          cargo build --release --locked -p mesh-app
+          cargo build --release --locked --manifest-path mesh-wa/Cargo.toml
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$GITHUB_REF_TYPE" == tag ]] || version="0.0.0-${GITHUB_SHA::7}"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          installer/package-appimage.sh "$version" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesh-linux-x86_64
+          path: dist/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
