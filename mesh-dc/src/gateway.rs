@@ -475,9 +475,13 @@ fn bump_dm_order(s: &mut State, d: &Value) -> bool {
     let me = s.me_id();
     let from_me = d.get("author").and_then(|a| a.get("id")).and_then(Value::as_str) == me.as_deref();
     if let Some(mid) = d.get("id").and_then(Value::as_str) {
+        let is_dm = d.get("guild_id").is_none_or(Value::is_null);
+        let open = s.open_channel.as_deref() == Some(cid);
         let entry = s.read_state.entry(cid.to_owned()).or_default();
         if from_me {
             entry.0 = mid.to_owned(); // our own message counts as read
+        } else if is_dm && !open {
+            entry.1 += 1; // every DM message counts, as Discord's own badge does
         }
     }
     if let Some(ch) = s.channels.get_mut(cid) {

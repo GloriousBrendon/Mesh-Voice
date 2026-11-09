@@ -196,9 +196,7 @@ async fn run_session(dir: &Path, token: String, cmds: &mut mpsc::UnboundedReceiv
                         emit("meshNotify", &json!({ "channel_id": channel_id, "title": title, "body": body }));
                     }
                     gateway::Event::ChannelDirty(cid) => {
-                        if let Ok(payload) = rest.messages(&cid, &state).await {
-                            emit("meshMessages", &payload);
-                        }
+                        tokio::spawn(show_channel(rest.clone(), state.clone(), cid, notify_tx.clone()));
                     }
                     gateway::Event::VoiceServer { guild_id, channel_id, endpoint, token, session_id } => {
                         if let Some(v) = voice.take() {
@@ -224,7 +222,7 @@ async fn run_session(dir: &Path, token: String, cmds: &mut mpsc::UnboundedReceiv
                 None => break SessionEnd::StdinClosed,
                 Some(line) => {
                     let Some(cmd) = parse_cmd(&line) else { continue };
-                    if handle(&cmd, &state, &rest, &gw_cmd_tx, &mut voice).await {
+                    if handle(&cmd, &state, &rest, &gw_cmd_tx, &mut voice, &notify_tx).await {
                         rest.logout().await;
                         break SessionEnd::SignedOut;
                     }
@@ -249,7 +247,9 @@ async fn run_session(dir: &Path, token: String, cmds: &mut mpsc::UnboundedReceiv
 }
 
 /// Runs one command. Returns true for signOut (the caller tears down).
-async fn handle(cmd: &Cmd, state: &Arc<Mutex<State>>, rest: &Rest, gw: &mpsc::UnboundedSender<gateway::Cmd>, voice: &mut Option<Voice>) -> bool {
+/// Network calls run as their own tasks: awaited here, one slow download
+/// (avatars of everyone in a call, say) held up every command and snapshot.
+async fn handle(cmd: &Cmd, state: &Arc<Mutex<State>>, rest: &Rest, gw: &mpsc::UnboundedSender<gateway::Cmd>, voice: &mut Option<Voice>, notify: &mpsc::UnboundedSender<()>) -> bool {
     let arg = |i: usize| cmd.args.get(i).map(String::as_str);
     match cmd.func.as_str() {
         "join" => {
@@ -297,46 +297,74 @@ async fn handle(cmd: &Cmd, state: &Arc<Mutex<State>>, rest: &Rest, gw: &mpsc::Un
         "open" => match arg(0) {
             Some(cid) => {
                 state.lock().await.open_channel = Some(cid.to_owned());
-                match rest.messages(cid, state).await {
-                    Ok(payload) => emit("meshMessages", &payload),
-                    Err(e) => log::warn!("open {cid}: {e}"),
-                }
+                tokio::spawn(show_channel(rest.clone(), state.clone(), cid.to_owned(), notify.clone()));
             }
             None => state.lock().await.open_channel = None,
         },
         "send" => {
             if let (Some(cid), Some(content)) = (arg(0), arg(1)) {
-                if let Err(e) = rest.send(cid, content).await {
-                    log::warn!("send: {e}");
-                }
+                let (rest, cid, content) = (rest.clone(), cid.to_owned(), content.to_owned());
+                tokio::spawn(async move {
+                    if let Err(e) = rest.send(&cid, &content).await {
+                        log::warn!("send: {e}");
+                    }
+                });
             }
         }
         "fetchMedia" => {
             if let Some(url) = arg(0) {
-                let payload = match rest.fetch_media(url).await {
-                    Ok(bytes) => {
-                        use base64::Engine as _;
-                        json!({ "url": url, "data": base64::engine::general_purpose::STANDARD.encode(bytes) })
-                    }
-                    Err(e) => json!({ "url": url, "error": e }),
-                };
-                emit("meshMedia", &payload);
+                let (rest, url) = (rest.clone(), url.to_owned());
+                tokio::spawn(async move {
+                    let payload = match rest.fetch_media(&url).await {
+                        Ok(bytes) => {
+                            use base64::Engine as _;
+                            json!({ "url": url, "data": base64::engine::general_purpose::STANDARD.encode(bytes) })
+                        }
+                        Err(e) => json!({ "url": url, "error": e }),
+                    };
+                    emit("meshMedia", &payload);
+                });
             }
         }
         "acceptInvite" => {
             if let Some(link) = arg(0) {
                 emit("meshInvite", &json!({ "state": "waiting" }));
-                let payload = match rest.accept_invite(link).await {
-                    Ok(guild) => json!({ "state": "joined", "guild": guild }),
-                    Err(e) => json!({ "state": "failed", "error": e }),
-                };
-                emit("meshInvite", &payload);
+                let (rest, link) = (rest.clone(), link.to_owned());
+                tokio::spawn(async move {
+                    let payload = match rest.accept_invite(&link).await {
+                        Ok(guild) => json!({ "state": "joined", "guild": guild }),
+                        Err(e) => json!({ "state": "failed", "error": e }),
+                    };
+                    emit("meshInvite", &payload);
+                });
             }
         }
         "signOut" => return true,
         other => log::warn!("unknown command: {other}"),
     }
     false
+}
+
+/// Sends Mesh `cid`'s messages, then marks them read (on Discord too) while
+/// it's still the open channel, so its unread mark and count clear.
+async fn show_channel(rest: Rest, state: Arc<Mutex<State>>, cid: String, notify: mpsc::UnboundedSender<()>) {
+    let payload = match rest.messages(&cid, &state).await {
+        Ok(payload) => payload,
+        Err(e) => return log::warn!("open {cid}: {e}"),
+    };
+    emit("meshMessages", &payload);
+    let Some(newest) = payload["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["id"].as_str()) else { return };
+    {
+        let mut s = state.lock().await;
+        if s.open_channel.as_deref() != Some(cid.as_str()) || s.read_state.get(&cid).is_some_and(|(read, n)| read == newest && *n == 0) {
+            return;
+        }
+        s.read_state.insert(cid.clone(), (newest.to_owned(), 0));
+    }
+    let _ = notify.send(());
+    if let Err(e) = rest.ack(&cid, newest).await {
+        log::warn!("ack {cid}: {e}");
+    }
 }
 
 #[cfg(test)]

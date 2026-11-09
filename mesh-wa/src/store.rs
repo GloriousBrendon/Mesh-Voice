@@ -147,6 +147,36 @@ impl Store {
             .unwrap_or_else(|| number_label(&jid))
     }
 
+    /// `@<number>` mentions (a phone number or a lid) as `@Name`, where we know who
+    /// it is; looked up when shown, so contacts learned later still apply.
+    pub fn named_mentions(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find('@') {
+            out.push_str(&rest[..=at]);
+            let tail = &rest[at + 1..];
+            let user = &tail[..tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len()];
+            out.push_str(&(user.len() >= 5).then(|| self.mention_name(user)).flatten().unwrap_or_else(|| user.to_owned()));
+            rest = &tail[user.len()..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// A name for the digits of a mention: the lid's or number's contact, or the
+    /// number a lid maps to. `None` when we know nothing better than the digits.
+    fn mention_name(&self, user: &str) -> Option<String> {
+        let lid = format!("{user}@lid");
+        let pn = self.canon(&lid);
+        for jid in [lid.as_str(), &format!("{user}@s.whatsapp.net")] {
+            let name = self.name_of(jid);
+            if name != number_label(&self.canon(jid)) {
+                return Some(name);
+            }
+        }
+        (pn != lid).then(|| number_label(&pn).trim_start_matches('+').to_owned())
+    }
+
     /// Adds a message unless it's already there (by id). Returns whether it was new.
     pub fn add(&mut self, chat_id: &str, msg: Message) -> bool {
         let chat = self.chat(chat_id);
@@ -194,6 +224,10 @@ impl Store {
             if !m.author_id.is_empty() {
                 m.author = self.name_of(&m.author_id);
                 m.avatar = self.avatars.get(&m.author_id).cloned();
+            }
+            m.content = self.named_mentions(&m.content);
+            if let Some(q) = &mut m.quote {
+                q.text = self.named_mentions(&q.text);
             }
             m.reactions = pills(&m.reacts, &self.me);
             m.media = None;
@@ -423,6 +457,16 @@ pub fn quoted(msg: &wa::Message) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_show_names() {
+        let mut s = Store::default();
+        s.contacts.insert("27820000001@s.whatsapp.net".into(), "Ann".into());
+        s.map_lid("99900000002@lid", "27820000002@s.whatsapp.net");
+        s.push.insert("27820000003@s.whatsapp.net".into(), "Bob".into());
+        let text = "hi @27820000001, @99900000002 @27820000003 @555 me@x.com @12345678";
+        assert_eq!(s.named_mentions(text), "hi @Ann, @27820000002 @Bob @555 me@x.com @12345678");
+    }
 
     #[test]
     fn media_messages_carry_meshes_metadata() {

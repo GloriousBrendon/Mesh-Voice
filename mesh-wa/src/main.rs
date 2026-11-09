@@ -385,7 +385,7 @@ impl App {
             debug!("skipping a message with nothing to show");
             return;
         };
-        let notice = body.line();
+        let notice = self.store.named_mentions(&body.line());
         let quote = store::quoted(&m.message).map(|(who, text)| Quote { author: if who.is_empty() { String::new() } else { self.store.name_of(&bare(&who)) }, text });
         let msg = Message {
             id: m.info.id.to_string(),
@@ -954,6 +954,26 @@ impl App {
     /// `wa-gif:<id>` (a GIF's frames, through `waFrames`), or a URL (profile pictures).
     fn fetch_media(&self, url: String) {
         let client = self.client.clone();
+        // `wa-pic:<small picture url>`: that person's or group's picture full size.
+        if let Some(small) = url.strip_prefix("wa-pic:") {
+            let jid = self.store.avatars.iter().find(|(_, u)| *u == small).map(|(id, _)| id.clone());
+            tokio::spawn(async move {
+                let found = async {
+                    let jid = jid.ok_or("whose picture is that?")?.parse::<Jid>().map_err(|e| e.to_string())?;
+                    let target = if jid.is_group() { ProfilePictureTarget::Group(&jid) } else { ProfilePictureTarget::Contact(&jid) };
+                    let pic = client.pictures().lookup(ProfilePictureRequest::new(target, ProfilePictureType::Full)).await.map_err(|e| e.to_string())?;
+                    let pic = pic.into_found().ok_or("no picture")?;
+                    let r = client.http_client().execute(HttpRequest::get(pic.url)).await.map_err(|e| e.to_string())?;
+                    if (200..300).contains(&r.status_code) { Ok(r.body) } else { Err(format!("HTTP {}", r.status_code)) }
+                };
+                let payload = match found.await {
+                    Ok(body) => json!({ "url": url, "data": B64.encode(&body) }),
+                    Err(error) => json!({ "url": url, "error": error }),
+                };
+                emit("waMedia", &payload);
+            });
+            return;
+        }
         if url.starts_with("http://") || url.starts_with("https://") {
             tokio::spawn(async move {
                 let payload = match client.http_client().execute(HttpRequest::get(url.clone())).await {

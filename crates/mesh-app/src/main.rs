@@ -15,7 +15,7 @@ use chrono::{DateTime, Local, TimeZone};
 use iced::font::Weight;
 use iced::widget::{
     Space, button, column, container, mouse_area, pick_list, responsive, row, scrollable, stack,
-    slider, text, text_input,
+    slider, text, text_editor, text_input,
 };
 use iced::{Element, Length, Subscription, Task, Theme as IcedTheme, keyboard};
 use mesh_core::{
@@ -246,7 +246,7 @@ struct Session {
     rooms: Vec<RoomSummary>,
     selected_room: Option<OwnedRoomId>,
     timeline: Vec<TimelineMessage>,
-    message_draft: String,
+    message_draft: text_editor::Content,
     status: Option<String>,
     /// The status `StatusTick` last saw and since when; it goes after `STATUS_FOR`.
     status_seen: Option<(String, std::time::Instant)>,
@@ -345,6 +345,11 @@ const NEW_CHAT_INPUT: &str = "new-chat";
 const COMPOSER_INPUT: &str = "composer";
 
 /// Puts the cursor in the message box (on opening a chat, picking an emoji).
+/// The composer's text, without the trailing newline the editor may keep.
+fn draft(session: &Session) -> String {
+    session.message_draft.text().trim_end().to_owned()
+}
+
 fn focus_composer() -> Task<Message> {
     iced::widget::operation::focus(iced::widget::Id::new(COMPOSER_INPUT))
 }
@@ -416,7 +421,7 @@ impl Session {
             rooms: Vec::new(),
             selected_room: None,
             timeline: Vec::new(),
-            message_draft: String::new(),
+            message_draft: text_editor::Content::new(),
             status: None,
             status_seen: None,
             verification: None,
@@ -966,6 +971,29 @@ fn wants(map: &mut HashMap<String, Option<iced::widget::image::Handle>>, kind: c
     missing
 }
 
+/// Where a bigger copy of a profile picture comes from: Discord's CDN takes a
+/// size, WhatsApp looks the full one up (`wa-pic:`). Matrix: just the small one.
+fn full_avatar(url: &str) -> Option<String> {
+    if url.contains(".whatsapp.net/") {
+        Some(format!("wa-pic:{url}"))
+    } else if url.starts_with("https://cdn.discordapp.com/") {
+        Some(url.replace("size=64", "size=1024"))
+    } else {
+        None
+    }
+}
+
+/// `face` (a drawn avatar) as a button opening `key` full screen.
+fn zoomable<'a>(face: Element<'a, Message>, key: Option<String>) -> Element<'a, Message> {
+    match key {
+        Some(key) => {
+            let full = full_avatar(&key);
+            mouse_area(face).on_press(Message::OpenImage(key, full)).interaction(iced::mouse::Interaction::Pointer).into()
+        }
+        None => face,
+    }
+}
+
 /// A downloaded Discord picture (from `load_snapshot_media`), if there is one.
 fn web_picture<'a>(session: &'a Session, url: Option<&str>) -> Option<&'a iced::widget::image::Handle> {
     session.avatars.get(url?)?.as_ref()
@@ -1075,7 +1103,7 @@ enum Message {
     RoomSelected(OwnedRoomId),
     TimelineLoaded(OwnedRoomId, Result<Vec<TimelineMessage>, String>),
     Update(MeshUpdate),
-    DraftChanged(String),
+    ComposerEdit(text_editor::Action),
     /// A fire-and-forget task finished; nothing to do.
     Noop,
     ToggleEmoji,
@@ -1129,6 +1157,8 @@ enum Message {
     /// Enter in the jump palette: go to the top match.
     JumpSubmit,
     JumpTo(OwnedRoomId),
+    /// A Ctrl+K result picked: close the palette, then go there.
+    JumpPick(Box<Message>),
     ImageLoaded(String, Result<Vec<u8>, String>),
     AvatarLoaded(String, Result<Vec<u8>, String>),
     /// Click on a reaction pill: add ours, or take it back (`mine`).
@@ -1906,9 +1936,9 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Noop => Task::none(),
-        Message::DraftChanged(value) => {
+        Message::ComposerEdit(action) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                session.message_draft = value;
+                session.message_draft.perform(action);
             }
             Task::none()
         }
@@ -1955,7 +1985,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                 match result {
                     Ok(()) => {
                         session.pending_attachment = None;
-                        session.message_draft.clear();
+                        session.message_draft = text_editor::Content::new();
                     }
                     Err(err) => session.status = Some(format!("Couldn't send the file: {err}")),
                 }
@@ -1964,7 +1994,8 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::InsertEmoji(emoji) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
-                session.message_draft.push_str(emoji);
+                session.message_draft.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                session.message_draft.perform(text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(emoji.to_string()))));
             }
             // Keep the picker open for several in a row; back to typing.
             iced::widget::operation::focus(iced::widget::Id::new(COMPOSER_INPUT))
@@ -1979,7 +2010,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                 if session.sending_attachment {
                     return Task::none();
                 }
-                let caption = session.message_draft.clone();
+                let caption = draft(session);
                 match &session.web_chat {
                     Some(chat) if chat.network == Network::WhatsApp => match &state.whatsapp {
                         Some(engine) => {
@@ -2018,15 +2049,16 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                 }
                 return Task::none();
             }
-            if session.message_draft.trim().is_empty() {
+            let body = draft(session);
+            if body.trim().is_empty() {
                 return Task::none();
             }
             // A web chat sends through its hidden client; the echo comes back
             // with its messages.
             if let Some(chat) = &session.web_chat {
                 let reply_to = session.replying.as_ref().map(|(id, _)| id.as_str());
-                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &session.message_draft, reply_to) {
-                    session.message_draft.clear();
+                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &body, reply_to) {
+                    session.message_draft = text_editor::Content::new();
                     session.replying = None;
                 } else {
                     session.status = Some("That chat's client isn't running, so this can't be sent.".to_string());
@@ -2037,7 +2069,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                 return Task::none();
             };
             let Some(client) = session.client.clone() else { return Task::none() };
-            let body = std::mem::take(&mut session.message_draft);
+            session.message_draft = text_editor::Content::new();
             Task::perform(
                 async move { client.send_message(&room_id, &body).await.map_err(|e| e.to_string()) },
                 Message::MessageSent,
@@ -3202,13 +3234,16 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &state.screen else {
                 return Task::none();
             };
-            match jump_matches(session).first() {
-                Some(room) => {
-                    let id = room.id.clone();
-                    update(state, Message::JumpTo(id))
-                }
+            match jump_matches(session, state).into_iter().next() {
+                Some(hit) => update(state, Message::JumpPick(Box::new(hit.go))),
                 None => Task::none(),
             }
+        }
+        Message::JumpPick(go) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.jump = None;
+            }
+            update(state, *go)
         }
         Message::JumpTo(room_id) => {
             let Screen::LoggedIn(session) = &mut state.screen else {
@@ -4013,14 +4048,49 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
 }
 
 /// Rooms and spaces whose name contains the jump query, most recent first.
-fn jump_matches(session: &Session) -> Vec<&RoomSummary> {
+/// One Ctrl+K result: how it shows and what picking it does.
+struct JumpHit {
+    icon: &'static str,
+    label: String,
+    tag: &'static str,
+    go: Message,
+}
+
+/// Rooms, spaces, WhatsApp chats and groups, Discord DMs and servers whose
+/// name has the query in it; names starting with it first.
+fn jump_matches(session: &Session, state: &App) -> Vec<JumpHit> {
     let query = session.jump.as_deref().unwrap_or_default().to_lowercase();
-    session
+    let mut hits: Vec<JumpHit> = session
         .rooms
         .iter()
-        .filter(|r| r.name.to_lowercase().contains(&query))
-        .take(JUMP_RESULTS)
-        .collect()
+        .map(|room| JumpHit {
+            icon: if room.is_space { "◆" } else if room.is_direct { "@" } else { "#" },
+            label: room.name.clone(),
+            tag: room.network.tag(),
+            go: Message::JumpTo(room.id.clone()),
+        })
+        .collect();
+    if let Some(w) = accounts::shown_whatsapp(state) {
+        hits.extend(w.chats.iter().chain(&w.archived).map(|c| JumpHit {
+            icon: if c.group { "#" } else { "@" },
+            label: c.name.clone(),
+            tag: Network::WhatsApp.tag(),
+            go: Message::WebChatSelected(WebChat { network: Network::WhatsApp, id: c.id.clone(), name: c.name.clone(), dm: !c.group }),
+        }));
+    }
+    if let Some(d) = accounts::shown_discord(state) {
+        hits.extend(d.dms.iter().map(|dm| JumpHit {
+            icon: "@",
+            label: dm.name.clone(),
+            tag: Network::Discord.tag(),
+            go: Message::WebChatSelected(WebChat { network: Network::Discord, id: dm.id.clone(), name: dm.name.clone(), dm: true }),
+        }));
+        hits.extend(d.guilds.iter().map(|g| JumpHit { icon: "◆", label: g.name.clone(), tag: Network::Discord.tag(), go: Message::GuildSelected(g.id.clone()) }));
+    }
+    hits.retain(|h| h.label.to_lowercase().contains(&query));
+    hits.sort_by_key(|h| !h.label.to_lowercase().starts_with(&query));
+    hits.truncate(JUMP_RESULTS);
+    hits
 }
 
 fn view(state: &App, _: iced::window::Id) -> Element<'_, Message> {
@@ -4091,7 +4161,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
         } else if let Some(dialog) = &session.join_server {
             stack![shell, join_server_view(dialog, state.discord.is_some(), p, l)].into()
         } else if session.jump.is_some() {
-            stack![shell, jump_palette(session, p, l)].into()
+            stack![shell, jump_palette(session, state, p, l)].into()
         } else if let Some(picker) = &session.new_chat {
             stack![shell, new_chat_picker(picker, p, l)].into()
         } else if let Some((_, query)) = &session.forwarding {
@@ -4104,10 +4174,10 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
 }
 
 /// The Ctrl+K palette: type to filter rooms and spaces, Enter or click to jump.
-fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
+fn jump_palette<'a>(session: &'a Session, state: &'a App, p: &theme::Palette, l: &theme::Layout) -> Element<'a, Message> {
     let query = session.jump.as_deref().unwrap_or_default();
     let mut list = column![
-        text_input("jump to a room or space…", query)
+        text_input("search people, chats, groups, servers…", query)
             .id(iced::widget::Id::new(JUMP_INPUT))
             .on_input(Message::JumpInput)
             .on_submit(Message::JumpSubmit)
@@ -4115,25 +4185,22 @@ fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
             .size(14),
     ]
     .spacing(2);
-    let matches = jump_matches(session);
-    for (i, room) in matches.iter().enumerate() {
-        let (icon, label) = if room.is_space {
-            ("◆", room.name.clone())
-        } else {
-            (if room.is_direct { "@" } else { "#" }, room.name.clone())
-        };
+    let matches = jump_matches(session, state);
+    let empty = matches.is_empty();
+    for (i, hit) in matches.into_iter().enumerate() {
         let mut line = row![
-            ui::mono(icon, 13.0, p.text_muted()),
-            ui::sans(label, 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+            ui::mono(hit.icon, 13.0, p.text_muted()),
+            ui::sans(hit.label, 14.0, Weight::Normal, p.text_bright()).width(Length::Fill),
+            ui::mono(hit.tag, 10.0, p.text_muted()),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
         if i == 0 {
             line = line.push(ui::mono("Enter", 11.0, p.text_muted()));
         }
-        list = list.push(ui::row_button(line, Message::JumpTo(room.id.clone()), i == 0, p, l));
+        list = list.push(ui::row_button(line, Message::JumpPick(Box::new(hit.go)), i == 0, p, l));
     }
-    if matches.is_empty() {
+    if empty {
         list = list.push(container(ui::mono("no match", 12.0, p.text_muted())).padding(8));
     }
     let scrim = theme::alpha(p.background(), 0.6);
@@ -4159,7 +4226,8 @@ fn jump_palette<'a>(session: &'a Session, p: &theme::Palette, l: &theme::Layout)
 fn lightbox_view<'a>(session: &'a Session, shown: &str, full: Option<&str>, p: &theme::Palette) -> Element<'a, Message> {
     let big = full.and_then(|key| drawn_image(session, key));
     let still_loading = full.is_some() && big.is_none();
-    let picture: Element<'a, Message> = match big.or_else(|| drawn_image(session, shown)) {
+    let avatar = || session.avatars.get(shown)?.as_ref().map(|h| iced::widget::image(h.clone()));
+    let picture: Element<'a, Message> = match big.or_else(|| drawn_image(session, shown)).or_else(avatar) {
         Some(image) => image
             .width(Length::Fill)
             .height(Length::Fill)
@@ -4486,7 +4554,7 @@ fn top_bar<'a>(
     let search = button(
         row![
             ui::icon(ui::Icon::Search, 14.0, p.text_muted()),
-            ui::mono("search or jump — rooms, spaces", 12.0, p.text_muted()).width(Length::Fill),
+            ui::mono("search people, chats, groups, servers", 12.0, p.text_muted()).width(Length::Fill),
             ui::outline_chip(ui::mono("Ctrl K", 11.0, p.text_muted()), p),
         ]
         .spacing(8)
@@ -4592,12 +4660,20 @@ fn rail_view<'a>(
     l: &theme::Layout,
     tags: bool,
 ) -> Element<'a, Message> {
-    let home = rail_tile(
-        ui::icon(ui::Icon::Home, 20.0, p.text_bright()),
-        session.active_space.is_none() && session.active_guild.is_none() && !session.active_wa_groups,
-        Some(Message::SpaceSelected(None)),
+    // Home holds the DMs, so its badge counts their unread messages (muted chats left out).
+    let home_unread: u64 = session.rooms.iter().filter(|r| r.is_direct).map(|r| r.unread_notifications).sum::<u64>()
+        + discord.map(|d| d.dms.iter().map(|dm| dm.mentions).sum()).unwrap_or(0)
+        + whatsapp.map(|w| w.chats.iter().filter(|c| !c.group && !c.muted).map(|c| c.unread).sum()).unwrap_or(0);
+    let home = rail_badge(
+        rail_tile(
+            ui::icon(ui::Icon::Home, 20.0, p.text_bright()),
+            session.active_space.is_none() && session.active_guild.is_none() && !session.active_wa_groups,
+            Some(Message::SpaceSelected(None)),
+            p,
+            l,
+        ),
+        home_unread,
         p,
-        l,
     );
     let guilds = discord.map(|d| d.guilds.as_slice()).unwrap_or_default();
     let mut dc: Vec<Element<'a, Message>> = guilds
@@ -5297,8 +5373,16 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     let room = selected_room(session);
     let mut col = column![];
     if let Some(channel) = &session.web_chat {
+        let face_url = match channel.network {
+            Network::WhatsApp => state.whatsapp_state.as_ref().and_then(|w| w.chats.iter().chain(&w.archived).find(|c| c.id == channel.id)).and_then(|c| c.avatar.clone()),
+            _ => state.discord_state.as_ref().and_then(|d| d.dms.iter().find(|dm| dm.id == channel.id)).and_then(|dm| dm.avatar.clone()),
+        };
+        let face = match web_picture(session, face_url.as_deref()) {
+            Some(handle) => zoomable(ui::avatar(&channel.name, Some(handle), 28.0, p.surface_alt(), p, None), face_url),
+            None => ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 18.0, p.text_muted()),
+        };
         let mut header = row![
-            ui::icon(if channel.dm { ui::Icon::At } else { ui::Icon::Hash }, 18.0, p.text_muted()),
+            face,
             ui::sans(&channel.name, 15.0, Weight::Semibold, p.text_bright()).width(Length::Fill),
             ui::mono(channel.network.tag(), 11.0, net_color(channel.network, p)),
         ]
@@ -5458,16 +5542,26 @@ fn composer<'a>(
     l: &theme::Layout,
 ) -> Element<'a, Message> {
     let (muted, bright, selection) = (p.text_muted(), p.text_bright(), theme::alpha(p.accent(), 0.35));
-    let input = text_input(&placeholder, &session.message_draft)
+    // Grows upward with the text (the timeline above gives way), then scrolls.
+    let input = text_editor(&session.message_draft)
+        .placeholder(placeholder)
         .id(iced::widget::Id::new(COMPOSER_INPUT))
-        .on_input(Message::DraftChanged)
-        .on_submit(Message::SendMessage)
+        .on_action(Message::ComposerEdit)
+        .key_binding(|key| match key.key.as_ref() {
+            keyboard::Key::Named(keyboard::key::Named::Enter)
+                if !key.modifiers.shift() && matches!(key.status, text_editor::Status::Focused { .. }) =>
+            {
+                Some(text_editor::Binding::Custom(Message::SendMessage))
+            }
+            _ => text_editor::Binding::from_key_press(key),
+        })
+        .height(Length::Shrink)
+        .max_height(220.0)
         .padding(0)
         .size(14)
-        .style(move |_, _| text_input::Style {
+        .style(move |_, _| text_editor::Style {
             background: iced::Color::TRANSPARENT.into(),
             border: iced::Border::default(),
-            icon: muted,
             placeholder: muted,
             value: bright,
             selection,
@@ -5553,7 +5647,7 @@ fn composer<'a>(
         row![
             typing_line(typing_in.and_then(|id| session.typing.get(id)).map(Vec::as_slice).unwrap_or_default(), p),
             Space::new().width(Length::Fill),
-            ui::mono("Enter send · markdown on", 11.0, p.text_muted()),
+            ui::mono("Enter send · Shift+Enter new line", 11.0, p.text_muted()),
         ],
     )
     .spacing(6)
@@ -6051,13 +6145,9 @@ fn timeline_view<'a>(
                     }
                     Element::from(
                         row![
-                            ui::avatar(
-                                &message.sender_name,
-                                picture(session, message.sender_avatar.as_ref()),
-                                38.0,
-                                fill,
-                                p,
-                                None,
+                            zoomable(
+                                ui::avatar(&message.sender_name, picture(session, message.sender_avatar.as_ref()), 38.0, fill, p, None),
+                                message.sender_avatar.as_ref().map(MediaRef::key).filter(|k| session.avatars.get(k).is_some_and(Option::is_some)),
                             ),
                             column![
                                 header.push(ui::mono(time_label, 11.0, p.text_muted())),

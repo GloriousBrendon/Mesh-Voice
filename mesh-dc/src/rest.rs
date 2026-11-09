@@ -17,7 +17,13 @@ pub struct Rest {
 
 impl Rest {
     pub fn new(token: String) -> Self {
-        Rest { http: reqwest::Client::new(), token }
+        // Without timeouts one stalled request (the VPN dropping mid-call) hangs its caller for good.
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
+        Rest { http, token }
     }
 
     fn req(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -41,6 +47,12 @@ impl Rest {
         let s = state.lock().await;
         let messages: Vec<Value> = list.iter().map(|m| message(m, &s)).collect();
         Ok(json!({ "channel_id": channel_id, "messages": messages }))
+    }
+
+    /// Marks `channel_id` read up to `message_id`, as the client does on viewing it.
+    pub async fn ack(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let resp = self.req(reqwest::Method::POST, &format!("/channels/{channel_id}/messages/{message_id}/ack")).json(&json!({ "token": Value::Null })).send().await.map_err(|e| anyhow!("ack: {e}"))?;
+        resp.error_for_status().map(drop).map_err(|e| anyhow!("ack HTTP {e}"))
     }
 
     pub async fn send(&self, channel_id: &str, content: &str) -> Result<()> {
@@ -235,6 +247,17 @@ pub fn snapshot(s: &State) -> Value {
 // Discord message types Mesh draws as plain text; the rest are system lines.
 const TEXT_MSG: [u64; 4] = [0, 19, 20, 21];
 
+/// `<@id>` / `<@!id>` as `@name`, for the users the message says it mentions.
+fn named_mentions(content: &str, mentions: Option<&Value>) -> String {
+    let mut out = content.to_owned();
+    for u in mentions.and_then(Value::as_array).into_iter().flatten() {
+        let Some(id) = u.get("id").and_then(Value::as_str) else { continue };
+        let name = u.get("global_name").and_then(Value::as_str).filter(|n| !n.is_empty()).or_else(|| u.get("username").and_then(Value::as_str)).unwrap_or(id);
+        out = out.replace(&format!("<@{id}>"), &format!("@{name}")).replace(&format!("<@!{id}>"), &format!("@{name}"));
+    }
+    out
+}
+
 fn message(m: &Value, s: &State) -> Value {
     let author = m.get("author");
     let aid = author.and_then(|a| a.get("id")).and_then(Value::as_str).unwrap_or("");
@@ -245,7 +268,7 @@ fn message(m: &Value, s: &State) -> Value {
         .or_else(|| author.and_then(|a| a.get("username").and_then(Value::as_str)))
         .unwrap_or(aid);
     let content = if is_text {
-        m.get("content").and_then(Value::as_str).unwrap_or("").to_owned()
+        named_mentions(m.get("content").and_then(Value::as_str).unwrap_or(""), m.get("mentions"))
     } else {
         system_line(mtype)
     };
@@ -313,6 +336,12 @@ fn attachment(a: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_show_names() {
+        let ms = json!([{ "id": "7", "username": "ann", "global_name": "Ann" }, { "id": "8", "username": "bob" }]);
+        assert_eq!(named_mentions("hi <@7> and <@!8>, not <@9>", Some(&ms)), "hi @Ann and @bob, not <@9>");
+    }
 
     #[test]
     fn snapshot_shape_matches_mesh() {
