@@ -123,16 +123,33 @@ gate needs the homelab seed (seed Checkpoint B) and the Windows PC.
 
 ### Phase 4: Mesh-Voice
 
-- [ ] **Task 8: Contacts on Your ID**
+- [x] **Task 8: Contacts on Your ID** (by-hand check pending)
   - What: `meshContacts` and `published` in `mesh.rs`; a Contacts list with
     Ping and Remove; Add as contact on Check an ID; "findable by contacts"
     on the Network line.
   - Verify: `cargo test -p mesh-app -p mesh-discord`; by hand with two
     windows (`XDG_DATA_HOME=/tmp/meshB`) and a local seed.
   - Size M.
+  - Result (2026-11-09): Contacts section (name, short ID, last seen,
+    Ping, Remove), "Save them as" + Add as contact under Check an ID's
+    safety number, "findable by contacts" on the Network line. Your ID asks
+    for `contactList` on unlock. `mesh-node` reads `MESH_SEEDS`
+    (space-separated tickets) when there's no `--seed`, since Mesh-Voice
+    passes no flags. Smoke run on n0's real relays with a local seed and
+    two helpers: cold ping by ID 0.64 s (direct), warm 0.1 ms, refused at
+    once after removal. 45 Mesh-Voice tests pass; no new clippy warnings.
 
 **Checkpoint B (by hand, you):** two windows on Linux with a local seed:
 add each other, ping by ID.
+
+```
+mesh-node seed --data /tmp/mesh-seed        # prints "ticket mesh://node/…"
+MESH_SEEDS='<ticket>' mesh                  # window A
+MESH_SEEDS='<ticket>' XDG_DATA_HOME=/tmp/meshB mesh   # window B
+```
+
+Each window: Your ID → Check an ID (paste the other's ID or friend code)
+→ Save them as → Add as contact. Then Ping in Contacts.
 
 **Checkpoint C (module gate, needs the homelab and Windows):** the spec's
 two-machine check. It shares a sitting with seed Checkpoint C, transport
