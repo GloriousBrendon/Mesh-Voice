@@ -22,6 +22,8 @@ pub(crate) struct Mesh {
     net: Option<mesh::Net>,
     /// This device's live friend codes.
     codes: Vec<mesh::Code>,
+    /// The people this identity can reach, and who can reach it (routing).
+    contacts: Vec<mesh::Contact>,
     form: Form,
     settings: Settings,
 }
@@ -74,6 +76,11 @@ struct Settings {
     code_copied: Option<String>,
     /// The code Check an ID resolved, shown with the safety number.
     resolved: Option<String>,
+    /// Check an ID's "Add as contact": the name to save them under.
+    contact_name: String,
+    /// The last contact pinged by ID, and their answer.
+    contact_pong: Option<(String, mesh::Pong)>,
+    pinging: Option<String>,
 }
 
 /// Friend-code expiry choices (identity's), as labels and `codeCreate` arguments.
@@ -115,6 +122,10 @@ pub(crate) enum Msg {
     MakeCode,
     CopyCode(String),
     RevokeCode(String),
+    ContactName(String),
+    AddContact,
+    PingContact(String),
+    RemoveContact(String),
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -137,6 +148,10 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.qr = identity.link.as_deref().filter(|_| now_unlocked).and_then(|link| qr_code::Data::new(link).ok());
             if !now_unlocked {
                 m.codes.clear();
+                m.contacts.clear();
+            } else if let Some(node) = &m.node {
+                // Unlocking doesn't send them by itself.
+                node.contacts();
             }
             m.identity = Some(identity);
             m.settings.busy = None;
@@ -169,6 +184,9 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
         mesh::Event::Error(error) => {
             let s = &mut m.settings;
             s.busy = None;
+            if error.func == "netPingId" {
+                s.contact_pong = None;
+            }
             if error.func == "idChangePassword" {
                 s.old.clear();
             }
@@ -201,8 +219,23 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             return iced::clipboard::write(ticket);
         }
         mesh::Event::Ping(pong) => {
-            m.settings.busy = None;
-            m.settings.pong = Some(pong);
+            let s = &mut m.settings;
+            match s.busy.take() {
+                Some("netPingId") => s.contact_pong = s.pinging.take().map(|id| (id, pong)),
+                _ => s.pong = Some(pong),
+            }
+        }
+        mesh::Event::Contacts(contacts) => {
+            m.contacts = contacts;
+            let s = &mut m.settings;
+            // Also comes after a ping by ID, so only end our own wait.
+            if s.busy == Some("contactAdd") {
+                s.contact_name.clear();
+                s.note = Some(("contactAdd".into(), true, "Added. Once they add you too, you can reach each other.".into()));
+            }
+            if matches!(s.busy, Some("contactAdd" | "contactRemove")) {
+                s.busy = None;
+            }
         }
         mesh::Event::Codes(codes) => {
             m.codes = codes.codes;
@@ -229,6 +262,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.qr = None;
             m.net = None;
             m.codes.clear();
+            m.contacts.clear();
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -375,6 +409,33 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
                 node.revoke_code(&code);
             }
         }
+        Msg::ContactName(value) => s.contact_name = value,
+        Msg::AddContact => {
+            if let (None, Some((safety, _))) = (s.busy, &s.safety)
+                && !s.contact_name.trim().is_empty()
+            {
+                s.busy = Some("contactAdd");
+                s.note = None;
+                node.add_contact(&safety.id, s.contact_name.trim());
+            }
+        }
+        Msg::PingContact(id) => {
+            if s.busy.is_none() {
+                s.busy = Some("netPingId");
+                s.note = None;
+                s.contact_pong = None;
+                node.ping_id(&id);
+                s.pinging = Some(id);
+            }
+        }
+        Msg::RemoveContact(id) => {
+            if s.busy.is_none() {
+                s.busy = Some("contactRemove");
+                s.note = None;
+                s.contact_pong = None;
+                node.remove_contact(&id);
+            }
+        }
         Msg::CopyTicket => {
             if s.busy.is_none() {
                 s.busy = Some("netTicket");
@@ -452,7 +513,24 @@ fn net_line(net: Option<&mesh::Net>) -> String {
         let s = if net.connections == 1 { "" } else { "s" };
         line.push_str(&format!(" · {} connection{s}{}", net.connections, if net.direct { ", direct" } else { "" }));
     }
+    if net.published {
+        line.push_str(" · findable by contacts");
+    }
     line
+}
+
+/// `mesh1qch7…utrz3`: enough to tell IDs apart in a list.
+fn short_id(id: &str) -> String {
+    match (id.get(..9), id.len().checked_sub(5).and_then(|i| id.get(i..))) {
+        (Some(head), Some(tail)) if id.len() > 16 => format!("{head}…{tail}"),
+        _ => id.to_owned(),
+    }
+}
+
+/// "seen 5 Nov, 14:02" or "not reached yet".
+fn seen_line(seen: Option<u64>) -> String {
+    seen.and_then(|t| Local.timestamp_opt(t as i64, 0).single())
+        .map_or_else(|| "not reached yet".to_owned(), |t| format!("seen {}", t.format("%-d %b, %H:%M")))
 }
 
 /// n0's relays by their short name (`aps1`); any other relay by its host.
@@ -666,7 +744,54 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
                     .style(|_| container::Style { background: Some(iced::Color::WHITE.into()), border: iced::border::rounded(8), ..container::Style::default() }),
             );
         }
+        if let Some(known) = m.contacts.iter().find(|c| c.id == safety.id) {
+            check = check.push(ui::sans(format!("Already a contact: {}", known.name), 12.0, Weight::Normal, p.text()));
+        } else if identity.id.as_deref() != Some(safety.id.as_str()) {
+            check = check
+                .push(field("SAVE THEM AS", &s.contact_name, Msg::ContactName, false, Msg::AddContact, p))
+                .push(action("Add as contact", "contactAdd", (!s.contact_name.trim().is_empty()).then_some(Msg::AddContact)));
+        }
     }
+    check = check.extend(note("contactAdd"));
+
+    // Contacts: who this identity can reach by ID, and who can reach it.
+    let mut contacts = column![
+        heading("contacts", p),
+        text("You can reach a contact, and they can reach you, once you've both added each other. Nobody else can connect to this device.")
+            .size(12)
+            .color(p.text()),
+    ]
+    .spacing(8);
+    if m.contacts.is_empty() {
+        contacts = contacts.push(ui::sans("None yet. Check a friend's ID or code above, then add them.", 12.0, Weight::Normal, p.text_muted()));
+    }
+    for c in &m.contacts {
+        let pinging = s.busy == Some("netPingId") && s.pinging.as_deref() == Some(c.id.as_str());
+        contacts = contacts.push(
+            row![
+                column![
+                    ui::sans(c.name.clone(), 13.0, Weight::Semibold, p.text_bright()),
+                    ui::mono(format!("{} · {}", short_id(&c.id), seen_line(c.seen)), 11.0, p.text_muted()),
+                ]
+                .spacing(2),
+                Space::new().width(Length::Fill),
+                button(ui::sans(if pinging { "Pinging…" } else { "Ping" }, 12.0, Weight::Normal, p.text_bright()))
+                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::PingContact(c.id.clone()))))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+                button(ui::sans("Remove", 12.0, Weight::Normal, p.danger()))
+                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::RemoveContact(c.id.clone()))))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+        if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == c.id) {
+            contacts = contacts.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
+        }
+    }
+    contacts = contacts.extend(note("netPingId")).extend(note("contactRemove"));
 
     // Friend codes: short, expiring stand-ins for the ID, held by the seeds.
     let expiry = s.expiry.unwrap_or(DEFAULT_EXPIRY);
@@ -779,7 +904,7 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     .spacing(8)
     .extend(note("idExport"));
 
-    scrollable(column![id, codes, check, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
+    scrollable(column![id, codes, check, contacts, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
         .height(Length::Fill)
         .into()
 }
@@ -826,10 +951,12 @@ mod tests {
 
     #[test]
     fn network_lines() {
-        let mut net = mesh::Net { state: mesh::NetState::Online, relay: Some("https://aps1-1.relay.n0.iroh.link./".into()), direct: false, connections: 0 };
+        let mut net = mesh::Net { state: mesh::NetState::Online, relay: Some("https://aps1-1.relay.n0.iroh.link./".into()), direct: false, connections: 0, published: false };
         assert_eq!(net_line(Some(&net)), "Online · relay aps1");
         (net.connections, net.direct) = (2, true);
         assert_eq!(net_line(Some(&net)), "Online · relay aps1 · 2 connections, direct");
+        net.published = true;
+        assert!(net_line(Some(&net)).ends_with(" · findable by contacts"));
         net.relay = Some("https://relay.example.org:8443/".into());
         assert!(net_line(Some(&net)).starts_with("Online · relay relay.example.org ·"));
         net.state = mesh::NetState::Connecting;
@@ -838,6 +965,15 @@ mod tests {
         let pong = mesh::Pong { id: "mesh1abc".into(), name: "box".into(), path: "direct".into(), ms: 0.74 };
         assert_eq!(pong_line(&pong), "direct · 0.7 ms");
         assert_eq!(pong_line(&mesh::Pong { ms: 24.4, path: "relay".into(), ..pong }), "relay · 24 ms");
+    }
+
+    #[test]
+    fn contact_lines() {
+        let id = "mesh1qch7juuwr5jfh3ue964tak2jhx3qj5mt2dhnf8j4lusjfyl6llmsrutrz3";
+        assert_eq!(short_id(id), "mesh1qch7…utrz3");
+        assert_eq!(short_id("mesh1abc"), "mesh1abc");
+        assert_eq!(seen_line(None), "not reached yet");
+        assert!(seen_line(Some(1_800_000_000)).starts_with("seen "));
     }
 
     #[test]

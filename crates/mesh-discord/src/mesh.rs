@@ -30,6 +30,9 @@ pub enum Event {
     Codes(Codes),
     /// The ID a friend code points to (`Node::resolve`).
     Resolved(Resolved),
+    /// The contacts list; answers `contacts` and every contact change, and
+    /// comes again after a ping by ID.
+    Contacts(Vec<Contact>),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -106,6 +109,9 @@ pub struct Net {
     /// At least one connection is on a direct path.
     pub direct: bool,
     pub connections: usize,
+    /// This device's address records are on a seed: contacts can find it.
+    #[serde(default)]
+    pub published: bool,
 }
 
 /// A `meshPing`: who answered, by which path, and how fast.
@@ -143,6 +149,18 @@ pub struct Code {
     /// A seed holds it, so others can look it up.
     #[serde(default)]
     pub held: bool,
+}
+
+/// One entry of `meshContacts` (SPEC-routing).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Contact {
+    /// Their `mesh1…` ID.
+    pub id: String,
+    pub name: String,
+    /// Seconds since the epoch.
+    pub added: u64,
+    /// When one of their devices last answered.
+    pub seen: Option<u64>,
 }
 
 /// A `meshResolved`: the code and the ID it points to.
@@ -239,6 +257,24 @@ impl Node {
         self.call("netPing", &[ticket]);
     }
 
+    /// Answers with `Contacts`, or an `Error` (`self`, `already-contact`,
+    /// `bad-name`, `not-an-id`, or what's wrong with the ID).
+    pub fn add_contact(&self, id: &str, name: &str) {
+        self.call("contactAdd", &[id, name]);
+    }
+    /// Answers with `Contacts`; their connections close and their records lapse.
+    pub fn remove_contact(&self, id: &str) {
+        self.call("contactRemove", &[id]);
+    }
+    pub fn contacts(&self) {
+        self.call("contactList", &[]);
+    }
+    /// Pings a contact by ID; answers with `Ping` (then `Contacts`), or an
+    /// `Error` (`not-a-contact`, `unreachable`, `revoked-device`, `offline`).
+    pub fn ping_id(&self, id: &str) {
+        self.call("netPingId", &[id]);
+    }
+
     fn call(&self, function: &str, args: &[&str]) {
         let _ = self.commands.send(serde_json::json!({ "fn": function, "args": args }).to_string() + "\n");
     }
@@ -315,6 +351,13 @@ fn line_event(line: &str) -> Option<Event> {
         "meshPing" => serde_json::from_str(payload).ok().map(Event::Ping),
         "meshCodes" => serde_json::from_str(payload).ok().map(Event::Codes),
         "meshResolved" => serde_json::from_str(payload).ok().map(Event::Resolved),
+        "meshContacts" => {
+            #[derive(Deserialize)]
+            struct List {
+                contacts: Vec<Contact>,
+            }
+            serde_json::from_str::<List>(payload).ok().map(|l| Event::Contacts(l.contacts))
+        }
         _ => None,
     }
 }
@@ -379,6 +422,14 @@ mod tests {
             panic!("no resolve")
         };
         assert_eq!(r.id, "mesh1abc");
+
+        let contacts = r#"{"contacts":[{"id":"mesh1abc","name":"Alex","added":5,"seen":null},{"id":"mesh1def","name":"Sam","added":6,"seen":9}]}"#;
+        let Some(Event::Contacts(c)) = line_event(&line("meshContacts", contacts)) else { panic!("no contacts") };
+        assert_eq!((c.len(), c[0].seen, c[1].seen, c[1].name.as_str()), (2, None, Some(9), "Sam"));
+        let Some(Event::Net(published)) = line_event(&line("meshNet", r#"{"state":"online","relay":null,"direct":false,"connections":0,"published":true}"#)) else {
+            panic!("no net")
+        };
+        assert!(published.published && !off.published);
 
         assert!(line_event(&line("meshParsed", r#"{"kind":"id"}"#)).is_none());
         assert!(line_event("not json").is_none());
