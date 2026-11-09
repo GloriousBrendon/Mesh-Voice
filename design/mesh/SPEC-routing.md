@@ -1,6 +1,6 @@
 # Spec: `routing` (Mesh)
 
-Status: **DRAFT 2026-11-09, for review.** Module 4 of the build order in
+Status: **APPROVED 2026-11-09** ("continue", recommended answers). Plan: [PLAN-routing.md](PLAN-routing.md). Module 4 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Depends on
 [`transport`](SPEC-transport.md) (built; Checkpoint C pending on Windows) and
 [`seed`](SPEC-seed.md) (built; homelab deploy waiting on Checkpoint B).
@@ -73,7 +73,7 @@ requests over it, `dm` sends messages, `mailbox` knows when to hold mail.
 | D6 | **Limits on the seed**, all enforced there: per device, 2,000 puts an hour and 120 gets a minute; per source network (/24 or /48), 4,000 puts an hour; 8 slots per lookup ID; 200,000 records in all (about 100 MB, swept as they expire). A full store answers `full` and keeps the records it has. | These are sized for a few hundred contacts per person while the network is small. Nothing stored identifies anyone, so there's nothing worth guessing for. The limits only stop the store being filled. |
 | D7 | **Contacts live in the keystore** (`Keystore::contacts`, a new field in the encrypted contents, keystore format v2, which reads v1). Each contact has an ID, a name you chose, the time it was added, and the last address that worked (device key + relay, cached). Backups carry them. | No new file to protect. The keystore is already encrypted, atomic and backed up. `social` reuses this list rather than replacing it. |
 | D8 | **`dial(id)` order**: (1) an open connection to any of their devices; (2) the cached last address; (3) the seed records, newest first, every device in parallel. The first to complete the handshake wins. If nothing answers within 10 s, the error is `unreachable`. A certificate that isn't in their current `DeviceList` gives `revoked-device`. | The cache makes the common case one dial. Parallel dialling covers someone with several devices. The cache is updated only after a successful handshake. |
-| D9 | **Mutual only.** A device posts records only for its contacts, so you can reach someone only when you've both added each other. Incoming connections from non-contacts are still accepted by transport (`social` decides later what they may do). For now they may only `ping`. | You're findable only by people you chose (the map: "no search or discovery"). Deciding what strangers may send is `social`'s job (Q2). |
+| D9 | **Mutual only, and only contacts get in.** A device posts records only for its contacts, so you can reach someone only when you've both added each other. Your device takes connections only from your contacts and your own devices: transport's handshake checks the dialler's ID before showing your certificate, and refuses anyone else (`not-allowed`, shown as `unreachable`). Removing a contact closes their connections. *Tightened 2026-11-09 with your OK: before, a removed contact who'd cached your address could still ping you.* | You're findable only by people you chose (the map: "no search or discovery"). Friend requests from strangers come through the seed instead (Q2, `social`). A removed contact who still knows your device key can tell the device is on (QUIC answers before the handshake), but gets nothing from it. |
 | D10 | **Nothing identifying is logged**, on the seed or in the helper's stderr: no IDs, keys, lookup IDs or relay URLs, only counts. Helper errors are fixed text. | Same rule as seed D10 and transport's error handling. |
 
 ## Behaviour
@@ -98,13 +98,15 @@ requests over it, `dm` sends messages, `mailbox` knows when to hold mail.
     answers `meshError` with parse's kinds; adding yourself gives `self`.
   - `contactRemove(id)` and `contactRename(id, name)` → `meshContacts`.
   - `contactList` → `meshContacts`:
-    `[{"id", "name", "added", "seen": unix|null}]`, where `seen` is the
-    last successful handshake.
+    `{"contacts": [{"id", "name", "added", "seen": unix|null}]}`, where `seen` is
+    the last successful handshake. Unlocking doesn't send it, to keep
+    unlock's events as they were; Mesh-Voice asks with `contactList`.
+    A successful `netPingId` sends it again after `meshPing`.
 - **Publishing**: a task that runs while unlocked does D4 against every
   configured seed. On failure it backs off (1 min, doubling to 30 min).
   `meshNet` gains `"published": bool`: true when every contact's record is on
   at least one seed.
-- **`netPingId(id)`** → `meshPing` (as for `netPing`, plus which device
+- **`netPingId(id)`** → `meshPing` (as for `netPing`; `name` is the device that
   answered), or `meshError` with `fn: netPingId` and a kind:
   `not-a-contact`, `unreachable`, `revoked-device`, `offline`, `locked`,
   plus transport's kinds.
