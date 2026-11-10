@@ -97,7 +97,7 @@ module gate needs the homelab seed and the Windows PC.
     throwaway | reader`. `routing`'s process test failed once in one full
     run (an `expect` mismatch at 13 s) and passed alone and in the next full
     run; nothing in this task touches it.
-- [ ] **Task 3: 1:1 sessions** (D4, D5, D11)
+- [x] **Task 3: 1:1 sessions** (D4, D5, D11)
   - What: `session.rs`. The account: up to 200 one-time keys, a fallback key
     replaced weekly, one key reserved per contact. Learning a person's list
     and bundles; `encrypt_direct(peer, kind, body)` → one ciphertext per
@@ -109,6 +109,26 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test -p mesh-e2ee session`.
   - Files: `src/session.rs`, `src/lib.rs`.
   - Size L.
+  - Result (2026-11-10, Mesh-Node `583578e`): 8 tests; 136 workspace tests
+    pass.
+    - What Olm encrypts is `sender ID | sender device | inside`, not the
+      inside alone. A bundle names its curve key, but nothing stops a
+      friend's bundle naming someone else's; without the claim, their
+      messages could be filed under the copier. Only the curve key's holder
+      can make the claim, so the copy gets nothing (tested). Group messages
+      do the same (Task 4). The inside itself is as the spec has it.
+    - The account keeps its own reservations (contact → one-time key) and
+      drops one when a first message uses it; one key a contact at most,
+      200 in all. A device remembers the one-time key it started a session
+      from, so a stale record can't hand it back.
+    - Found and fixed on the way (Mesh-Node `5311032`, transport): two
+      devices that dialled each other at once had two connections, but the
+      node kept only one in its map, so removing a contact left the other
+      open and answering pings. That was the routing test's flake (it
+      failed about half the runs on this PC). Connections are now kept per
+      device and connection, and a handshake that finishes after its peer
+      was removed isn't kept. A new transport test fails without the fix;
+      the routing test then passed 5 runs in 5.
 - [ ] **Task 4: Sender chains** (D6, D7, D14)
   - What: `group.rs`. A chain per (conversation, sending device); key shares
     over the 1:1 sessions with the member list (see Architecture);
