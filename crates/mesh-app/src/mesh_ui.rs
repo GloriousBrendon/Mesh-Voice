@@ -24,6 +24,8 @@ pub(crate) struct Mesh {
     codes: Vec<mesh::Code>,
     /// Friends, requests both ways, blocks and our status (social).
     social: mesh::Social,
+    /// Test notes received this run (SPEC-e2ee), oldest first.
+    notes: Vec<mesh::Note>,
     form: Form,
     settings: Settings,
 }
@@ -83,6 +85,8 @@ struct Settings {
     /// The last friend pinged by ID, and their answer.
     contact_pong: Option<(String, mesh::Pong)>,
     pinging: Option<String>,
+    /// The test note to send a friend.
+    note_text: String,
 }
 
 /// The status choices: labels and `statusSet` arguments.
@@ -140,6 +144,11 @@ pub(crate) enum Msg {
     Unblock(String),
     Verify(String, bool),
     Status(&'static str),
+    NoteText(String),
+    /// Sends a friend the test note typed.
+    SendNote(String),
+    /// Removes another of our linked devices, by its key.
+    RemoveDevice(String),
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -163,6 +172,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             if !now_unlocked {
                 m.codes.clear();
                 m.social = mesh::Social::default();
+                m.notes.clear();
             } else if let Some(node) = &m.node {
                 // Unlocking doesn't send them by itself.
                 node.social();
@@ -268,6 +278,20 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 s.made = codes.created;
             }
         }
+        mesh::Event::Note(note) => {
+            // ponytail: in memory for this run only; `dm` brings real history.
+            if m.notes.len() >= 200 {
+                m.notes.remove(0);
+            }
+            m.notes.push(note);
+        }
+        mesh::Event::NoteSent { devices, .. } => {
+            let s = &mut m.settings;
+            s.busy = None;
+            s.note_text.clear();
+            let n = if devices == 1 { "" } else { "s" };
+            s.note = Some(("e2eeNote".into(), true, format!("Test note sent, encrypted for {devices} device{n}.")));
+        }
         mesh::Event::Resolved(resolved) => {
             // Check an ID took a code: now the safety number with the ID it points to.
             if let Some(node) = &m.node {
@@ -283,6 +307,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.net = None;
             m.codes.clear();
             m.social = mesh::Social::default();
+            m.notes.clear();
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -485,8 +510,20 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
                 node.set_status(arg);
             }
         }
+        Msg::NoteText(value) => s.note_text = value,
+        Msg::SendNote(id) if s.busy.is_none() => {
+            let text = s.note_text.trim();
+            s.busy = Some("e2eeNote");
+            s.note = None;
+            node.note(&id, if text.is_empty() { "Test note" } else { text }, None);
+        }
+        Msg::RemoveDevice(key) if s.busy.is_none() => {
+            s.busy = Some("deviceRemove");
+            s.note = None;
+            node.remove_device(&key);
+        }
         // Another command is still waiting for its answer.
-        Msg::Remove(_) | Msg::Accept(_) | Msg::Decline(_) | Msg::Block(_) | Msg::Unblock(_) | Msg::Verify(..) | Msg::Status(_) => {}
+        Msg::Remove(_) | Msg::Accept(_) | Msg::Decline(_) | Msg::Block(_) | Msg::Unblock(_) | Msg::Verify(..) | Msg::Status(_) | Msg::SendNote(_) | Msg::RemoveDevice(_) => {}
         Msg::CopyTicket => {
             if s.busy.is_none() {
                 s.busy = Some("netTicket");
@@ -898,16 +935,29 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     }
 
     let mut devices = column![heading("devices", p)].spacing(6);
+    let keys = m.net.as_ref().is_some_and(|n| n.keys);
     for d in &identity.devices {
         let added = Local.timestamp_opt(d.created_at as i64, 0).single().map(|t| t.format("%-d %b %Y").to_string()).unwrap_or_default();
-        devices = devices.push(
-            row![
-                ui::sans(d.name.clone(), 13.0, Weight::Normal, p.text_bright()),
-                ui::mono(if d.this_device { format!("this device · {added}") } else { added }, 11.0, p.text_muted()),
-            ]
-            .spacing(8),
-        );
+        // Only this device's keys are reported (`meshNet`'s `keys`).
+        let detail = match (d.this_device, keys) {
+            (true, true) => format!("this device · {added} · secure messages ready"),
+            (true, false) => format!("this device · {added}"),
+            _ => added,
+        };
+        let mut line = row![ui::sans(d.name.clone(), 13.0, Weight::Normal, p.text_bright()), ui::mono(detail, 11.0, p.text_muted())]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if !d.this_device {
+            line = line.push(Space::new().width(Length::Fill)).push(
+                button(ui::sans(if s.busy == Some("deviceRemove") { "One moment…" } else { "Remove" }, 12.0, Weight::Normal, p.danger()))
+                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::RemoveDevice(d.key.clone()))))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+            );
+        }
+        devices = devices.push(line);
     }
+    devices = devices.extend(note("deviceRemove"));
 
     let keep = column![
         switch_row(
@@ -948,6 +998,30 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
 /// A friend's name: ours for them if we set one, else theirs, else their ID.
 fn friend_name(f: &mesh::Friend) -> String {
     [&f.nick, &f.name].into_iter().find(|n| !n.is_empty()).cloned().unwrap_or_else(|| short_id(&f.id))
+}
+
+/// The friend a test note is with: its sender, or for our own other
+/// device's 1:1, who it went to. Group notes show under their sender.
+fn note_with<'a>(n: &'a mesh::Note, me: Option<&str>) -> Option<&'a str> {
+    if Some(n.from.as_str()) == me { n.with.as_deref() } else { Some(&n.from) }
+}
+
+/// "from them · laptop · 5 Nov, 14:02 · waited · group".
+fn note_line(n: &mesh::Note, who: &str) -> String {
+    let mut line = format!("from {who}");
+    if let Some(device) = &n.device {
+        line.push_str(&format!(" · {device}"));
+    }
+    if let Some(t) = Local.timestamp_opt(n.at as i64, 0).single() {
+        line.push_str(&format!(" · {}", t.format("%-d %b, %H:%M")));
+    }
+    if n.path == "waited" {
+        line.push_str(" · waited");
+    }
+    if n.group.is_some() {
+        line.push_str(" · group");
+    }
+    line
 }
 
 /// "Online", "Do not disturb", …
@@ -1028,6 +1102,9 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         );
     }
 
+    if !social.friends.is_empty() {
+        col = col.push(field("TEST NOTE (END-TO-END ENCRYPTED)", &s.note_text, Msg::NoteText, false, Msg::NoteText(s.note_text.clone()), p));
+    }
     if social.friends.is_empty() && social.incoming.is_empty() {
         col = col.push(ui::sans("No friends yet. Check a friend's code below and send a request.", 12.0, Weight::Normal, p.text_muted()));
     }
@@ -1044,6 +1121,7 @@ fn friends_view(state: &App) -> Element<'_, Message> {
             row![
                 line(friend_name(f), detail),
                 small(if pinging { "Pinging…" } else { "Ping" }, p.text_bright(), Msg::PingContact(f.id.clone())),
+                small("Send a test note", p.text_bright(), Msg::SendNote(f.id.clone())),
                 small("Remove", p.danger(), Msg::Remove(f.id.clone())),
                 small("Block", p.danger(), Msg::Block(f.id.clone())),
             ]
@@ -1052,6 +1130,14 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         );
         if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == f.id) {
             col = col.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
+        }
+        let me = state.mesh.identity.as_ref().and_then(|i| i.id.as_deref());
+        let theirs: Vec<_> = state.mesh.notes.iter().filter(|n| note_with(n, me) == Some(f.id.as_str())).collect();
+        for n in theirs.iter().rev().take(5).rev() {
+            let who = if Some(n.from.as_str()) == me { "you" } else { "them" };
+            col = col
+                .push(ui::sans(format!("“{}”", n.text), 12.0, Weight::Normal, p.text()))
+                .push(ui::mono(note_line(n, who), 11.0, p.text_muted()));
         }
     }
 
@@ -1081,7 +1167,7 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         let (_, ok, message) = s.note.as_ref().filter(|(f, ..)| f == func)?;
         Some(text(message.clone()).size(12).color(if *ok { p.success() } else { p.danger() }).into())
     };
-    for func in ["netPingId", "friendRemove", "friendAccept", "friendDecline", "block", "unblock", "statusSet"] {
+    for func in ["e2eeNote", "netPingId", "friendRemove", "friendAccept", "friendDecline", "block", "unblock", "statusSet"] {
         col = col.extend(note(func));
     }
     col.into()
@@ -1129,7 +1215,7 @@ mod tests {
 
     #[test]
     fn network_lines() {
-        let mut net = mesh::Net { state: mesh::NetState::Online, relay: Some("https://aps1-1.relay.n0.iroh.link./".into()), direct: false, connections: 0, published: false };
+        let mut net = mesh::Net { state: mesh::NetState::Online, relay: Some("https://aps1-1.relay.n0.iroh.link./".into()), direct: false, connections: 0, published: false, keys: false };
         assert_eq!(net_line(Some(&net)), "Online · relay aps1");
         (net.connections, net.direct) = (2, true);
         assert_eq!(net_line(Some(&net)), "Online · relay aps1 · 2 connections, direct");
@@ -1159,6 +1245,17 @@ mod tests {
         (f.nick, f.name) = (String::new(), String::new());
         assert_eq!(friend_name(&f), "mesh1qch7…utrz3");
         assert_eq!((presence_label("dnd"), presence_label("idle"), presence_label("offline")), ("Do not disturb", "Idle", "Offline"));
+
+        let mut n = mesh::Note { from: "mesh1bob".into(), device: Some("laptop".into()), with: Some("mesh1me".into()), group: None, conversation: None, text: "hi".into(), at: 0, path: "waited".into() };
+        assert_eq!(note_with(&n, Some("mesh1me")), Some("mesh1bob"));
+        assert!(note_line(&n, "them").starts_with("from them · laptop · "));
+        assert!(note_line(&n, "them").ends_with(" · waited"));
+        // Our own other device's copy of a 1:1 we sent to Bob.
+        (n.from, n.with) = ("mesh1me".into(), Some("mesh1bob".into()));
+        assert_eq!(note_with(&n, Some("mesh1me")), Some("mesh1bob"));
+        (n.with, n.group, n.path) = (None, Some(vec!["mesh1bob".into()]), "live".into());
+        assert_eq!(note_with(&n, Some("mesh1me")), None);
+        assert!(note_line(&n, "you").ends_with(" · group"));
     }
 
     #[test]

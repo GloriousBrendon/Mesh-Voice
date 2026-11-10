@@ -282,7 +282,7 @@ plus a Remove button under Linked devices (Task 8).
 
 ### Phase 4: Mesh-Voice
 
-- [ ] **Task 10: Test notes in Mesh-Voice**
+- [x] **Task 10: Test notes in Mesh-Voice**
   - What: `meshNote` and `e2eeNote` in `mesh.rs`; Send a test note and the
     notes received on a friend's profile; "secure messages ready" per device
     under Linked devices.
@@ -290,6 +290,18 @@ plus a Remove button under Linked devices (Task 8).
     windows and a local seed.
   - Files: `crates/mesh-discord/src/mesh.rs`, `crates/mesh-app/src/…`.
   - Size M.
+  - Result (2026-11-10, against Mesh-Node `a7108dd`): `cargo test -p
+    mesh-app -p mesh-discord` passes (30 + 15); clippy has no new warnings.
+    `Node::note` (`e2eeNote`), `Event::Note` and `Event::NoteSent`; each
+    friend gets Send a test note (one shared text field above the list)
+    and their last 5 notes this run, ours from our other devices included,
+    marked waited and group. Linked devices gets a Remove button for every
+    device but this one (`deviceRemove`).
+    - **Only this device shows "secure messages ready":** the helper reports
+      keys only for itself (`meshNet`'s `keys`); `meshIdentity` has no
+      per-device keys flag. Other devices' state needs one there.
+    - Notes are in memory only and gone at lock or restart (`dm` replaces
+      them), and a note we send doesn't show on the device that sent it.
 
 **Checkpoint B (by hand, you):** two windows on Windows with a local seed
 (`MESH_DATA` for the second), as social's Checkpoint B.

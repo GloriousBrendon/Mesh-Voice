@@ -34,6 +34,11 @@ pub enum Event {
     /// Answers every friend command, and comes by itself when something
     /// changes (a request arrives, a friend's presence, a sync).
     Social(Social),
+    /// A test note that opened, from a friend or our own other device (SPEC-e2ee).
+    Note(Note),
+    /// A test note went out (`Node::note`): the group it went to, if any, and
+    /// how many devices it was encrypted for.
+    NoteSent { conversation: Option<String>, devices: usize },
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -77,6 +82,9 @@ pub struct Device {
     /// Seconds since the epoch.
     pub created_at: u64,
     pub this_device: bool,
+    /// Hex; what `Node::remove_device` takes.
+    #[serde(default)]
+    pub key: String,
 }
 
 /// A `meshSafety`: the 60-digit number two people compare, for the other ID.
@@ -113,6 +121,29 @@ pub struct Net {
     /// This device's address records are on a seed: contacts can find it.
     #[serde(default)]
     pub published: bool,
+    /// Those records carry this device's e2ee keys: secure messages ready.
+    #[serde(default)]
+    pub keys: bool,
+}
+
+/// A `meshNote`: a test note (SPEC-e2ee "Client side").
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Note {
+    /// The sender's ID: ours when it's from our own other device.
+    pub from: String,
+    /// The sending device's name, if known.
+    pub device: Option<String>,
+    /// In a 1:1, the other person (our own devices need it).
+    pub with: Option<String>,
+    /// A group's members.
+    pub group: Option<Vec<String>>,
+    /// A group's ID, to reply to it.
+    pub conversation: Option<String>,
+    pub text: String,
+    /// Seconds since the epoch.
+    pub at: u64,
+    /// `live` or `waited`.
+    pub path: String,
 }
 
 /// A `meshPing`: who answered, by which path, and how fast.
@@ -343,6 +374,20 @@ impl Node {
         self.call("netPingId", &[id]);
     }
 
+    /// Sends a test note to one friend's ID, or to several (space-separated)
+    /// as a test group; `group` reuses one. Answers with `NoteSent`, or an
+    /// `Error` (`not-a-friend`, `no-keys`, `too-long`, `locked`).
+    pub fn note(&self, ids: &str, text: &str, group: Option<&str>) {
+        match group {
+            Some(group) => self.call("e2eeNote", &[ids, text, group]),
+            None => self.call("e2eeNote", &[ids, text]),
+        }
+    }
+    /// Removes one of our other linked devices by its key; answers with `Identity`.
+    pub fn remove_device(&self, key: &str) {
+        self.call("deviceRemove", &[key]);
+    }
+
     fn call(&self, function: &str, args: &[&str]) {
         let _ = self.commands.send(serde_json::json!({ "fn": function, "args": args }).to_string() + "\n");
     }
@@ -420,6 +465,11 @@ fn line_event(line: &str) -> Option<Event> {
         "meshCodes" => serde_json::from_str(payload).ok().map(Event::Codes),
         "meshResolved" => serde_json::from_str(payload).ok().map(Event::Resolved),
         "meshSocial" => serde_json::from_str(payload).ok().map(Event::Social),
+        "meshNote" => serde_json::from_str(payload).ok().map(Event::Note),
+        "meshNoteSent" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(Event::NoteSent { conversation: v["conversation"].as_str().map(str::to_owned), devices: v["devices"].as_u64()? as usize })
+        }
         _ => None,
     }
 }
@@ -439,9 +489,9 @@ mod tests {
         };
         assert_eq!((locked.state, locked.id, locked.keyring.as_deref()), (State::Locked, None, Some("no Secret Service")));
 
-        let open = r#"{"state":"unlocked","id":"mesh1abc","link":"mesh://id/mesh1abc","username":"Brendon","devices":[{"name":"box","createdAt":5,"thisDevice":true}],"keepUnlocked":false,"keyring":null}"#;
+        let open = r#"{"state":"unlocked","id":"mesh1abc","link":"mesh://id/mesh1abc","username":"Brendon","devices":[{"name":"box","key":"ab12","createdAt":5,"thisDevice":true}],"keepUnlocked":false,"keyring":null}"#;
         let Some(Event::Identity(open)) = line_event(&line("meshIdentity", open)) else { panic!("no identity") };
-        assert_eq!((open.state, open.username.as_deref(), open.devices[0].this_device), (State::Unlocked, Some("Brendon"), true));
+        assert_eq!((open.state, open.username.as_deref(), open.devices[0].this_device, open.devices[0].key.as_str()), (State::Unlocked, Some("Brendon"), true, "ab12"));
 
         let Some(Event::Password { ok, message }) = line_event(&line("meshPassword", r#"{"ok":false,"message":"Add another word."}"#)) else {
             panic!("no verdict")
@@ -496,7 +546,22 @@ mod tests {
         let Some(Event::Net(published)) = line_event(&line("meshNet", r#"{"state":"online","relay":null,"direct":false,"connections":0,"published":true}"#)) else {
             panic!("no net")
         };
-        assert!(published.published && !off.published);
+        assert!(published.published && !off.published && !published.keys);
+        let Some(Event::Net(keys)) = line_event(&line("meshNet", r#"{"state":"online","relay":null,"direct":false,"connections":0,"published":true,"keys":true}"#)) else {
+            panic!("no net")
+        };
+        assert!(keys.keys);
+
+        let note = r#"{"from":"mesh1abc","device":"laptop","with":"mesh1def","group":null,"conversation":null,"text":"hi","at":7,"path":"waited"}"#;
+        let Some(Event::Note(n)) = line_event(&line("meshNote", note)) else { panic!("no note") };
+        assert_eq!((n.from.as_str(), n.with.as_deref(), n.group, n.path.as_str(), n.at), ("mesh1abc", Some("mesh1def"), None, "waited", 7));
+        let group = r#"{"from":"mesh1abc","device":null,"with":null,"group":["mesh1abc","mesh1def"],"conversation":"ab12","text":"hey","at":8,"path":"live"}"#;
+        let Some(Event::Note(g)) = line_event(&line("meshNote", group)) else { panic!("no note") };
+        assert_eq!((g.group.map(|g| g.len()), g.conversation.as_deref(), g.device), (Some(2), Some("ab12"), None));
+        let Some(Event::NoteSent { conversation, devices }) = line_event(&line("meshNoteSent", r#"{"fn":"e2eeNote","conversation":null,"devices":3}"#)) else {
+            panic!("no sent")
+        };
+        assert_eq!((conversation, devices), (None, 3));
 
         assert!(line_event(&line("meshParsed", r#"{"kind":"id"}"#)).is_none());
         assert!(line_event("not json").is_none());
