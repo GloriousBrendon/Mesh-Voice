@@ -202,7 +202,7 @@ module gate needs the homelab seed and the Windows PC.
 
 ### Phase 3: The helper (Mesh-Node)
 
-- [ ] **Task 7: Bundles in records, the `e2ee` service** (D4, D11)
+- [x] **Task 7: Bundles in records, the `e2ee` service** (D4, D11)
   - What: `e2ee.rs` in the helper. Open or create the store at unlock;
     each record carries the bundle, the contact's reserved one-time key and
     the fallback key; bundles from opened records (and own devices') feed
@@ -210,6 +210,19 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test --workspace`; clippy and fmt.
   - Files: `crates/mesh-node/src/{e2ee,routing,helper}.rs`.
   - Size M.
+  - Result (2026-11-10, Mesh-Node `568fe1f`): 148 workspace tests pass;
+    `tests/protocol.rs` lists `keys` in `meshNet`, and `tests/routing.rs`
+    waits for `keys` with `published`.
+    - The state opens with the node at unlock, under `<data>/e2ee/`, and
+      goes at lock.
+    - Dialling a friend often goes over an open connection or the cached
+      address, never reading their record, so keys are looked up on their
+      own: every contact's and our own records at unlock (once the relay is
+      up) and each refresh, and one contact's when they connect and we have
+      no keys for them yet. One seed stream per contact for now (marked in
+      the code).
+    - An envelope's opened sender is checked against the connection it came
+      on.
 - [ ] **Task 8: Test notes** (spec "Client side")
   - What: `e2eeNote(ids, text[, group])` → 1:1 or a test group;
     `meshNote` on the reader and our own other devices; notes for an
