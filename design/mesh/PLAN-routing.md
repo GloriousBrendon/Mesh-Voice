@@ -118,6 +118,8 @@ gate needs the homelab seed (seed Checkpoint B) and the Windows PC.
     holds no ID and no relay URL; its log names only its own relay (its
     ticket). 99 workspace tests pass; clippy and fmt clean. Idle CPU with
     50 contacts (success criterion 5) isn't measured yet.
+  - Windows (2026-11-10, Mesh-Node `7034db0`): the seed now stops on
+    Ctrl-Break, so the process tests stop it cleanly; all 99 tests pass there.
 
 **Checkpoint A (short report):** Mesh-Node done and tested on Linux.
 
