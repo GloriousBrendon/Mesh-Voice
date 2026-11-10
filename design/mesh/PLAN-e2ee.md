@@ -223,7 +223,7 @@ module gate needs the homelab seed and the Windows PC.
       the code).
     - An envelope's opened sender is checked against the connection it came
       on.
-- [ ] **Task 8: Test notes** (spec "Client side")
+- [x] **Task 8: Test notes** (spec "Client side")
   - What: `e2eeNote(ids, text[, group])` → 1:1 or a test group;
     `meshNote` on the reader and our own other devices; notes for an
     offline device wait in memory and go when it connects; lock drops them.
@@ -231,7 +231,27 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test --workspace`.
   - Files: `crates/mesh-node/src/{e2ee,helper}.rs`.
   - Size M.
-- [ ] **Task 9: Process test** (spec "Process test")
+  - Result (2026-11-10, Mesh-Node `a7108dd`, with Task 9; and `802c582`):
+    - `e2eeNote(ids, text[, group])` answers `meshNoteSent` `{conversation,
+      devices}` (how many devices it was encrypted for). `meshNote` has the
+      spec's fields plus `with` (the other person, in a 1:1: our own
+      devices need it) and `conversation` (a group's ID, to reply or change
+      its members). `device` is the sending device's name.
+    - **Found missing: removing a device.** Identity's spec has it (step 6),
+      but neither the keystore nor the helper did it, and the spec's process
+      test and gate need it. Added: `Keystore::remove_device` and
+      `own_list_seen` (a device restored from a backup adds itself to the
+      list; the others take that list from their own records, quietly, so
+      they can remove it later), the `deviceRemove(key)` command, and a
+      `key` per device in `meshIdentity`. Mesh-Voice needs a Remove button
+      under Linked devices for the gate.
+    - A device with no live connection gets its envelopes marked waited,
+      sent to the address its record gave; if that fails they wait in
+      memory for it to connect. Dialling the person instead reached only
+      whichever of their devices answered first.
+    - Envelopes from a device whose keys haven't come yet are kept (256 at
+      most, in memory) and opened when its record does.
+- [x] **Task 9: Process test** (spec "Process test")
   - What: `tests/e2ee.rs`, everything the spec lists: a note to a locked
     reader, own-device copies, a reply, a group, device removal, member
     removal, a replay, and nothing identifying in the seed's files or any
@@ -239,8 +259,26 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test -p mesh-node --test e2ee`.
   - Files: `crates/mesh-node/tests/e2ee.rs`, `tests/common/mod.rs`.
   - Size M.
+  - Result (2026-11-10, `a7108dd`): 2 tests, about 25 s together, passing
+    3 runs in 3; 151 workspace tests pass, clippy and fmt clean. Covered: a
+    note to a locked reader arriving `waited`, own-device copies, a reply
+    from a second device reaching all four, a group of three, Carol dropped
+    (later group notes go to 2 devices, not 3, and she never reads them),
+    Alice's laptop removed (her next 1:1 and group notes go to Bob's device
+    only), and no ID or note text in the seed's files, its log or any
+    helper's stderr.
+    - **Not at process level: a replay.** The driver can't copy envelopes
+      off the wire; replays (Olm, a first message on the fallback key,
+      Megolm, after a restart) are refused in `mesh-e2ee`'s unit tests.
+    - The driver now times out after 90 s of silence instead of hanging.
+    - Release binary: 17.94 MB before e2ee, 18.98 MB now, so 1.0 MB more
+      (criterion 5: under 1.5 MB).
 
-**Checkpoint A (short report):** Mesh-Node done and tested on Windows.
+**Checkpoint A (2026-11-10):** Mesh-Node done and tested on Windows. 151
+workspace tests pass; clippy and fmt clean. Timing (criterion 4) on this PC:
+0.5 to 0.6 ms for one message to 600 devices, about 90 ms for a full
+rotation; not yet measured on the Linux box. Mesh-Voice (Task 10) is next,
+plus a Remove button under Linked devices (Task 8).
 
 ### Phase 4: Mesh-Voice
 
