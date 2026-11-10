@@ -182,7 +182,7 @@ module gate needs the homelab seed and the Windows PC.
 
 ### Phase 2: Identity (Mesh-Node)
 
-- [ ] **Task 6: Address record v2** (D4)
+- [x] **Task 6: Address record v2** (D4)
   - What: `addr.rs`. `seal_addr` takes an opaque e2ee field (at most
     1 KiB) and writes format 2; `open_addr` reads 1 and 2.
   - Accept: v1 records still open, with no field; v2 carries it; too long
@@ -190,6 +190,15 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test -p mesh-identity addr`.
   - Files: `crates/mesh-identity/src/addr.rs`.
   - Size S.
+  - Result (2026-11-10, Mesh-Node `ffd0368`): 3 new tests; 148 workspace
+    tests pass. **The field is capped at 256 bytes, not 1 KiB.** The
+    biggest record (16 devices with 64-byte names, a 255-byte relay) is
+    already 3,797 bytes before the field, and the seed takes 4,096, so a
+    1 KiB field would push the biggest records over. e2ee's field is 201
+    bytes (bundle, fallback key, one-time key). This stays inside D4's "at
+    most 1 KiB"; raising the seed's limit instead would be a routing change.
+    The risk row below was wrong about the list: 16 devices is about
+    3.3 KiB with the longest names, not 2.5.
 
 ### Phase 3: The helper (Mesh-Node)
 
