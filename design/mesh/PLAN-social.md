@@ -1,0 +1,147 @@
+# Plan: `social` (Mesh)
+
+Status: **APPROVED 2026-11-10**, with the spec ("build Phase 1 onward"). Implements
+[SPEC-social.md](SPEC-social.md).
+
+The code goes in `GloriousBrendon/Mesh-Node` (requests, the account state,
+the seed's request store, the helper's side) and Mesh-Voice (the Friends page).
+
+## Overview
+
+Pure pieces first, in identity: the sealed request, the account state and its
+merge, and the keystore keeping them. Then the seed: codes stop counting a use
+on lookup, and the request store and its two services. Then the helper:
+requests and the lists, own-device sync, presence, and a process test. Then
+the Mesh-Voice screens. The module gate needs the homelab seed (seed
+Checkpoint B) and the Windows PC.
+
+## Architecture decisions
+
+- **Identity owns the cryptography and the merge.** `knock.rs` and
+  `account.rs` are pure and unit-tested. The node crate gets the keys it needs
+  from the keystore.
+- **The account state is the source; routing's contacts follow it.** The
+  keystore keeps its `Contact` list in step with the `outgoing` and `friend`
+  entries after every change and every merge, so `routing.rs` is unchanged.
+- **Stored as a third postcard value** after the contents and the contacts,
+  as routing did. A keystore from routing opens with its contacts as
+  `outgoing`.
+- **The request store lives beside the code store** on the seed, because a
+  put has to spend a use from it. They're saved to separate files.
+- **One `social.rs` in the helper** for the background work: collecting
+  requests, dialling friends, presence streams and sync. It reports back to
+  the main loop, as routing does.
+- **No new crate dependencies.**
+
+## Task list
+
+### Phase 1: Identity (Mesh-Node)
+
+- [ ] **Task 1: The sealed request** (D4, D5)
+  - What: `knock.rs`. `seal_knock(...)` and `open_knock(root, lookup_id,
+    bytes, now)` → the sender's ID, device list, name, note and created
+    time. `PairKeys::knock_slot(lookup_id)`.
+  - Accept: round trip; the wrong owner, a tampered byte, another lookup ID,
+    a device not in the list, too old and too new are all refused.
+  - Verify: `cargo test -p mesh-identity knock`.
+  - Size S.
+- [ ] **Task 2: The account state** (D8, D11, D13, D14)
+  - What: `account.rs`. Entries `{id, kind, nick, name, note, verified,
+    changed, by}`, the status, `merge`, and pruning tombstones older than 90
+    days.
+  - Accept: merge is commutative and idempotent; newer wins; ties go to the
+    higher device; tombstones beat older adds and expire.
+  - Verify: `cargo test -p mesh-identity account`.
+  - Size M.
+- [ ] **Task 3: The keystore keeps it** (D7, D8, D10)
+  - What: the account state as a third stored value; the methods (request
+    arrived, accept, decline, cancel, add by ID, remove, block, unblock,
+    rename, verify, status, merge, connected), each keeping `contacts` in
+    step; codes stay listed until dropped (D7).
+  - Accept: a routing keystore opens with its contacts as `outgoing`; state
+    survives unlock and backup; a blocked ID can't become a contact.
+  - Verify: `cargo test -p mesh-identity`.
+  - Size M.
+
+### Phase 2: The seed (Mesh-Node)
+
+- [ ] **Task 4: Codes and the request store** (D1, D3, D6)
+  - What: `codes.rs`: `get` stops counting a use, and `spend` uses one for a
+    request. `knocks.rs`: put (needs a live code), get (needs its revoke),
+    the limits, sweep, save and load.
+  - Accept: unit tests for every answer and limit, a single-use code taking
+    one request, requests outliving the code, restart, damaged file.
+  - Verify: `cargo test -p mesh-node codes knocks`.
+  - Size M.
+- [ ] **Task 5: `knock-put` and `knock-get` on the seed**
+  - What: the two batched services in `seed.rs`, `knocks.bin` saved every 5
+    minutes and on stop, counts in the hourly line. `tests/seed.rs` follows
+    the change to lookups.
+  - Verify: `cargo test -p mesh-node`.
+  - Size S.
+
+### Phase 3: The helper (Mesh-Node)
+
+- [ ] **Task 6: Requests and the lists** (D1, D2, D7–D10)
+  - What: the `friend*`, `block`, `unblock` and `socialList` commands →
+    `meshSocial`, replacing `contact*`; collecting requests at unlock and
+    every 5 minutes; dialling friends and `outgoing` contacts at unlock and
+    refresh; a connection with an `outgoing` contact makes them a friend.
+  - Verify: `cargo test --workspace` (`tests/protocol.rs` and
+    `tests/routing.rs` move to the new commands); clippy and fmt.
+  - Size M.
+- [ ] **Task 7: Own-device sync** (D11)
+  - What: records under the self pair; finding and dialling your other
+    devices; the `sync` stream at connect, at refresh and on change.
+  - Verify: `cargo test --workspace`.
+  - Size M.
+- [ ] **Task 8: Presence and status** (D12, D13)
+  - What: the `presence` stream; `statusSet` and `activity`; each friend's
+    best device; offline after 150 s of silence or when their connections
+    close.
+  - Verify: `cargo test --workspace`.
+  - Size M.
+- [ ] **Task 9: Process test** (spec "Process test")
+  - What: `tests/social.rs`, everything the spec lists.
+  - Verify: `cargo test -p mesh-node --test social`.
+  - Size M.
+
+**Checkpoint A (short report):** Mesh-Node done and tested on Linux.
+
+### Phase 4: Mesh-Voice
+
+- [ ] **Task 10: `meshSocial` in Mesh-Voice** (by-hand check pending)
+  - What: `mesh.rs` events and commands; the Friends page for Mesh (Online,
+    All, Pending, Blocked); Add Friend's Mesh mode (code → request, ID → add
+    by ID); the status menu; the Contacts list on Your ID goes.
+  - Verify: `cargo test -p mesh-app -p mesh-discord`; by hand with two
+    windows and a local seed.
+  - Size L.
+
+**Checkpoint B (by hand, you):** two windows on Linux with a local seed (as
+routing's Checkpoint B), plus a third from a backup of window B:
+
+```
+mesh-node seed --data /tmp/mesh-seed        # prints "ticket mesh://node/…"
+MESH_SEEDS='<ticket>' mesh                  # window A
+MESH_SEEDS='<ticket>' XDG_DATA_HOME=/tmp/meshB mesh   # window B
+```
+
+B makes a friend code; A sends a request with it; B accepts; both show
+Online; change status on each; block and unblock.
+
+**Checkpoint C (module gate, needs the homelab and Windows):** the spec's
+two-machine check, in the same sitting as the other modules' gates.
+
+## Risks and mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Changing `code-get` breaks Check an ID or the seed tests | Low | Task 4 changes the store and its tests together; Task 5 updates `tests/seed.rs`. |
+| Sync merges flap the contacts list, so routing republishes often | Low | The contacts follow the merged state only when it changes; publishing is already batched. |
+| A presence stream per friend hits the transport's stream limit | Low | One stream each way per friend connection, well under the 32 streams allowed per connection. |
+| The Friends page in Mesh-Voice is shaped around Matrix | Medium | Task 10 reads it first, and adds Mesh beside it rather than reshaping it. |
+
+## Open questions
+
+None.
