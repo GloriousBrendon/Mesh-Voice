@@ -31,7 +31,12 @@ use std::sync::Arc;
 /// How many messages to fetch when opening a room.
 const TIMELINE_LIMIT: u16 = 50;
 
+/// `MESH_DATA` runs a second, separate copy (on Windows `dirs` ignores
+/// `APPDATA`, so it's the only way), e.g. `$env:MESH_DATA='C:\meshB'`.
 fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MESH_DATA") {
+        return dir.into();
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("mesh")
