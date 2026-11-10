@@ -1117,17 +1117,18 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         if f.presence == "offline" {
             detail = format!("{detail} · {}", seen_line(f.seen));
         }
-        col = col.push(
+        // Buttons on their own line: four don't fit beside the name in the
+        // narrow Accounts panel.
+        col = col.push(column![
+            line(friend_name(f), detail),
             row![
-                line(friend_name(f), detail),
                 small(if pinging { "Pinging…" } else { "Ping" }, p.text_bright(), Msg::PingContact(f.id.clone())),
                 small("Send a test note", p.text_bright(), Msg::SendNote(f.id.clone())),
                 small("Remove", p.danger(), Msg::Remove(f.id.clone())),
                 small("Block", p.danger(), Msg::Block(f.id.clone())),
             ]
-            .spacing(10)
-            .align_y(iced::Alignment::Center),
-        );
+            .spacing(4),
+        ]);
         if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == f.id) {
             col = col.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
         }
