@@ -210,6 +210,16 @@ MESH_SEEDS='<ticket>' XDG_DATA_HOME=/tmp/meshB target/release/mesh-app # window 
    Invisible. Ping still works while B is invisible.
 5. Block A on B, then Unblock. Remove the friend.
 
+**Checkpoint B result (2026-11-10, on Windows instead of Linux):** passed.
+Two windows (the second with `MESH_DATA`, added for this) and a local seed:
+request through a single-use code, accept, both Online, Ping direct in about
+1 ms, DND, Idle, Invisible shown as Offline with Ping still answered, block
+and unblock (which leaves them removed, as designed). Fixed on the way:
+whoever sent the request saw the other as a bare ID (Mesh-Node `d8fe7ff`:
+the username now rides in the presence frame); Block cut off in a narrow
+panel and a `MESH_DATA` window sharing the first one's settings (Mesh-Voice
+`5b60b03`).
+
 **Checkpoint C (module gate, needs the homelab and Windows):** the spec's
 two-machine check, in the same sitting as the other modules' gates.
 
