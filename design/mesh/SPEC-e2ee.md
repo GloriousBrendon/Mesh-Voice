@@ -1,8 +1,13 @@
 # Spec: `e2ee` (Mesh)
 
-Status: **DRAFT 2026-11-10, for your review.** No plan yet. Module 6 of the
-build order in [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Depends on
-[`identity`](SPEC-identity.md) (built). It also uses
+Status: **APPROVED 2026-11-10** with the recommended answers: vodozemac
+(Olm and Megolm), not MLS (Q1); per-device sessions for 1:1 and sender chains
+for groups (Q2); post-quantum later (Q3); history before joining as a
+per-Space setting, on by default, with the final call in `spaces` (Q4);
+backups without message sessions (Q5); encrypted on live connections too
+(Q6). `vodozemac` 0.11.2 is approved. Plan: [PLAN-e2ee.md](PLAN-e2ee.md).
+Module 6 of the build order in [CAPABILITY-MAP.md](CAPABILITY-MAP.md).
+Depends on [`identity`](SPEC-identity.md) (built). It also uses
 [`routing`](SPEC-routing.md) records (built; Checkpoint B by hand pending) and
 [`social`](SPEC-social.md) friends (built; Checkpoint B passed 2026-11-10).
 `dm`, `mailbox`, `spaces` and `calls` build on it.
@@ -68,7 +73,7 @@ keys, sessions with the devices it talks to, and one envelope format that
 - I compare the safety number with a friend once. When they add a new
   device, I don't have to check again.
 
-### Decisions this spec makes (review these)
+### Decisions this spec makes
 
 | # | Decision | Why |
 |---|---|---|
@@ -210,7 +215,7 @@ The `mesh-e2ee` crate's surface, which later specs build on:
 
 ## Tech stack
 
-One new dependency, which needs your OK (Boundaries):
+One new dependency, approved 2026-11-10:
 
 | Crate | For |
 |---|---|
@@ -350,40 +355,23 @@ constants, derivation contexts and domains as constants
 | First messages on the fallback key have weaker forward secrecy | Low | Only until the first reply turns the ratchet. One-time keys are refilled every 30 minutes. The fallback key is replaced weekly. |
 | Space members who aren't friends can't find each other's bundles | Medium | Left to `spaces` on purpose (see *What later modules get*). Groups in this module are among friends. |
 
+## Resolved questions (2026-11-10)
+
+- **Q1. Olm and Megolm (vodozemac), or MLS?** vodozemac (D1). Revisit MLS
+  when Spaces grow past a few hundred members.
+- **Q2. 1:1 chats: per-device sessions, or the group design for
+  everything?** Per-device sessions for 1:1, sender chains for groups (D5,
+  D6).
+- **Q3. Post-quantum protection now?** Later, when vodozemac or a
+  well-reviewed Rust PQXDH ships it. The envelope's version byte leaves room.
+- **Q4. Should a new Space member see messages from before they joined?**
+  Yes, as a per-Space setting that's on by default. The final call is in
+  `spaces`. e2ee supports both, since history comes as re-sent messages
+  (D13).
+- **Q5. Should backups carry message sessions?** No. A restored device starts
+  new sessions, and its history comes from your other devices.
+- **Q6. Encrypt messages on a live connection too?** Yes (D2).
+
 ## Open questions
 
-- **Q1. Olm and Megolm (vodozemac), or MLS?** I recommend **vodozemac**.
-  Think of MLS as a group lock where everyone must agree, in order, every
-  time the lock changes. That needs a referee, and Mesh has none. Olm and
-  Megolm give each sender their own lock and hand out its key privately, so
-  nobody has to agree on an order. It's lighter (about 15 new crates against
-  36 to 68) and it's audited. Revisit MLS when Spaces grow past a few
-  hundred members, because that's where MLS's cheaper member changes start
-  to matter.
-- **Q2. 1:1 chats: per-device sessions, or the group design for
-  everything?** I recommend **per-device sessions for 1:1, sender chains for
-  groups** (D5, D6). Per-device sessions repair themselves after a leak on
-  every reply. Group chains only repair at rotation. A 1:1 message reaches a
-  handful of devices, so the extra encryption is free. Using one design for
-  all would be simpler code but weaker 1:1 privacy.
-- **Q3. Post-quantum protection now?** I recommend **later**. The worry is
-  someone recording mail today and decrypting it with a quantum computer
-  years from now. vodozemac has no post-quantum exchange yet, and adding our
-  own means writing the risky part ourselves. Revisit when vodozemac, or a
-  well-reviewed Rust PQXDH, ships it. The envelope has a version byte, so it
-  can be added without breaking old messages.
-- **Q4. Should a new Space member see messages from before they joined?**
-  This is really `spaces`' call. e2ee supports both: keys are never shared,
-  and history comes as re-sent messages (D13). I recommend **yes, as a
-  per-Space setting that's on by default**, because that's what Discord
-  users expect. Private Spaces can turn it off.
-- **Q5. Should backups carry message sessions?** I recommend **no**. A
-  restored device gets a new device key anyway (identity), so it starts new
-  sessions, and its history comes from your other devices (`dm`). A backup
-  with sessions in it would be a copy of your message keys sitting in a
-  file, and restoring an old one would roll the ratchets back, which is the
-  thing D12 exists to prevent.
-- **Q6. Encrypt messages on a live connection too, even though QUIC already
-  encrypts them?** I recommend **yes** (D2). It costs almost nothing, and it
-  means a message is protected the same way whatever route it takes, so
-  there's no route where a bug leaves it readable.
+None.
