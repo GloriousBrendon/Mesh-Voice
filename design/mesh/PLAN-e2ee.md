@@ -76,7 +76,7 @@ module gate needs the homelab seed and the Windows PC.
     there through iroh), and no second copy of any crypto crate: the only
     duplicate in the tree is `syn`, at build time. `verify_device` is now
     public, and `DeviceKey` gained `diffie_hellman` for the seal (D8).
-- [ ] **Task 2: The envelope and the seal** (D2, D8, D9, D10)
+- [x] **Task 2: The envelope and the seal** (D2, D8, D9, D10)
   - What: `envelope.rs`. The inside (version, conversation, kind, sender
     list seq, body, padding to 256 B / 1 KiB / 4 KiB / 16 KiB steps up to
     64 KiB), the envelope types, `seal_for(device, address, envelope)` and
@@ -89,6 +89,14 @@ module gate needs the homelab seed and the Windows PC.
   - Files: `src/envelope.rs`, `tests/vectors.rs`; `mesh-identity`'s
     `PairKeys` gains the conversation ID.
   - Size M.
+  - Result (2026-11-10, Mesh-Node `1c48098`): 5 unit tests and 2 vectors;
+    127 workspace tests pass. The vectors come from this crate: there was no
+    independent blake3 and XChaCha20-Poly1305 tool on this PC, so they pin
+    the layout rather than cross-check it. The seal key also covers the
+    throwaway and reader keys, as `mesh/v1/seal-key` over `X25519 |
+    throwaway | reader`. `routing`'s process test failed once in one full
+    run (an `expect` mismatch at 13 s) and passed alone and in the next full
+    run; nothing in this task touches it.
 - [ ] **Task 3: 1:1 sessions** (D4, D5, D11)
   - What: `session.rs`. The account: up to 200 one-time keys, a fallback key
     replaced weekly, one key reserved per contact. Learning a person's list
