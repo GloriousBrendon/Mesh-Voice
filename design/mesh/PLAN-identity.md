@@ -261,7 +261,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     - `idExport` refuses a username that isn't the identity's
       (`wrong-username`), since the backup opens only with the real one;
     - the device name is the machine's hostname.
-- [ ] **Task 12: Mesh-Voice: Mesh network, onboarding and unlock**
+- [x] **Task 12: Mesh-Voice: Mesh network, onboarding and unlock**
   - What:
     - Mesh in the network registry;
     - `mesh-node` found next to Mesh's binary and run with the same
@@ -287,7 +287,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     rest). Checked by screenshot: onboarding on a fresh directory, unlock on
     a locked one. The typed part of the accept run is left to you (no input
     tool on the Linux box).
-- [ ] **Task 12b: Mesh-Voice: Matrix becomes optional** (added and approved
+- [x] **Task 12b: Mesh-Voice: Matrix becomes optional** (added and approved
   2026-10-26: "Matrix is optional")
   - Why: you chose Mesh's screens to come before everything. Task 12 puts
     them first, but the app session is still built on the Matrix client, so
@@ -301,7 +301,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
   - **Result (2026-10-26):** code done (`f9900a8`). Checked by screenshot:
     the app opens with no Matrix session. Matrix sign-in and sign-out from
     its card are left to your test run.
-- [ ] **Task 13: Mesh-Voice: Your ID, keep unlocked, password and backup**
+- [x] **Task 13: Mesh-Voice: Your ID, keep unlocked, password and backup**
   - What:
     - the Your ID page (`mesh1…` with a copy button, a QR code of the
       `mesh://` link, the list of devices);
@@ -321,7 +321,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     is "I have a backup" on onboarding's first screen. The keep-unlocked
     switch shows as unavailable here (no Secret Service). Not run by hand:
     left to your test run, like 12 and 12b.
-- [ ] **Task 14: Mesh-Voice: Check an ID** (safety number)
+- [x] **Task 14: Mesh-Voice: Check an ID** (safety number)
   - What: paste an ID or `mesh://` link → the specific parse error or the
     60-digit safety number (and its QR). This is what the two-machine check
     uses. Friend-code screens come with `seed`, when codes can actually be
@@ -337,7 +337,7 @@ independent Python libraries (`blake3`, `argon2-cffi`, `pynacl`) or OpenSSL.
     identities: alice→bob and bob→alice (pasted as a `mesh://id/` link) give
     the same 60 digits; a one-letter typo answers `id-checksum`, and other
     text `id-not-mesh`. The screen itself is left to your test run.
-- [ ] **Task 15: Ship `mesh-node` with Mesh-Voice**
+- [x] **Task 15: Ship `mesh-node` with Mesh-Voice**
   - What: `installer/install-linux.sh` and `installer/build.ps1` with
     `mesh.iss` build Mesh-Node (from a sibling checkout, or a path variable)
     and install `mesh-node` next to Mesh, like `mesh-wa`.
