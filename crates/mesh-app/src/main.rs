@@ -43,17 +43,22 @@ fn data_dir() -> PathBuf {
 }
 
 fn theme_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mesh")
-        .join("theme.toml")
+    config_dir().join("theme.toml")
 }
 
 fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+/// With `MESH_DATA` set, the settings live there too, so a second copy
+/// never writes over the first one's.
+fn config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MESH_DATA") {
+        return dir.into();
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("mesh")
-        .join("config.toml")
 }
 
 /// Spawns the never-ending sync loop in the background and hands back a

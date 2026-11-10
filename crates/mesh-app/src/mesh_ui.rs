@@ -973,7 +973,10 @@ fn friends_view(state: &App) -> Element<'_, Message> {
             .style(flat_button_style(p))
     };
     let line = |name: String, detail: String| {
-        column![ui::sans(name, 13.0, Weight::Semibold, p.text_bright()), ui::mono(detail, 11.0, p.text_muted())].spacing(2)
+        // Fills the row and wraps, so the buttons beside it always fit.
+        column![ui::sans(name, 13.0, Weight::Semibold, p.text_bright()), ui::mono(detail, 11.0, p.text_muted())]
+            .spacing(2)
+            .width(Length::Fill)
     };
     let status = STATUSES.iter().find(|(_, a)| *a == social.status).map_or("Online", |(l, _)| *l);
     let mut col = column![
@@ -1002,7 +1005,6 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 who,
-                Space::new().width(Length::Fill),
                 small("Accept", p.success(), Msg::Accept(r.id.clone())),
                 small("Decline", p.text_bright(), Msg::Decline(r.id.clone())),
                 small("Block", p.danger(), Msg::Block(r.id.clone())),
@@ -1027,7 +1029,6 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 line(friend_name(f), detail),
-                Space::new().width(Length::Fill),
                 small(if pinging { "Pinging…" } else { "Ping" }, p.text_bright(), Msg::PingContact(f.id.clone())),
                 small("Remove", p.danger(), Msg::Remove(f.id.clone())),
                 small("Block", p.danger(), Msg::Block(f.id.clone())),
@@ -1045,7 +1046,6 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 line(name, format!("asked · {}", short_id(&o.id))),
-                Space::new().width(Length::Fill),
                 small("Cancel", p.text_bright(), Msg::Remove(o.id.clone())),
             ]
             .spacing(10)
@@ -1057,7 +1057,6 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         col = col.push(
             row![
                 line(name, format!("blocked · {}", short_id(&b.id))),
-                Space::new().width(Length::Fill),
                 small("Unblock", p.text_bright(), Msg::Unblock(b.id.clone())),
             ]
             .spacing(10)
