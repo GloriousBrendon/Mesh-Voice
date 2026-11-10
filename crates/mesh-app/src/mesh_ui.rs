@@ -22,8 +22,8 @@ pub(crate) struct Mesh {
     net: Option<mesh::Net>,
     /// This device's live friend codes.
     codes: Vec<mesh::Code>,
-    /// The people this identity can reach, and who can reach it (routing).
-    contacts: Vec<mesh::Contact>,
+    /// Friends, requests both ways, blocks and our status (social).
+    social: mesh::Social,
     form: Form,
     settings: Settings,
 }
@@ -76,12 +76,17 @@ struct Settings {
     code_copied: Option<String>,
     /// The code Check an ID resolved, shown with the safety number.
     resolved: Option<String>,
-    /// Check an ID's "Add as contact": the name to save them under.
-    contact_name: String,
-    /// The last contact pinged by ID, and their answer.
+    /// Check an ID's "Add by ID": the name to save them under (optional).
+    nick: String,
+    /// Check an ID's friend request: the note to send with it (optional).
+    request_note: String,
+    /// The last friend pinged by ID, and their answer.
     contact_pong: Option<(String, mesh::Pong)>,
     pinging: Option<String>,
 }
+
+/// The status choices: labels and `statusSet` arguments.
+const STATUSES: [(&str, &str); 4] = [("Online", "online"), ("Idle", "idle"), ("Do not disturb", "dnd"), ("Invisible", "invisible")];
 
 /// Friend-code expiry choices (identity's), as labels and `codeCreate` arguments.
 const EXPIRIES: [(&str, &str); 7] =
@@ -122,10 +127,19 @@ pub(crate) enum Msg {
     MakeCode,
     CopyCode(String),
     RevokeCode(String),
-    ContactName(String),
-    AddContact,
+    Nick(String),
+    AddById,
+    RequestNote(String),
+    SendRequest,
     PingContact(String),
-    RemoveContact(String),
+    /// Removes a friend, or cancels a request we sent.
+    Remove(String),
+    Accept(String),
+    Decline(String),
+    Block(String),
+    Unblock(String),
+    Verify(String, bool),
+    Status(&'static str),
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -148,10 +162,10 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.qr = identity.link.as_deref().filter(|_| now_unlocked).and_then(|link| qr_code::Data::new(link).ok());
             if !now_unlocked {
                 m.codes.clear();
-                m.contacts.clear();
+                m.social = mesh::Social::default();
             } else if let Some(node) = &m.node {
                 // Unlocking doesn't send them by itself.
-                node.contacts();
+                node.social();
             }
             m.identity = Some(identity);
             m.settings.busy = None;
@@ -225,17 +239,23 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 _ => s.pong = Some(pong),
             }
         }
-        mesh::Event::Contacts(contacts) => {
-            m.contacts = contacts;
+        mesh::Event::Social(social) => {
             let s = &mut m.settings;
-            // Also comes after a ping by ID, so only end our own wait.
-            if s.busy == Some("contactAdd") {
-                s.contact_name.clear();
-                s.note = Some(("contactAdd".into(), true, "Added. Once they add you too, you can reach each other.".into()));
-            }
-            if matches!(s.busy, Some("contactAdd" | "contactRemove")) {
+            // Also comes by itself (a request, a friend's presence), so only
+            // the answer to our own command ends the wait.
+            if let Some(func) = social.answers.as_deref().filter(|f| s.busy == Some(*f)) {
                 s.busy = None;
+                let done = match func {
+                    "friendRequest" => Some("Request sent. They'll see it the next time they open Mesh."),
+                    "friendAdd" => Some("Added. You'll be friends once they add your ID too."),
+                    _ => None,
+                };
+                if let Some(done) = done {
+                    (s.nick, s.request_note) = Default::default();
+                    s.note = Some((func.to_owned(), true, done.to_owned()));
+                }
             }
+            m.social = social;
         }
         mesh::Event::Codes(codes) => {
             m.codes = codes.codes;
@@ -262,7 +282,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.qr = None;
             m.net = None;
             m.codes.clear();
-            m.contacts.clear();
+            m.social = mesh::Social::default();
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -409,14 +429,20 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
                 node.revoke_code(&code);
             }
         }
-        Msg::ContactName(value) => s.contact_name = value,
-        Msg::AddContact => {
-            if let (None, Some((safety, _))) = (s.busy, &s.safety)
-                && !s.contact_name.trim().is_empty()
-            {
-                s.busy = Some("contactAdd");
+        Msg::Nick(value) => s.nick = value,
+        Msg::AddById => {
+            if let (None, Some((safety, _))) = (s.busy, &s.safety) {
+                s.busy = Some("friendAdd");
                 s.note = None;
-                node.add_contact(&safety.id, s.contact_name.trim());
+                node.add_friend(&safety.id, s.nick.trim());
+            }
+        }
+        Msg::RequestNote(value) => s.request_note = value,
+        Msg::SendRequest => {
+            if let (None, Some(code)) = (s.busy, &s.resolved) {
+                s.busy = Some("friendRequest");
+                s.note = None;
+                node.request(code, s.request_note.trim());
             }
         }
         Msg::PingContact(id) => {
@@ -428,14 +454,39 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
                 s.pinging = Some(id);
             }
         }
-        Msg::RemoveContact(id) => {
-            if s.busy.is_none() {
-                s.busy = Some("contactRemove");
-                s.note = None;
-                s.contact_pong = None;
-                node.remove_contact(&id);
+        Msg::Remove(id) if s.busy.is_none() => {
+            s.busy = Some("friendRemove");
+            s.contact_pong = None;
+            node.remove_friend(&id);
+        }
+        Msg::Accept(id) if s.busy.is_none() => {
+            s.busy = Some("friendAccept");
+            node.accept(&id);
+        }
+        Msg::Decline(id) if s.busy.is_none() => {
+            s.busy = Some("friendDecline");
+            node.decline(&id);
+        }
+        Msg::Block(id) if s.busy.is_none() => {
+            s.busy = Some("block");
+            node.block(&id);
+        }
+        Msg::Unblock(id) if s.busy.is_none() => {
+            s.busy = Some("unblock");
+            node.unblock(&id);
+        }
+        Msg::Verify(id, verified) if s.busy.is_none() => {
+            s.busy = Some("friendVerify");
+            node.verify(&id, verified);
+        }
+        Msg::Status(label) if s.busy.is_none() => {
+            if let Some((_, arg)) = STATUSES.iter().find(|(l, _)| *l == label) {
+                s.busy = Some("statusSet");
+                node.set_status(arg);
             }
         }
+        // Another command is still waiting for its answer.
+        Msg::Remove(_) | Msg::Accept(_) | Msg::Decline(_) | Msg::Block(_) | Msg::Unblock(_) | Msg::Verify(..) | Msg::Status(_) => {}
         Msg::CopyTicket => {
             if s.busy.is_none() {
                 s.busy = Some("netTicket");
@@ -744,54 +795,39 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
                     .style(|_| container::Style { background: Some(iced::Color::WHITE.into()), border: iced::border::rounded(8), ..container::Style::default() }),
             );
         }
-        if let Some(known) = m.contacts.iter().find(|c| c.id == safety.id) {
-            check = check.push(ui::sans(format!("Already a contact: {}", known.name), 12.0, Weight::Normal, p.text()));
-        } else if identity.id.as_deref() != Some(safety.id.as_str()) {
-            check = check
-                .push(field("SAVE THEM AS", &s.contact_name, Msg::ContactName, false, Msg::AddContact, p))
-                .push(action("Add as contact", "contactAdd", (!s.contact_name.trim().is_empty()).then_some(Msg::AddContact)));
+        let social = &m.social;
+        let them = safety.id.as_str();
+        if let Some(friend) = social.friends.iter().find(|f| f.id == them) {
+            let (label, verified) = if friend.verified { ("Verified · undo", false) } else { ("Mark as verified", true) };
+            check = check.push(ui::sans(format!("Already friends: {}", friend_name(friend)), 12.0, Weight::Normal, p.text())).push(
+                button(ui::sans(label, 12.0, Weight::Normal, p.text_bright()))
+                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::Verify(friend.id.clone(), verified))))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
+            );
+        } else if social.incoming.iter().any(|r| r.id == them) {
+            check = check.push(ui::sans("They've sent you a request: see Friends below.", 12.0, Weight::Normal, p.text()));
+        } else if social.blocked.iter().any(|b| b.id == them) {
+            check = check.push(ui::sans("You've blocked them. Unblock them under Friends first.", 12.0, Weight::Normal, p.warning()));
+        } else if social.outgoing.iter().any(|o| o.id == them) {
+            check = check.push(ui::sans("Asked: you'll be friends once their device connects to yours.", 12.0, Weight::Normal, p.text()));
+        } else if identity.id.as_deref() != Some(them) {
+            check = match &s.resolved {
+                // A live code can carry a request (SPEC-social D1).
+                Some(_) => check
+                    .push(field("NOTE (OPTIONAL)", &s.request_note, Msg::RequestNote, false, Msg::SendRequest, p))
+                    .push(action("Send friend request", "friendRequest", Some(Msg::SendRequest))),
+                // An ID alone can't: both of you add the other (D2).
+                None => check
+                    .push(text("An ID can't carry a request. Add theirs, and ask them to add yours: you're friends once both have.").size(12).color(p.text()))
+                    .push(field("SAVE THEM AS (OPTIONAL)", &s.nick, Msg::Nick, false, Msg::AddById, p))
+                    .push(action("Add by ID", "friendAdd", Some(Msg::AddById))),
+            };
         }
     }
-    check = check.extend(note("contactAdd"));
+    check = check.extend(note("friendRequest")).extend(note("friendAdd")).extend(note("friendVerify"));
 
-    // Contacts: who this identity can reach by ID, and who can reach it.
-    let mut contacts = column![
-        heading("contacts", p),
-        text("You can reach a contact, and they can reach you, once you've both added each other. Nobody else can connect to this device.")
-            .size(12)
-            .color(p.text()),
-    ]
-    .spacing(8);
-    if m.contacts.is_empty() {
-        contacts = contacts.push(ui::sans("None yet. Check a friend's ID or code above, then add them.", 12.0, Weight::Normal, p.text_muted()));
-    }
-    for c in &m.contacts {
-        let pinging = s.busy == Some("netPingId") && s.pinging.as_deref() == Some(c.id.as_str());
-        contacts = contacts.push(
-            row![
-                column![
-                    ui::sans(c.name.clone(), 13.0, Weight::Semibold, p.text_bright()),
-                    ui::mono(format!("{} · {}", short_id(&c.id), seen_line(c.seen)), 11.0, p.text_muted()),
-                ]
-                .spacing(2),
-                Space::new().width(Length::Fill),
-                button(ui::sans(if pinging { "Pinging…" } else { "Ping" }, 12.0, Weight::Normal, p.text_bright()))
-                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::PingContact(c.id.clone()))))
-                    .padding([4, 10])
-                    .style(flat_button_style(p)),
-                button(ui::sans("Remove", 12.0, Weight::Normal, p.danger()))
-                    .on_press_maybe(s.busy.is_none().then(|| Message::MeshForm(Msg::RemoveContact(c.id.clone()))))
-                    .padding([4, 10])
-                    .style(flat_button_style(p)),
-            ]
-            .spacing(10)
-            .align_y(iced::Alignment::Center),
-        );
-        if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == c.id) {
-            contacts = contacts.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
-        }
-    }
-    contacts = contacts.extend(note("netPingId")).extend(note("contactRemove"));
+    let friends = friends_view(state);
 
     // Friend codes: short, expiring stand-ins for the ID, held by the seeds.
     let expiry = s.expiry.unwrap_or(DEFAULT_EXPIRY);
@@ -904,9 +940,138 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
     .spacing(8)
     .extend(note("idExport"));
 
-    scrollable(column![id, codes, check, contacts, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
+    scrollable(column![id, friends, codes, check, network, devices, keep, password, backup].spacing(22).padding(iced::Padding { right: 12.0, ..iced::Padding::ZERO }))
         .height(Length::Fill)
         .into()
+}
+
+/// A friend's name: ours for them if we set one, else theirs, else their ID.
+fn friend_name(f: &mesh::Friend) -> String {
+    [&f.nick, &f.name].into_iter().find(|n| !n.is_empty()).cloned().unwrap_or_else(|| short_id(&f.id))
+}
+
+/// "Online", "Do not disturb", …
+fn presence_label(presence: &str) -> &'static str {
+    match presence {
+        "online" => "Online",
+        "idle" => "Idle",
+        "dnd" => "Do not disturb",
+        _ => "Offline",
+    }
+}
+
+/// Friends (SPEC-social): our status, requests to us, friends, the ones we
+/// asked, and who we've blocked.
+fn friends_view(state: &App) -> Element<'_, Message> {
+    let p = &state.palette;
+    let (social, s) = (&state.mesh.social, &state.mesh.settings);
+    let free = s.busy.is_none();
+    let small = |label: &'static str, color: iced::Color, msg: Msg| {
+        button(ui::sans(label, 12.0, Weight::Normal, color))
+            .on_press_maybe(free.then_some(Message::MeshForm(msg)))
+            .padding([4, 10])
+            .style(flat_button_style(p))
+    };
+    let line = |name: String, detail: String| {
+        column![ui::sans(name, 13.0, Weight::Semibold, p.text_bright()), ui::mono(detail, 11.0, p.text_muted())].spacing(2)
+    };
+    let status = STATUSES.iter().find(|(_, a)| *a == social.status).map_or("Online", |(l, _)| *l);
+    let mut col = column![
+        heading("friends", p),
+        text("Someone with one of your live friend codes can send you a request. Nobody else can reach you, or tell whether you're online.")
+            .size(12)
+            .color(p.text()),
+        row![
+            ui::mono("YOUR STATUS", 11.0, p.text_muted()),
+            pick_list(STATUSES.map(|(l, _)| l).to_vec(), Some(status), |l| Message::MeshForm(Msg::Status(l))).padding(6),
+        ]
+        .spacing(10)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(8);
+    if status == "Invisible" {
+        col = col.push(text("Friends see you as offline, but can still reach you.").size(12).color(p.text_muted()));
+    }
+
+    for r in &social.incoming {
+        let name = if r.name.is_empty() { short_id(&r.id) } else { r.name.clone() };
+        let mut who = line(format!("{name} wants to be friends"), short_id(&r.id));
+        if !r.note.is_empty() {
+            who = who.push(ui::sans(format!("“{}”", r.note), 12.0, Weight::Normal, p.text()));
+        }
+        col = col.push(
+            row![
+                who,
+                Space::new().width(Length::Fill),
+                small("Accept", p.success(), Msg::Accept(r.id.clone())),
+                small("Decline", p.text_bright(), Msg::Decline(r.id.clone())),
+                small("Block", p.danger(), Msg::Block(r.id.clone())),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+
+    if social.friends.is_empty() && social.incoming.is_empty() {
+        col = col.push(ui::sans("No friends yet. Check a friend's code below and send a request.", 12.0, Weight::Normal, p.text_muted()));
+    }
+    for f in &social.friends {
+        let pinging = s.busy == Some("netPingId") && s.pinging.as_deref() == Some(f.id.as_str());
+        let mut detail = format!("{} · {}", presence_label(&f.presence), short_id(&f.id));
+        if f.verified {
+            detail.push_str(" · verified");
+        }
+        if f.presence == "offline" {
+            detail = format!("{detail} · {}", seen_line(f.seen));
+        }
+        col = col.push(
+            row![
+                line(friend_name(f), detail),
+                Space::new().width(Length::Fill),
+                small(if pinging { "Pinging…" } else { "Ping" }, p.text_bright(), Msg::PingContact(f.id.clone())),
+                small("Remove", p.danger(), Msg::Remove(f.id.clone())),
+                small("Block", p.danger(), Msg::Block(f.id.clone())),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+        if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == f.id) {
+            col = col.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
+        }
+    }
+
+    for o in &social.outgoing {
+        let name = if o.nick.is_empty() { short_id(&o.id) } else { o.nick.clone() };
+        col = col.push(
+            row![
+                line(name, format!("asked · {}", short_id(&o.id))),
+                Space::new().width(Length::Fill),
+                small("Cancel", p.text_bright(), Msg::Remove(o.id.clone())),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    for b in &social.blocked {
+        let name = if b.nick.is_empty() { short_id(&b.id) } else { b.nick.clone() };
+        col = col.push(
+            row![
+                line(name, format!("blocked · {}", short_id(&b.id))),
+                Space::new().width(Length::Fill),
+                small("Unblock", p.text_bright(), Msg::Unblock(b.id.clone())),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+        );
+    }
+    let note = |func: &str| -> Option<Element<'_, Message>> {
+        let (_, ok, message) = s.note.as_ref().filter(|(f, ..)| f == func)?;
+        Some(text(message.clone()).size(12).color(if *ok { p.success() } else { p.danger() }).into())
+    };
+    for func in ["netPingId", "friendRemove", "friendAccept", "friendDecline", "block", "unblock", "statusSet"] {
+        col = col.extend(note(func));
+    }
+    col.into()
 }
 
 #[cfg(test)]
@@ -974,6 +1139,13 @@ mod tests {
         assert_eq!(short_id("mesh1abc"), "mesh1abc");
         assert_eq!(seen_line(None), "not reached yet");
         assert!(seen_line(Some(1_800_000_000)).starts_with("seen "));
+        let mut f = mesh::Friend { id: id.into(), name: "sam".into(), nick: String::new(), verified: false, presence: "dnd".into(), seen: None };
+        assert_eq!(friend_name(&f), "sam");
+        f.nick = "Sam P".into();
+        assert_eq!(friend_name(&f), "Sam P");
+        (f.nick, f.name) = (String::new(), String::new());
+        assert_eq!(friend_name(&f), "mesh1qch7…utrz3");
+        assert_eq!((presence_label("dnd"), presence_label("idle"), presence_label("offline")), ("Do not disturb", "Idle", "Offline"));
     }
 
     #[test]

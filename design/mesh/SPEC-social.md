@@ -147,6 +147,11 @@ on both sides.
 
 ### Mesh-Voice
 
+*As built (2026-11-10): Mesh-Voice has no Friends page for any network, so
+the lists, requests and status menu are on Your ID for now
+([PLAN-social.md](PLAN-social.md) Task 10). A Discord-style page in the
+shell is open for your decision.*
+
 - **Friends page** for Mesh, as for the other networks: Online, All, Pending
   (incoming with Accept / Decline / Block, outgoing with Cancel) and Blocked
   (Unblock). The presence dot comes from `presence`.

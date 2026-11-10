@@ -160,25 +160,55 @@ with 50 friends (success criterion 4).
 
 ### Phase 4: Mesh-Voice
 
-- [ ] **Task 10: `meshSocial` in Mesh-Voice** (by-hand check pending)
+- [x] **Task 10: `meshSocial` in Mesh-Voice** (by-hand check pending)
   - What: `mesh.rs` events and commands; the Friends page for Mesh (Online,
     All, Pending, Blocked); Add Friend's Mesh mode (code → request, ID → add
     by ID); the status menu; the Contacts list on Your ID goes.
   - Verify: `cargo test -p mesh-app -p mesh-discord`; by hand with two
     windows and a local seed.
   - Size L.
+  - Result (2026-11-10): built on **Your ID**, not as a separate Friends
+    page. Mesh-Voice has no Friends page (Online / All / Pending / Blocked)
+    for any network, only the Matrix/Discord Add Friend dialog, so the spec's
+    "as for the other networks" had nothing to join. Whether to build a
+    Discord-style Friends page in the shell is your call.
+    - A Friends section replaces Contacts:
+      - your status (Online, Idle, Do not disturb, Invisible);
+      - requests, with the sender's name and note: Accept, Decline, Block;
+      - friends, with presence, verified and last seen: Ping, Remove,
+        Block;
+      - the ones you asked: Cancel;
+      - blocked: Unblock.
+    - Check an ID with a **code** offers a note and Send friend request.
+      With an **ID** it offers Add by ID, saying they need to add yours
+      too. For a friend it offers Mark as verified.
+    - **Not wired:** auto-idle after 10 minutes without input. Mesh-Voice
+      doesn't track input yet; the helper's `activity` command is ready for
+      it.
+    - 45 Mesh-Voice tests pass; no new clippy warnings (53 before and
+      after).
 
-**Checkpoint B (by hand, you):** two windows on Linux with a local seed (as
-routing's Checkpoint B), plus a third from a backup of window B:
+**Checkpoint B (by hand, you):** two windows on Linux with a local seed.
+The app runs the `mesh-node` next to its own binary, so build both and put
+`mesh-node` beside `mesh-app`:
 
 ```
-mesh-node seed --data /tmp/mesh-seed        # prints "ticket mesh://node/…"
-MESH_SEEDS='<ticket>' mesh                  # window A
-MESH_SEEDS='<ticket>' XDG_DATA_HOME=/tmp/meshB mesh   # window B
+cd ~/Documents/GitHub/Mesh-Node  && cargo build --release
+cd ~/Documents/GitHub/Mesh-Voice && cargo build --release -p mesh-app
+cp ~/Documents/GitHub/Mesh-Node/target/release/mesh-node target/release/
+~/Documents/GitHub/Mesh-Node/target/release/mesh-node seed --data /tmp/mesh-seed   # prints "ticket mesh://node/…"
+MESH_SEEDS='<ticket>' target/release/mesh-app                          # window A
+MESH_SEEDS='<ticket>' XDG_DATA_HOME=/tmp/meshB target/release/mesh-app # window B
 ```
 
-B makes a friend code; A sends a request with it; B accepts; both show
-Online; change status on each; block and unblock.
+1. On B, under Your ID → Friend codes, make a code. Close window B.
+2. On A, paste the code into Check an ID. Compare the safety number, add a
+   note, then Send friend request.
+3. Open B again. The request is under Friends, with A's name and note.
+   Accept it. Within a few seconds both show the other as Online.
+4. Change status on B: A shows Do not disturb, Idle, then Offline for
+   Invisible. Ping still works while B is invisible.
+5. Block A on B, then Unblock. Remove the friend.
 
 **Checkpoint C (module gate, needs the homelab and Windows):** the spec's
 two-machine check, in the same sitting as the other modules' gates.
@@ -190,7 +220,7 @@ two-machine check, in the same sitting as the other modules' gates.
 | Changing `code-get` breaks Check an ID or the seed tests | Low | Task 4 changes the store and its tests together; Task 5 updates `tests/seed.rs`. |
 | Sync merges flap the contacts list, so routing republishes often | Low | The contacts follow the merged state only when it changes; publishing is already batched. |
 | A presence stream per friend hits the transport's stream limit | Low | One stream each way per friend connection, well under the 32 streams allowed per connection. |
-| The Friends page in Mesh-Voice is shaped around Matrix | Medium | Task 10 reads it first, and adds Mesh beside it rather than reshaping it. |
+| The Friends page in Mesh-Voice is shaped around Matrix | Medium | Turned out there isn't one (Task 10). The Mesh lists are on Your ID until you decide on a shell page. |
 
 ## Open questions
 

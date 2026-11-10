@@ -30,9 +30,10 @@ pub enum Event {
     Codes(Codes),
     /// The ID a friend code points to (`Node::resolve`).
     Resolved(Resolved),
-    /// The contacts list; answers `contacts` and every contact change, and
-    /// comes again after a ping by ID.
-    Contacts(Vec<Contact>),
+    /// Friends, requests both ways, blocks and our status (SPEC-social).
+    /// Answers every friend command, and comes by itself when something
+    /// changes (a request arrives, a friend's presence, a sync).
+    Social(Social),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -151,16 +152,51 @@ pub struct Code {
     pub held: bool,
 }
 
-/// One entry of `meshContacts` (SPEC-routing).
+/// A `meshSocial` report (SPEC-social).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Social {
+    /// The command it answers; `None` when it came by itself.
+    #[serde(rename = "fn")]
+    pub answers: Option<String>,
+    pub friends: Vec<Friend>,
+    /// Requests to us, waiting for Accept or Decline.
+    pub incoming: Vec<Request>,
+    /// People we asked, or added by ID, who haven't connected yet.
+    pub outgoing: Vec<Known>,
+    pub blocked: Vec<Known>,
+    /// `online`, `idle`, `dnd` or `invisible`.
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Contact {
+pub struct Friend {
     /// Their `mesh1…` ID.
     pub id: String,
+    /// The name they gave themselves: a hint only.
     pub name: String,
-    /// Seconds since the epoch.
-    pub added: u64,
-    /// When one of their devices last answered.
+    /// Our name for them; empty if none.
+    pub nick: String,
+    pub verified: bool,
+    /// `online`, `idle`, `dnd` or `offline`.
+    pub presence: String,
+    /// When one of their devices last answered a dial (seconds since the epoch).
     pub seen: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Request {
+    pub id: String,
+    pub name: String,
+    pub note: String,
+    /// When they sent it.
+    pub at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Known {
+    pub id: String,
+    pub nick: String,
+    pub at: u64,
 }
 
 /// A `meshResolved`: the code and the ID it points to.
@@ -257,19 +293,51 @@ impl Node {
         self.call("netPing", &[ticket]);
     }
 
-    /// Answers with `Contacts`, or an `Error` (`self`, `already-contact`,
-    /// `bad-name`, `not-an-id`, or what's wrong with the ID).
-    pub fn add_contact(&self, id: &str, name: &str) {
-        self.call("contactAdd", &[id, name]);
+    /// Sends a friend request through someone's live friend code (it uses
+    /// one of the code's uses). Answers with `Social` once a seed has it, or
+    /// an `Error` (`not-found`, `self`, `blocked`, `already-friend`,
+    /// `slow-down`, `offline`, `bad-note`).
+    pub fn request(&self, code: &str, note: &str) {
+        self.call("friendRequest", &[code, note]);
     }
-    /// Answers with `Contacts`; their connections close and their records lapse.
-    pub fn remove_contact(&self, id: &str) {
-        self.call("contactRemove", &[id]);
+    /// Adds someone by ID: they're a friend once they've added yours too.
+    /// Answers with `Social`, or an `Error` (`self`, `already-contact`,
+    /// `blocked`, `bad-name`, or what's wrong with the ID).
+    pub fn add_friend(&self, id: &str, nick: &str) {
+        self.call("friendAdd", &[id, nick]);
     }
-    pub fn contacts(&self) {
-        self.call("contactList", &[]);
+    /// Each answers with `Social`, or an `Error`.
+    pub fn accept(&self, id: &str) {
+        self.call("friendAccept", &[id]);
     }
-    /// Pings a contact by ID; answers with `Ping` (then `Contacts`), or an
+    /// Nothing tells them.
+    pub fn decline(&self, id: &str) {
+        self.call("friendDecline", &[id]);
+    }
+    /// Removes a friend, or cancels a request we sent.
+    pub fn remove_friend(&self, id: &str) {
+        self.call("friendRemove", &[id]);
+    }
+    pub fn rename_friend(&self, id: &str, nick: &str) {
+        self.call("friendRename", &[id, nick]);
+    }
+    pub fn verify(&self, id: &str, verified: bool) {
+        self.call("friendVerify", &[id, if verified { "true" } else { "false" }]);
+    }
+    pub fn block(&self, id: &str) {
+        self.call("block", &[id]);
+    }
+    pub fn unblock(&self, id: &str) {
+        self.call("unblock", &[id]);
+    }
+    pub fn social(&self) {
+        self.call("socialList", &[]);
+    }
+    /// `online`, `idle`, `dnd` or `invisible`, for the whole account.
+    pub fn set_status(&self, status: &str) {
+        self.call("statusSet", &[status]);
+    }
+    /// Pings a friend by ID; answers with `Ping` (then `Social`), or an
     /// `Error` (`not-a-contact`, `unreachable`, `revoked-device`, `offline`).
     pub fn ping_id(&self, id: &str) {
         self.call("netPingId", &[id]);
@@ -351,13 +419,7 @@ fn line_event(line: &str) -> Option<Event> {
         "meshPing" => serde_json::from_str(payload).ok().map(Event::Ping),
         "meshCodes" => serde_json::from_str(payload).ok().map(Event::Codes),
         "meshResolved" => serde_json::from_str(payload).ok().map(Event::Resolved),
-        "meshContacts" => {
-            #[derive(Deserialize)]
-            struct List {
-                contacts: Vec<Contact>,
-            }
-            serde_json::from_str::<List>(payload).ok().map(|l| Event::Contacts(l.contacts))
-        }
+        "meshSocial" => serde_json::from_str(payload).ok().map(Event::Social),
         _ => None,
     }
 }
@@ -423,9 +485,14 @@ mod tests {
         };
         assert_eq!(r.id, "mesh1abc");
 
-        let contacts = r#"{"contacts":[{"id":"mesh1abc","name":"Alex","added":5,"seen":null},{"id":"mesh1def","name":"Sam","added":6,"seen":9}]}"#;
-        let Some(Event::Contacts(c)) = line_event(&line("meshContacts", contacts)) else { panic!("no contacts") };
-        assert_eq!((c.len(), c[0].seen, c[1].seen, c[1].name.as_str()), (2, None, Some(9), "Sam"));
+        let social = r#"{"fn":"friendAccept","friends":[{"id":"mesh1abc","name":"alex","nick":"Alex","verified":true,"presence":"dnd","seen":9}],
+            "incoming":[{"id":"mesh1def","name":"sam","note":"hi","at":5}],"outgoing":[{"id":"mesh1ghi","nick":"","at":6}],"blocked":[],"status":"invisible"}"#;
+        let Some(Event::Social(s)) = line_event(&line("meshSocial", social)) else { panic!("no social") };
+        assert_eq!((s.answers.as_deref(), s.friends[0].presence.as_str(), s.friends[0].seen), (Some("friendAccept"), "dnd", Some(9)));
+        assert_eq!((s.incoming[0].note.as_str(), s.outgoing[0].at, s.blocked.len(), s.status.as_str()), ("hi", 6, 0, "invisible"));
+        let unasked = r#"{"fn":null,"friends":[],"incoming":[],"outgoing":[],"blocked":[],"status":"online"}"#;
+        let Some(Event::Social(s)) = line_event(&line("meshSocial", unasked)) else { panic!("no social") };
+        assert_eq!(s.answers, None);
         let Some(Event::Net(published)) = line_event(&line("meshNet", r#"{"state":"online","relay":null,"direct":false,"connections":0,"published":true}"#)) else {
             panic!("no net")
         };
