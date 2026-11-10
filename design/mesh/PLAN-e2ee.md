@@ -60,7 +60,7 @@ module gate needs the homelab seed and the Windows PC.
 
 ### Phase 1: `mesh-e2ee` (Mesh-Node)
 
-- [ ] **Task 1: The crate and the bundle** (D1, D3)
+- [x] **Task 1: The crate and the bundle** (D1, D3)
   - What: `crates/mesh-e2ee` with vodozemac pinned; `bundle.rs`.
     `E2eeBundle::sign(&DeviceKey, curve, ed25519, now)` and
     `open(bytes, &DeviceList)` → the device key and the Olm keys, checked
@@ -71,6 +71,11 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test -p mesh-e2ee bundle`.
   - Files: `Cargo.toml`, `crates/mesh-e2ee/*`.
   - Size S.
+  - Result (2026-11-10, Mesh-Node `0284d41`): 2 tests; 120 workspace tests
+    pass. vodozemac adds 8 crates to the lock, not 15 (the rest were already
+    there through iroh), and no second copy of any crypto crate: the only
+    duplicate in the tree is `syn`, at build time. `verify_device` is now
+    public, and `DeviceKey` gained `diffie_hellman` for the seal (D8).
 - [ ] **Task 2: The envelope and the seal** (D2, D8, D9, D10)
   - What: `envelope.rs`. The inside (version, conversation, kind, sender
     list seq, body, padding to 256 B / 1 KiB / 4 KiB / 16 KiB steps up to
