@@ -5516,6 +5516,13 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
     }
 
     let Some(room) = room else {
+        // Home with nothing open: your Mesh friends, as Discord does.
+        let home = !active_group(session).is_some_and(|g| g.space.is_some());
+        if home && let Some(friends) = mesh_ui::home(state) {
+            return col
+                .push(scrollable(container(friends).padding([24, 28]).max_width(760)).height(Length::Fill))
+                .into();
+        }
         return col
             .push(
                 container(

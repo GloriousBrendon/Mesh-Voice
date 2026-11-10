@@ -960,6 +960,20 @@ fn presence_label(presence: &str) -> &'static str {
     }
 }
 
+/// Home's main pane with no chat open: friends, requests and your status,
+/// once Mesh is open. Codes and Check an ID stay on Your ID.
+pub(crate) fn home(state: &App) -> Option<Element<'_, Message>> {
+    if state.mesh_node.is_none() || !open(state) {
+        return None;
+    }
+    let p = &state.palette;
+    let more = button(ui::sans("Friend codes and Check an ID →", 12.0, Weight::Normal, p.accent()))
+        .on_press(Message::AccountsOpen("mesh"))
+        .padding([4, 0])
+        .style(flat_button_style(p));
+    Some(column![friends_view(state), more].spacing(12).into())
+}
+
 /// Friends (SPEC-social): our status, requests to us, friends, the ones we
 /// asked, and who we've blocked.
 fn friends_view(state: &App) -> Element<'_, Message> {
