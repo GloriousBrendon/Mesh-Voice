@@ -159,7 +159,8 @@ project in its own folder.
 1. **DNS: nothing.** The `relay.` name already resolves publicly to the
    home IP (the existing wildcard, kept current by `cloudflare-ddns`), and
    the router hairpins: from the LAN, a connection to it reaches Caddy. No
-   Pi-hole record needed.
+   Pi-hole record needed. *Wrong, found in Task 6: the router doesn't
+   hairpin, so it got a Pi-hole local record like the other names.*
 2. **Router: nothing** (D0).
 3. **A new folder**, `~/docker/mesh`: the Mesh-Node source copied from this
    box (no `target/`, no `.git`), and `deploy/.env` with the relay URL and
@@ -178,7 +179,7 @@ The slip: while checking DNS I ran a throwaway `busybox` container on the
 homelab, before this OK. It timed out and left no container; it had pulled
 the `busybox:1.37` image, which I removed. Nothing else was changed.
 
-- [ ] **Task 6: On the homelab**
+- [x] **Task 6: On the homelab** (home-only for now; see below)
   - What: the DNS record, the Caddy block, `docker compose up -d`; note the
     seed's ticket.
   - Accept: from a phone hotspot, a helper with only our relay comes online
@@ -186,7 +187,34 @@ the `busybox:1.37` image, which I removed. Nothing else was changed.
   - Verify: by hand, recorded here.
   - Files: none in the repos (the homelab's own config).
   - Size S.
-- [ ] **Task 7: Built-in lists** (D5, D6)
+  - Result (2026-11-10, with your OK):
+    - Done as listed in steps 3 to 5: the folder, `deploy/.env`, both
+      images built, and one Caddy block. The Caddyfile was backed up first,
+      and the certificate was issued at once.
+    - **Item 1 was wrong.** The router doesn't hairpin: on the LAN, the
+      public address answers with the router's own certificate. The other
+      sites work on the LAN only because Pi-hole points their names at the
+      homelab.
+    - You chose to keep the seed **home-only for now**, so the `relay.`
+      name got the same kind of Pi-hole local record as the others. The
+      Pi-hole config was backed up first. There's still no router change
+      and no port forward.
+    - The seed then came online through our relay by itself, and logged its
+      ticket (it's in Mesh-Node, `helper::SEEDS`).
+    - From this PC and from the homelab, the relay's `/ping` answers 200
+      with its Let's Encrypt certificate.
+    - Two helpers with only our relay and the seed: online in 3.1 s; a
+      code was held, then resolved to the right ID in 0.2 s.
+    - Nothing new is published. Neither container has a host port, and
+      Caddy serves one more name on its existing 443.
+    - **Home-only means:** the relay and seed are reachable on the home LAN
+      and over Tailscale, not from the internet. Friends outside home use
+      n0's public relays, and from there codes don't resolve (there's no
+      seed they can reach) until a VPS seed comes (map). The phone-hotspot
+      check waits for that.
+    - The undo steps (Docker, Caddy, Pi-hole) are in the session report,
+      not here, since they name the homelab.
+- [x] **Task 7: Built-in lists** (D5, D6)
   - What: our relay plus n0's as the default relay list; the seed's ticket
     as the built-in seed. Installers unchanged.
   - Accept: a fresh helper with no flags shows our relay as home from here
@@ -194,6 +222,20 @@ the `busybox:1.37` image, which I removed. Nothing else was changed.
   - Verify: `cargo test --workspace`; by hand.
   - Files: `crates/mesh-node/src/{main.rs,helper.rs}`.
   - Size XS.
+  - Result (2026-11-10, Mesh-Node `89d6d9f`):
+    - Without `--relay`, the list is ours, then n0's four
+      (`mesh_transport::public_relays`, from iroh's own hostnames).
+      Without `--seed` or `MESH_SEEDS`, the homelab seed is used.
+    - `MESH_SEEDS` set but empty now means no seeds at all. The process
+      tests set it, so they never reach the real seed.
+    - By hand from this PC, two fresh helpers with no flags: home relay
+      ours; a code held and resolved.
+    - A test checks that the built-in lists parse and that the seed's
+      ticket names our relay.
+    - All tests pass except one, `e2ee`'s
+      `groups_reach_members_and_removals_cut_off` ("no note from bob"). It
+      fails on this Linux box at `a7108dd`, before this change, so it isn't
+      from this task; it's left to the e2ee work.
 
 **Checkpoint C (module gate, needs you):** the spec's homelab check across
 two machines on different networks. It can share a sitting with
