@@ -1,6 +1,6 @@
 # Capability Map: Mesh (serverless Discord)
 
-Status: **APPROVED 2026-10-22.** `identity` and `transport` are built (their Windows checkpoints pending); `seed` is built (homelab deploy waiting on its Checkpoint B); `routing` is built (Checkpoint B by hand pending); `social` spec and plan approved 2026-11-10, being built (`design/mesh/PLAN-social.md`).
+Status: **APPROVED 2026-10-22.** `identity` and `transport` are built (their Windows checkpoints pending); `seed` is built (homelab deploy waiting on its Checkpoint B); `routing` is built (Checkpoint B by hand pending); `social` is built (Checkpoint B passed 2026-11-10); `e2ee` spec drafted 2026-11-10, waiting for review (`design/mesh/SPEC-e2ee.md`).
 
 **What Mesh is:** Discord without servers. Every install is a node. There is
 no account to register: your identity is a keypair, and your ID is your public
