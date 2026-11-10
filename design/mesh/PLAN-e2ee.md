@@ -162,7 +162,7 @@ module gate needs the homelab seed and the Windows PC.
       anyone leaving, or a device dropping off a list, does on the next send.
     - Key requests are answered only by the chain's own device, with the key
       from the asked-for index, and only to current member devices.
-- [ ] **Task 5: The store** (D12, D13)
+- [x] **Task 5: The store** (D12, D13)
   - What: `store.rs`. `<data>/e2ee/account` and one file per person or
     group, named by a keyed hash, sealed under the data key, written
     atomically; saved before ciphertext is returned and before plaintext is.
@@ -171,6 +171,14 @@ module gate needs the homelab seed and the Windows PC.
   - Verify: `cargo test -p mesh-e2ee`.
   - Files: `src/store.rs`.
   - Size M.
+  - Result (2026-11-10, Mesh-Node `5ba450d`): 3 tests; 146 workspace tests
+    pass. The account file lists the person and group files, so a missing
+    one is a damaged store, not an empty one. People and groups are written
+    before the account, so a crash never leaves the account naming a file
+    that isn't there. Each file's name is its associated data, so a file
+    copied over another is refused. State left by another device key (a
+    restored backup into the same folder) is cleared and started fresh
+    (Q5). The crash test was checked by breaking `save`: it fails then.
 
 ### Phase 2: Identity (Mesh-Node)
 
