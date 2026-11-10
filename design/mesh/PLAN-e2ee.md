@@ -129,7 +129,7 @@ module gate needs the homelab seed and the Windows PC.
       device and connection, and a handshake that finishes after its peer
       was removed isn't kept. A new transport test fails without the fix;
       the routing test then passed 5 runs in 5.
-- [ ] **Task 4: Sender chains** (D6, D7, D14)
+- [x] **Task 4: Sender chains** (D6, D7, D14)
   - What: `group.rs`. A chain per (conversation, sending device); key shares
     over the 1:1 sessions with the member list (see Architecture);
     `encrypt_group(conversation, members, kind, body)` → one ciphertext and
@@ -145,6 +145,23 @@ module gate needs the homelab seed and the Windows PC.
     `cargo test --release -p mesh-e2ee -- --ignored`.
   - Files: `src/group.rs`.
   - Size L.
+  - Result (2026-11-10, Mesh-Node `3bb3302`): 7 tests and the timing test;
+    143 workspace tests pass.
+    - Timing on this Windows PC (release): one message for 300 people on
+      600 devices 0.53 to 0.63 ms, a full rotation (600 key shares, each
+      starting an Olm session) 86 to 94 ms. Both inside criterion 4; the
+      Linux box still to be measured. The first try took 2.5 ms for one
+      message: decompressing each device key cost more than the encryption,
+      so the device keys now come from the list as they are.
+    - A chain's messages carry the sender's claim, as Olm's do, so a member
+      passing on someone else's chain key can't take their messages. Chains
+      are kept by chain and conversation, so a share naming the wrong
+      conversation can't shut out the right one.
+    - Only a member may change a test group's list or share a chain in it.
+      Adding someone doesn't rotate (they read from the next message on);
+      anyone leaving, or a device dropping off a list, does on the next send.
+    - Key requests are answered only by the chain's own device, with the key
+      from the asked-for index, and only to current member devices.
 - [ ] **Task 5: The store** (D12, D13)
   - What: `store.rs`. `<data>/e2ee/account` and one file per person or
     group, named by a keyed hash, sealed under the data key, written
