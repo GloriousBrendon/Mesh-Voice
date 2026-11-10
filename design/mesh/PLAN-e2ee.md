@@ -311,6 +311,13 @@ plus a Remove button under Linked devices (Task 8).
 3. Reply from B. It shows on A at once.
 4. A third window C restored from B's backup shows B's notes too.
 
+Result (2026-11-10, Windows, local seed): passed steps 1–3; A → B arrived
+"waited" when B reopened, B → A arrived live; both windows show "secure
+messages ready". Step 4 (window C) skipped. Nits: friend rows' buttons
+squeezed the name in the narrow Accounts panel (now on their own line,
+cdde664); A's note from B had no device name (A had no copy of B's device
+list yet).
+
 **Checkpoint C (module gate, needs the homelab and Windows):** the spec's
 two-machine check, in the same sitting as the other modules' gates.
 
