@@ -235,9 +235,13 @@ its device had seen); noted in the code.
     counter, 200 a batch, newest chat first, stored order within a chat,
     opened with the batch call.
   - Size M.
-- [ ] **Task 11: Commands** (spec *Client side*) *1:1 part done
-  2026-11-11 (Mesh-Node `4fe4e4c`, process test `tests/dm.rs`). Group
-  commands wait on the decision below.*
+- [x] **Task 11: Commands** (spec *Client side*) *Done 2026-11-11
+  (Mesh-Node `4fe4e4c` 1:1, `39060e1` groups; process tests in
+  `tests/dm.rs`). Group DMs go over the 1:1 sessions (your call, e2ee D6).
+  Two rules found while building, for your review: a member added later
+  gets the group's messages from their add on (its changes always, to know
+  who's in it); and a change goes to everyone in the version before or
+  after it, so a removal reaches the person removed.*
   - What: `dmList`, `dmOpen`, `dmSend`, `dmEdit`, `dmDelete`, `dmReact`,
     `dmRead`, `dmGroupCreate/Add/Remove/Leave/Rename`; the events
     `meshDmChats`, `meshDmMessages`, `meshDmNotify`; the errors. Group
@@ -311,15 +315,4 @@ Mesh-Node and 1,200 in Mesh-Voice.
 
 ## Open questions
 
-- **How are group-DM events encrypted, device by device?** (Found building
-  Task 11.) D5 sends each device what it hasn't acknowledged, but
-  `encrypt_group` encrypts for every member's devices at once and marks
-  each as having the chain's key. Sending its output to one device leaves
-  the rest marked as having a key they never got. Either:
-  - **(a)** a new e2ee call that encrypts a group message for one device,
-    spending one chain index per device per event; or
-  - **(b) recommended:** group-DM events go over the 1:1 sessions, device by
-    device, with the group named inside, as own-device sync does. Every
-    member is a friend of every other (Q1), so those sessions exist, and
-    groups are at most 10. Sender chains stay for Spaces. This changes
-    e2ee D6 for group DMs.
+None. (Group-DM encryption: decided 2026-11-11, (b).)
