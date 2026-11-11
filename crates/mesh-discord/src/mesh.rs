@@ -39,6 +39,16 @@ pub enum Event {
     /// A test note went out (`Node::note`): the group it went to, if any, and
     /// how many devices it was encrypted for.
     NoteSent { conversation: Option<String>, devices: usize },
+    /// A link code to type on the new device, once a seed holds where to
+    /// find this one (`Node::link_start`); `expires` is unix seconds.
+    Link { code: String, expires: u64 },
+    /// The new device typed the code: confirm linking the device with this name.
+    LinkConfirm(String),
+    /// The device with this name is linked; an `Identity` with it follows.
+    LinkDone(String),
+    /// On the new device: the identity arrived; ask for its username and a
+    /// new password (`Node::link_finish`).
+    LinkReceived(String),
     /// The helper exited; it's restarted by itself.
     Disconnected,
 }
@@ -383,6 +393,30 @@ impl Node {
             None => self.call("e2eeNote", &[ids, text]),
         }
     }
+    /// Shows a link code for a new device; answers with `Link`, then
+    /// `LinkConfirm` once the new device has typed it.
+    pub fn link_start(&self) {
+        self.call("linkStart", &[]);
+    }
+    /// On a device with no identity: joins the identity showing `code`,
+    /// naming this device; answers with `LinkReceived` or `Error`.
+    pub fn link_join(&self, code: &str, device_name: &str) {
+        self.call("linkJoin", &[code, device_name]);
+    }
+    /// Yes or no to the device `LinkConfirm` named; yes answers with
+    /// `LinkDone`, no with `Done`.
+    pub fn link_confirm(&self, yes: bool) {
+        self.call("linkConfirm", &[if yes { "true" } else { "false" }]);
+    }
+    /// Stops a link on either side; answers with `Done`.
+    pub fn link_cancel(&self) {
+        self.call("linkCancel", &[]);
+    }
+    /// On the new device: saves the identity under its username and this
+    /// device's own password; answers with `Identity` (unlocked) or `Error`.
+    pub fn link_finish(&self, username: &str, password: &str) {
+        self.call("linkFinish", &[username, password]);
+    }
     /// Removes one of our other linked devices by its key; answers with `Identity`.
     pub fn remove_device(&self, key: &str) {
         self.call("deviceRemove", &[key]);
@@ -466,6 +500,19 @@ fn line_event(line: &str) -> Option<Event> {
         "meshResolved" => serde_json::from_str(payload).ok().map(Event::Resolved),
         "meshSocial" => serde_json::from_str(payload).ok().map(Event::Social),
         "meshNote" => serde_json::from_str(payload).ok().map(Event::Note),
+        "meshLink" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(Event::Link { code: v["code"].as_str()?.to_owned(), expires: v["expires"].as_u64()? })
+        }
+        binding @ ("meshLinkConfirm" | "meshLinkDone") => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            let name = v["name"].as_str()?.to_owned();
+            Some(if binding == "meshLinkDone" { Event::LinkDone(name) } else { Event::LinkConfirm(name) })
+        }
+        "meshLinkReceived" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            Some(Event::LinkReceived(v["username"].as_str()?.to_owned()))
+        }
         "meshNoteSent" => {
             let v: serde_json::Value = serde_json::from_str(payload).ok()?;
             Some(Event::NoteSent { conversation: v["conversation"].as_str().map(str::to_owned), devices: v["devices"].as_u64()? as usize })
@@ -562,6 +609,15 @@ mod tests {
             panic!("no sent")
         };
         assert_eq!((conversation, devices), (None, 3));
+
+        let Some(Event::Link { code, expires }) = line_event(&line("meshLink", r#"{"code":"K7QM-3XPA","expires":99}"#)) else { panic!("no link") };
+        assert_eq!((code.as_str(), expires), ("K7QM-3XPA", 99));
+        let Some(Event::LinkConfirm(name)) = line_event(&line("meshLinkConfirm", r#"{"name":"Kitchen laptop"}"#)) else { panic!("no ask") };
+        assert_eq!(name, "Kitchen laptop");
+        let Some(Event::LinkDone(name)) = line_event(&line("meshLinkDone", r#"{"name":"Kitchen laptop"}"#)) else { panic!("no done") };
+        assert_eq!(name, "Kitchen laptop");
+        let Some(Event::LinkReceived(username)) = line_event(&line("meshLinkReceived", r#"{"username":"alice"}"#)) else { panic!("no identity") };
+        assert_eq!(username, "alice");
 
         assert!(line_event(&line("meshParsed", r#"{"kind":"id"}"#)).is_none());
         assert!(line_event("not json").is_none());

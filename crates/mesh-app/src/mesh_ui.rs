@@ -43,6 +43,12 @@ struct Form {
     restoring: bool,
     backup: Option<PathBuf>,
     backup_password: String,
+    /// Linking this install to another device instead ("I already have Mesh").
+    joining: bool,
+    link_code: String,
+    device_name: String,
+    /// The identity arrived; its username. Then only a password is asked.
+    received: Option<String>,
     /// The latest `idCheckPassword` verdict and its hint.
     verdict: Option<(bool, String)>,
     /// Sent; waiting for the helper.
@@ -87,6 +93,16 @@ struct Settings {
     pinging: Option<String>,
     /// The test note to send a friend.
     note_text: String,
+    /// Linking a new device from here.
+    link: Option<Linking>,
+}
+
+/// Linking a new device, as Your ID shows it.
+enum Linking {
+    /// The code to type there, and when it stops working (unix seconds).
+    Showing(String, u64),
+    /// The new device typed it: link the device with this name?
+    Asking(String),
 }
 
 /// The status choices: labels and `statusSet` arguments.
@@ -149,6 +165,15 @@ pub(crate) enum Msg {
     SendNote(String),
     /// Removes another of our linked devices, by its key.
     RemoveDevice(String),
+    /// Your ID: show a link code for a new device.
+    LinkStart,
+    /// Your ID: yes or no to the device that typed the code.
+    LinkConfirm(bool),
+    LinkCancel,
+    /// Onboarding: link to another device instead, or go back.
+    Join(bool),
+    LinkCode(String),
+    DeviceName(String),
 }
 
 /// Mesh is open: the identity is unlocked, or there's no `mesh-node` to ask.
@@ -194,7 +219,9 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
         }
         mesh::Event::Password { ok, message } if unlocked => m.settings.verdict = Some((ok, message)),
         mesh::Event::Password { ok, message } => m.form.verdict = Some((ok, message)),
-        mesh::Event::Error(error) if matches!(error.func.as_str(), "idCreate" | "idUnlock" | "idImport") => {
+        mesh::Event::Error(error)
+            if matches!(error.func.as_str(), "idCreate" | "idUnlock" | "idImport" | "linkJoin" | "linkFinish") || (error.func == "link" && !unlocked) =>
+        {
             let f = &mut m.form;
             f.busy = false;
             // The helper gives one message for every way unlocking can fail.
@@ -208,6 +235,9 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
         mesh::Event::Error(error) => {
             let s = &mut m.settings;
             s.busy = None;
+            if error.func.starts_with("link") {
+                s.link = None;
+            }
             if error.func == "netPingId" {
                 s.contact_pong = None;
             }
@@ -228,6 +258,10 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 "idChangePassword" => {
                     (s.old, s.new, s.confirm, s.verdict) = Default::default();
                     "Password changed. Use the new one from now on."
+                }
+                "linkConfirm" | "linkCancel" => {
+                    s.link = None;
+                    "Linking cancelled."
                 }
                 _ => {
                     s.export_password.clear();
@@ -300,6 +334,22 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 node.safety_number(&resolved.id);
             }
         }
+        mesh::Event::Link { code, expires } => {
+            m.settings.busy = None;
+            m.settings.link = Some(Linking::Showing(code, expires));
+        }
+        mesh::Event::LinkConfirm(name) => m.settings.link = Some(Linking::Asking(name)),
+        mesh::Event::LinkDone(name) => {
+            let s = &mut m.settings;
+            (s.busy, s.link) = (None, None);
+            s.note = Some(("linkConfirm".into(), true, format!("Linked {name}. It now has your identity and friends.")));
+        }
+        mesh::Event::LinkReceived(username) => {
+            let f = &mut m.form;
+            f.busy = false;
+            f.username = username;
+            f.received = Some(f.username.clone());
+        }
         mesh::Event::Disconnected => {
             m.node = None;
             m.identity = None;
@@ -329,6 +379,29 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
         Msg::Confirm(value) => f.confirm = value,
         Msg::Warned(on) => f.warned = on && can_continue(f),
         Msg::Restore(on) => *f = Form { restoring: on, ..Form::default() },
+        Msg::Join(on) => {
+            if !on && f.joining {
+                node.link_cancel();
+            }
+            *f = Form { joining: on, ..Form::default() };
+        }
+        Msg::LinkCode(value) => f.link_code = value,
+        Msg::DeviceName(value) => f.device_name = value,
+        Msg::LinkStart if s.busy.is_none() && s.link.is_none() => {
+            s.busy = Some("linkStart");
+            s.note = None;
+            node.link_start();
+        }
+        Msg::LinkConfirm(yes) if s.busy.is_none() => {
+            s.busy = Some("linkConfirm");
+            node.link_confirm(yes);
+        }
+        Msg::LinkCancel => {
+            s.link = None;
+            s.busy = None;
+            node.link_cancel();
+        }
+        Msg::LinkStart | Msg::LinkConfirm(_) => {}
         Msg::PickBackup => {
             return Task::perform(
                 async {
@@ -351,6 +424,18 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
             f.error = None;
             match (onboarding, f.restoring, &f.backup) {
                 (false, ..) => node.unlock(&f.username, &f.password),
+                (true, ..) if f.joining && f.received.is_some() => {
+                    if !can_continue(f) {
+                        return Task::none();
+                    }
+                    node.link_finish(&f.username, &f.password)
+                }
+                (true, ..) if f.joining => {
+                    if !can_join(f) {
+                        return Task::none();
+                    }
+                    node.link_join(f.link_code.trim(), f.device_name.trim())
+                }
                 (true, true, Some(path)) if can_restore(f) => {
                     node.import(&path.to_string_lossy(), &f.username, &f.backup_password, &f.password)
                 }
@@ -562,6 +647,13 @@ fn can_continue(f: &Form) -> bool {
     !f.username.trim().is_empty() && f.verdict.as_ref().is_some_and(|(ok, _)| *ok) && f.password == f.confirm
 }
 
+/// The join form has something shaped like a link code (`XXXX-XXXX`) and a
+/// name; the helper checks the code itself.
+fn can_join(f: &Form) -> bool {
+    let code: String = f.link_code.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    code.chars().count() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) && !f.device_name.trim().is_empty()
+}
+
 fn can_restore(f: &Form) -> bool {
     f.backup.is_some() && !f.backup_password.is_empty() && can_continue(f)
 }
@@ -723,6 +815,25 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
                 row![back(Msg::Restore(false)), submit("Restore", can_restore(f))].spacing(8),
             ]
         }
+        Some(State::None) if f.joining && f.received.is_some() => column![
+            title("link · a password for this device"),
+            text(format!("Linked to \"{}\". Each device has its own password: pick one for this one. It can't be recovered either.", f.username))
+                .size(13)
+                .color(p.text()),
+            field("PASSWORD FOR THIS DEVICE", &f.password, Msg::Password, true),
+            field("PASSWORD AGAIN", &f.confirm, Msg::Confirm, true),
+            hint(&f.verdict, &f.password, &f.confirm, p),
+            row![back(Msg::Join(false)), submit("Finish", can_continue(f))].spacing(8),
+        ],
+        Some(State::None) if f.joining => column![
+            title("link to your other device"),
+            text("On a device that already has your identity, open Your ID and choose Link a device. Type the code it shows here.")
+                .size(13)
+                .color(p.text()),
+            field("LINK CODE", &f.link_code, Msg::LinkCode, false),
+            field("A NAME FOR THIS DEVICE", &f.device_name, Msg::DeviceName, false),
+            row![back(Msg::Join(false)), submit("Link", can_join(f))].spacing(8),
+        ],
         Some(State::None) if !f.warned => column![
             title("make your identity · 1 of 2"),
             text("No email, no phone number. Pick a username and a password; you'll need both every time Mesh starts.")
@@ -734,6 +845,7 @@ pub(crate) fn view(state: &App) -> Element<'_, Message> {
             hint(&f.verdict, &f.password, &f.confirm, p),
             submit("Continue", can_continue(f)),
             link_button("I have a backup", Msg::Restore(true), p),
+            link_button("I already have Mesh on another device", Msg::Join(true), p),
         ],
         Some(State::None) => column![
             title("make your identity · 2 of 2"),
@@ -958,6 +1070,23 @@ pub(crate) fn manage(state: &App) -> Element<'_, Message> {
         devices = devices.push(line);
     }
     devices = devices.extend(note("deviceRemove"));
+    devices = match &s.link {
+        None => devices.push(action("Link a device", "linkStart", Some(Msg::LinkStart))),
+        Some(Linking::Showing(code, expires)) => {
+            let until = Local.timestamp_opt(*expires as i64, 0).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
+            devices
+                .push(ui::mono_bold(code.clone(), 22.0, p.text_bright()))
+                .push(text(format!("On the new device, choose \"I already have Mesh\" and type this code. It works once, until {until}.")).size(13).color(p.text()))
+                .push(action("Cancel", "linkCancel", Some(Msg::LinkCancel)))
+        }
+        Some(Linking::Asking(name)) => devices
+            .push(ui::sans(format!("Link \"{name}\"?"), 14.0, Weight::Semibold, p.text_bright()))
+            .push(text("It gets your identity, friends and messages. Only say yes if you typed the code on it yourself.").size(13).color(p.text()))
+            .push(row![action("Link", "linkConfirm", Some(Msg::LinkConfirm(true))), action("Cancel", "linkCancel", Some(Msg::LinkConfirm(false)))].spacing(8)),
+    };
+    for func in ["link", "linkStart", "linkConfirm"] {
+        devices = devices.extend(note(func));
+    }
 
     let keep = column![
         switch_row(
@@ -1177,6 +1306,16 @@ fn friends_view(state: &App) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joining_needs_a_code_and_a_name() {
+        let mut f = Form { link_code: "k7qm-3xpa".into(), ..Form::default() };
+        assert!(!can_join(&f), "no device name");
+        f.device_name = "Kitchen laptop".into();
+        assert!(can_join(&f));
+        f.link_code = "K7QM 3XP".into();
+        assert!(!can_join(&f), "one character short");
+    }
 
     #[test]
     fn continue_needs_a_good_matching_password() {
