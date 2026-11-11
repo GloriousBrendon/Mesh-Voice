@@ -258,7 +258,7 @@ its device had seen); noted in the code.
     10 GB cache, oldest-opened first, files you sent last; a delete drops
     the blob.
   - Size M.
-- [ ] **Task 14: The process test** (`tests/dm.rs`)
+- [x] **Task 14: The process test** (`tests/dm.rs`, `the_process_test`, about 80 s)
   - What: the spec's process test: live chat, edits, deletes, reactions;
     waiting while both lock; Bob's second device getting a fresh session
     and then Alice's message; own-device catch-up; a restored device's
