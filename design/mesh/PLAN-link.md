@@ -1,6 +1,7 @@
 # Plan: device linking over the network
 
-**Status: DRAFT 2026-11-11, plan only, for review.** Audit finding 16. It
+**Status: approved 2026-11-11 (L1 and L2, with L1 changed to Argon2id).
+Tasks 1–5 being built; stop at task 6.** Audit finding 16. It
 wires identity's link state machines (`link.rs`, identity D8 and *Device
 linking*) into the helper and Mesh-Voice, to be built before `dm`'s
 two-machine check. Existing device **E**, new device **N**.
@@ -8,9 +9,13 @@ two-machine check. Existing device **E**, new device **N**.
 ## Design (decisions to approve)
 
 - **L1. Rendezvous through an ordinary address record on the seed.** E puts
-  one record under `lookup = derive(link code, "mesh/v1/link-lookup")`,
-  slot 0, expiring in 5 minutes (`LINK_CODE_LIFETIME`). Its ciphertext is
-  E's link-node address sealed under `derive(link code, "mesh/v1/link-seal")`.
+  one record, expiring in 5 minutes (`LINK_CODE_LIFETIME`), holding E's
+  link-node address sealed with XChaCha20-Poly1305. **Its lookup ID and seal
+  key come from the link code through the same Argon2id derivation friend
+  codes use** (`code.rs`: 64 MiB, 5 passes, about 100 ms), with its own salt
+  `mesh/v1/link-code`, never a fast hash. A 40-bit code under a fast hash
+  would let the seed's operator find the code within the 5 minutes and link
+  as the new device. Under Argon2id that's about 3,500 CPU-years per code.
   The seed reads only the outer header (lookup, slot, expiry), as it does
   for every address record. So: **no new seed service and no seed change.**
   A guesser gets the address only by guessing a 40-bit code within
@@ -32,10 +37,13 @@ two-machine check. Existing device **E**, new device **N**.
 
 ## Tasks
 
-1. **Link record** (`mesh-node/src/routing.rs`): derive the lookup and seal
-   key from a link code, and seal and open a node address in the address
-   record's outer format. *Tests:* round trip; the wrong code doesn't open
-   it; the seed's `addr_outer` accepts it; it's within `MAX_AHEAD`.
+1. **Link record** (`mesh-identity/src/link.rs`, next to the code
+   derivation it shares): derive the lookup and seal key from a link code
+   with Argon2id, and seal and open a node address in the address record's
+   outer format. *Tests:* round trip; the wrong code doesn't open it;
+   `addr_outer` accepts it, within the seed's `MAX_AHEAD`; **the derivation
+   is the slow one** (it equals Argon2id with the friend-code settings and
+   the link salt, and differs from a friend code's).
 2. **E side** (`mesh-node/src/link.rs`, new, a child module of the helper as
    `social.rs` is):
    - `linkStart()` answers `meshLink {code, expires}`;
