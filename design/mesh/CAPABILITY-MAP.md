@@ -98,4 +98,8 @@ chat while both of you are online. `mailbox` adds offline delivery.
 
 ## Open questions
 
-None at the map level. Each module spec has its own.
+- **Move to a new ID?** Settle before `spaces`. Every device holds the root
+  secret (identity D2), so a removed device that's still unlocked can sign
+  itself a new device key and get back in. The only real fix is a signed
+  "I've moved to this new ID" message that friends follow (and Spaces, once
+  they exist). Each module spec has its own questions too.

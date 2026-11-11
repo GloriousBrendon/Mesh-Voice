@@ -51,7 +51,7 @@ What this module delivers:
 | # | Decision | Why |
 |---|---|---|
 | D1 | **Root key plus device keys.** The ID is the root public key. Each device has its own Ed25519 device key, certified by a root-signed device certificate. | iroh dials one key per running endpoint, so two of your devices online at the same time need different keys. Per-device keys also make removing a lost device possible. This settles the old doc's open question (§7). |
-| D2 | **The root secret is copied to every linked device** (encrypted in each keystore). | "Linking needs one existing device online" means any device must be able to link. If only the first device held the root key, losing it would freeze your devices forever. Cost: anyone who steals a device and its username and password holds your identity, and ID rotation is out of v1. Hence the strict password policy (D11). **Decided (Q1).** |
+| D2 | **The root secret is copied to every linked device** (encrypted in each keystore). | "Linking needs one existing device online" means any device must be able to link. If only the first device held the root key, losing it would freeze your devices forever. Cost: anyone who steals a device and its username and password holds your identity, and ID rotation is out of v1. **Removing a device can't be made to stick:** a removed device that's still unlocked (stolen while open, or with Keep unlocked on and the thief past the OS login) still holds the root secret, so it can sign itself a new device key and get back in. Removal stops only a device whose keystore stays locked. *Wording added 2026-11-11 (audit finding 11).* Hence the strict password policy (D11). **Decided (Q1).** |
 | D3 | ID text is **bech32m** with prefix `mesh`: `mesh1` + 52 characters + a 6-character checksum (about 63 in all). | The checksum catches typos in copy-pasted IDs. It's the format the map already names. |
 | D4 | Friend codes are **8 Crockford base32 characters (40 bits)**, shown as `XXXX-XXXX`. Input ignores case and hyphens, and reads `I`/`L` as `1` and `O` as `0`. | Easy to read aloud, with no ambiguous characters. 40 bits plus a slow key derivation and rate limits make guessing too expensive (see Q3). |
 | D5 | A code's record is **encrypted and found under keys derived from the code**, so whoever stores it (a seed, or the DHT later) can't tell which ID it belongs to without breaking the code. | Seeds hold ciphertext only (map: seed hardening). |
@@ -152,7 +152,8 @@ What this module delivers:
 - **Keep unlocked** (D12): with the toggle on, the data key sits in the OS
   keyring under the service name `mesh-node` and an entry named by a random
   per-install value. The unlock screen is skipped while that entry exists and
-  opens the keystore.
+  opens the keystore. So anyone past the OS login holds the root secret, and
+  removing that device won't keep them out (D2).
 - **Backup**: `export(path, username, password)` writes the same format with
   a fresh salt, holding the root key and username, and is opened with the
   same username and password. A restored device makes a new
