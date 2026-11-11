@@ -291,8 +291,13 @@ seed. Live chat both ways, edit, delete, react, a picture, and a message
 sent while the other window is closed.
 
 - [ ] **Task 18: Files and entry points**: pictures from the preview
-  first, then `dmFetch`; other files open on click; **Message** on friend
-  rows and profiles; **New group**. Size M.
+  first, then `dmFetch`; **Message** on friend rows and profiles; **New
+  group**. Size M. **Clicking a received file never runs it:** pictures
+  and other known-safe types (images, audio, video, PDF, plain text) open
+  in their app; anything else is shown in its folder. The check is on
+  the file's type as Mesh reads it, not the name the sender gave. Test:
+  a received `.exe`, `.bat`, `.sh` or `.lnk` is shown in its folder and
+  never opened.
 - [ ] **Task 19: Retire test notes** (Q4): the buttons go; the helper keeps
   `e2eeNote` for its tests. Size S.
 
