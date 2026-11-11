@@ -47,7 +47,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
 
 ### Phase 1: `mesh-dm` (Mesh-Node)
 
-- [ ] **Task 1: The event format** (D1, D14)
+- [x] **Task 1: The event format** (D1, D14)
   - What: `crates/mesh-dm`, `event.rs`. Version, event ID, sender time,
     `seq`, `n`, and one of `Text` (with reply and attachments), `Edit`,
     `Delete`, `React`, `Read`, `Group`. The limits as constants: 4,000
@@ -55,7 +55,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
   - Accept: round trip for each kind; oversized, unknown and truncated
     events are refused.
   - Verify: `cargo test -p mesh-dm event`. Size S.
-- [ ] **Task 2: Order and the `seq` checks** (D2)
+- [x] **Task 2: Order and the `seq` checks** (D2)
   - What: `chat.rs`, the order part. Order by (`seq`, event ID). The
     sender's next `seq`: one more than the highest held that isn't ahead of
     its clock. The three checks, against the reader's clock and the
@@ -72,7 +72,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     arrives first, while honest events out of order are all taken; late
     and low counts as unread; an old sender time can't move a message up.
   - Verify: `cargo test -p mesh-dm chat`. Size M.
-- [ ] **Task 3: Edits, deletes, reactions** (D3, D4)
+- [x] **Task 3: Edits, deletes, reactions** (D3, D4)
   - What: `chat.rs`. Only the author edits or deletes; the newest edit
     wins; a delete leaves a tombstone and takes its edits with it; delete
     for me; reactions per (target, person, emoji); anything before its
@@ -80,7 +80,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
   - Accept: an edit or reaction before its target; a delete beats a late
     copy and a late edit; someone else's edit is ignored.
   - Verify: `cargo test -p mesh-dm chat`. Size M.
-- [ ] **Task 4: Group changes** (D7)
+- [x] **Task 4: Group changes** (D7)
   - What: `chat.rs`. Changes chained by `after`; accepted only from a
     member of the version they follow, with the right to make that change;
     a change waits for its `after`; forks by the creator rule.
@@ -89,7 +89,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     isn't the branch's first; both branches with creator changes; the same
     winner in any arrival order.
   - Verify: `cargo test -p mesh-dm chat`. Size M.
-- [ ] **Task 5: The store** (D11)
+- [x] **Task 5: The store** (D11)
   - What: `store.rs`. A folder per chat named by a keyed hash, segments of
     512 sealed events under `mesh/v1/dm-store`, the segment name and
     position as associated data, an index file per chat. Appends are synced
@@ -99,7 +99,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     leaves neither text on disk (the test greps); a damaged or swapped file
     is refused; a crash mid-append keeps everything before it.
   - Verify: `cargo test -p mesh-dm store`. Size L.
-- [ ] **Task 6: Counters** (D5, D8)
+- [x] **Task 6: Counters** (D5, D8)
   - What: `sync.rs`. Each stored event's number; per target device, the
     number up to which it acknowledged everything; what to send it next, in
     stored order; for a friend's device only your own events in chats with
@@ -111,7 +111,7 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     counter; past the limits, events are marked not delivered to that
     device.
   - Verify: `cargo test -p mesh-dm sync`. Size M.
-- [ ] **Task 7: Files** (D12)
+- [x] **Task 7: Files** (D12)
   - What: `blob.rs`. A random key per file, 64 KiB chunks sealed with the
     chunk number as associated data, the whole file's blake3 hash and size.
   - Accept: round trip; a bad chunk is refused as it arrives; a cut-short
@@ -119,6 +119,12 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
   - Verify: `cargo test -p mesh-dm blob`. Size S.
 
 **Checkpoint A (short report):** `mesh-dm` complete, its tests pass.
+
+Result (2026-11-11, Mesh-Node `c4f9d05` to `7fbcba8`): reached. 40 tests in
+`mesh-dm`, all workspace checks pass. One change from the plan: group changes
+live in their own `group.rs`, which `chat.rs` calls, to keep `chat.rs` to
+order and folding. A Read clears every late mark (it can't say which ones
+its device had seen); noted in the code.
 
 ### Phase 2: the batch decrypt (Mesh-Node)
 
