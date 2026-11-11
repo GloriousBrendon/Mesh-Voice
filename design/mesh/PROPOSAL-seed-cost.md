@@ -1,7 +1,9 @@
 # Proposal: a cost for anonymous seed callers
 
-**Status: DRAFT, for review. Nothing is built.** Audit finding 3, part 3.
-Parts 1 and 2 are done (seed D8).
+**Status: ON HOLD (2026-11-11), not rejected. Nothing is built.** Audit
+finding 3, part 3. Parts 1 and 2 are done (seed D8). The decision waits for
+real numbers: the seed's hourly log now counts callers that arrived direct,
+relayed, or both ways (see the end).
 
 ## The problem left
 
@@ -83,3 +85,24 @@ check where streams are dispatched, minting in the helper. Tests:
    machine timing is in.
 3. Build it before the VPS seed (finding 6). I recommend **yes**, as the
    audit says.
+
+## Measuring first (added 2026-11-11)
+
+- The seed's hourly line ends with `callers N direct, N relayed, N both
+  ways`, counted by throwaway key in memory, logged as counts only.
+- **A caller that ends up direct is counted as relayed on its first
+  requests.** Clients dial the seed from its ticket, which has only a relay
+  URL, so a new connection starts on the relay and moves to a direct path
+  only once hole punching works, a moment later. The seed takes the path as
+  it is when each stream arrives. Because the seed closes idle connections
+  after 30 s (D8b), most bursts start on a fresh connection, so most first
+  requests land in the relayed bucket. The "both ways" count will show how
+  often.
+- **Smallest fix, proposed, not built:** the seed remembers, in memory for
+  the hour, the network each throwaway key was last seen on directly, and
+  charges that key's relayed requests to that network. A key's very first
+  requests still count as relayed, so fresh keys (the attack) gain nothing.
+  About 15 lines, beside the rate counters. Cost: the seed holds key →
+  network for an hour, where today it only counts per key and per network
+  separately (D10 says rate counters live in memory "by throwaway device key
+  and by network"; this pairs them).

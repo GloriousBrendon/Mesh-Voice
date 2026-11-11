@@ -1,7 +1,12 @@
 # Plan: device linking over the network
 
 **Status: approved 2026-11-11 (L1 and L2, with L1 changed to Argon2id).
-Tasks 1–5 being built; stop at task 6.** Audit finding 16. It
+Tasks 1–5 built 2026-11-11 (Mesh-Node d253e21, a1b4a21; Mesh-Voice
+23b1f49). Stopped at task 6, the by-hand check (hard stop).**
+
+Built as planned, with two small changes: the link record lives in
+`mesh-identity/src/link.rs` (next to the derivation it shares), and the
+code shows its end time ("until 14:05") rather than a ticking countdown. Audit finding 16. It
 wires identity's link state machines (`link.rs`, identity D8 and *Device
 linking*) into the helper and Mesh-Voice, to be built before `dm`'s
 two-machine check. Existing device **E**, new device **N**.
