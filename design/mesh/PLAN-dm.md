@@ -227,12 +227,17 @@ its device had seen); noted in the code.
       syncs and the chat's small index rewritten per send). Fine for a
       person typing; a batch of sends should share one sync (Task 11).
     - A debug build takes 33 s: unoptimised crypto. Only release counts.
-- [ ] **Task 10: Own-device sync** (D8)
+- [x] **Task 10: Own-device sync** (D8) *Done 2026-11-11 (Mesh-Node
+  `97a8f9b`, `31a9582`): over the self pair's conversation, each event
+  forwarded with its chat, author and first arrival; "read" and "delete for
+  me" never go to friends.*
   - What: the same path aimed at your own devices: everything after the
     counter, 200 a batch, newest chat first, stored order within a chat,
     opened with the batch call.
   - Size M.
-- [ ] **Task 11: Commands** (spec *Client side*)
+- [ ] **Task 11: Commands** (spec *Client side*) *1:1 part done
+  2026-11-11 (Mesh-Node `4fe4e4c`, process test `tests/dm.rs`). Group
+  commands wait on the decision below.*
   - What: `dmList`, `dmOpen`, `dmSend`, `dmEdit`, `dmDelete`, `dmReact`,
     `dmRead`, `dmGroupCreate/Add/Remove/Leave/Rename`; the events
     `meshDmChats`, `meshDmMessages`, `meshDmNotify`; the errors. Group
@@ -306,4 +311,15 @@ Mesh-Node and 1,200 in Mesh-Voice.
 
 ## Open questions
 
-None.
+- **How are group-DM events encrypted, device by device?** (Found building
+  Task 11.) D5 sends each device what it hasn't acknowledged, but
+  `encrypt_group` encrypts for every member's devices at once and marks
+  each as having the chain's key. Sending its output to one device leaves
+  the rest marked as having a key they never got. Either:
+  - **(a)** a new e2ee call that encrypts a group message for one device,
+    spending one chain index per device per event; or
+  - **(b) recommended:** group-DM events go over the 1:1 sessions, device by
+    device, with the group named inside, as own-device sync does. Every
+    member is a friend of every other (Q1), so those sessions exist, and
+    groups are at most 10. Sender chains stay for Spaces. This changes
+    e2ee D6 for group DMs.
