@@ -43,6 +43,53 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
   `chacha20poly1305` are in the workspace. Mesh-Voice's `image` crate makes
   previews.
 
+## Saving and loading (added 2026-11-11, before Task 9)
+
+Everything lives under `<data>/dm/`, sealed as the store's segments are.
+The rule: storing one event appends; nothing that grows with history is
+ever rewritten for it.
+
+- **What's stored per event.** A chat segment's record is the store's
+  opaque bytes; the dm layer makes it `received u64 (ms) | sender person
+  [32] | sender device [32] | event`. A reopened chat therefore shows the
+  same times (D2's display clamp uses `received`) and knows who sent each
+  event, since envelopes aren't kept. Reloading goes through
+  `Chat::restore`, which replays stored events in stored order without
+  judging them again; one still more than 5 minutes ahead of the clock
+  waits as before.
+- **The `Log` (sync.rs)** is one more append-only stream, in the same
+  sealed segment format, under a reserved name: one record of about 110
+  bytes per stored event, appended in the same call as the event. At
+  unlock it's read once, whole, to rebuild the numbering and the set of
+  every event ID held: 100,000 events is about 11 MB to open, and 1.6 MB of
+  IDs in memory. That set is what refuses a late copy of any old message,
+  deleted or not, before it reaches a chat.
+- **`Counters` (sync.rs)** are one small sealed file, written atomically
+  after each batch of acks, not each event. Its size depends on the number
+  of devices and the acks in flight past a failure (at most a batch), never
+  on history.
+- **Deletion markers.** Each chat folder gets an append-only sealed list of
+  deleted event IDs (16 bytes each), read whole when the chat opens. A
+  late copy, edit or reaction of a message deleted long ago is refused
+  from it (`Taken::Ignored`) and never written, though the message's own
+  segment isn't loaded.
+- **The index** (D11) also keeps the read marker's position and, per
+  sending device, the highest `n` seen with its `seq`. With only the
+  newest segment loaded, "late and low" still compares against the real
+  marker, and "out of step" checks a new event against that device's
+  highest `n` as well as against the loaded window. That's weaker than the
+  full check against history (a forged event between two old ones isn't
+  caught), and costs nothing honest: an old event arriving late from one
+  device still has a lower `seq` than that device's newest.
+- **Edits and reactions to old messages** whose segment isn't loaded wait,
+  stored, and fold in when that segment is read. One from someone who
+  may not make it is wiped then (`take_scrub`), as now.
+
+**Spec change needed: D11's wording only.** It lists segments and an index
+per chat. It would add the device-wide `Log` and `Counters` files, the
+per-chat deletion list, the stored record's received time and sender, and
+the index's read marker and per-device highest `n`. No decision changes.
+
 ## Task list
 
 ### Phase 1: `mesh-dm` (Mesh-Node)
@@ -147,7 +194,9 @@ its device had seen); noted in the code.
     reader answers `ok`/`failed` after storing; a fresh session from a
     device resends everything it hasn't acknowledged; sending then sent.
   - Accept: unit tests over the frame and ack logic; the e2ee test notes
-    still pass.
+    still pass; a chat reopened from disk shows the same times and refuses
+    a late copy of a message deleted before the reopen (*Saving and
+    loading*).
   - Size L.
 - [ ] **Task 9b: Measure the intake** (criterion 4, early)
   - What: the `--ignored` intake test from Task 15, run now: one device
