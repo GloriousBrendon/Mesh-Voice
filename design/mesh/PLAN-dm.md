@@ -247,10 +247,13 @@ its device had seen); noted in the code.
     `meshDmChats`, `meshDmMessages`, `meshDmNotify`; the errors. Group
     membership checks friendship with every member (D6, Q1).
   - Size M.
-- [ ] **Task 12: Typing** (D10)
+- [x] **Task 12: Typing** (D10) *Done 2026-11-11 (Mesh-Node `27b0798`):
+  its own `typing` service, at most one signal per device every 2 s.*
   - What: the `typing` service; `dmTyping` and `meshDmTyping`, shown 7 s.
   - Size S.
-- [ ] **Task 13: Files** (D12, D13)
+- [x] **Task 13: Files** (D12, D13) *Done 2026-11-11 (Mesh-Node `7eee4b2`).
+  Two gaps, both noted in the code: a fetch asks devices one after another,
+  not 8 at once; and the preview travels as hex in `meshDmMessages`.*
   - What: the `blob` service; `dmSendFile`, `dmFetch`, `meshDmFile`; the
     10 GB cache, oldest-opened first, files you sent last; a delete drops
     the blob.
