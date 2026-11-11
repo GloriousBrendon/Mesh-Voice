@@ -256,12 +256,15 @@ its device had seen); noted in the code.
 - [ ] **Task 15: Measurements** (criteria 4, 5)
   - What: the `--ignored` tests: open a 100,000-message chat (target under
     50 ms), the intake again (Task 9b) with sync in place, and the release
-    binary's growth (target under 300 KB). Results recorded here.
+    binary's growth (target under 300 KB). Also **unlock time and memory
+    with 100,000 and 1,000,000 events in the history**: the log is read
+    whole at unlock and held in memory (about 150 bytes an event by
+    estimate, so 15 MB and 150 MB). Results recorded here.
   - Size S.
 
-**Checkpoint B (by hand, you):** two windows on one machine with the home
-seed. Live chat both ways, edit, delete, react, a picture, and a message
-sent while the other window is closed.
+*Checkpoint B moved to after Task 17 (2026-11-11): without the screens it
+could only be done by typing JSON commands into two helpers, which checks
+nothing the process test doesn't.*
 
 ### Phase 4: Mesh-Voice
 
@@ -271,6 +274,10 @@ sent while the other window is closed.
   the existing timeline and composer (`TimelineMessage`, `web_id` = event
   ID), replies, edits, reactions, the typing line, unread badges and
   sounds, a "sending" mark. Size L.
+**Checkpoint B (by hand, you), after Task 17:** two windows on one machine with the home
+seed. Live chat both ways, edit, delete, react, a picture, and a message
+sent while the other window is closed.
+
 - [ ] **Task 18: Files and entry points**: pictures from the preview
   first, then `dmFetch`; other files open on click; **Message** on friend
   rows and profiles; **New group**. Size M.
@@ -284,7 +291,7 @@ the Windows PC and the Linux box. Across networks it needs the VPS seed
 ## Order and size
 
 Tasks 1–7 can go in any order after Task 1; Task 8 before Task 9; Task 9b
-straight after Task 9; Tasks 10–15 in order; Phase 4 after Checkpoint B. Roughly 4,000 lines in
+straight after Task 9; Tasks 10–15 in order; Phase 4 after Task 15, with Checkpoint B after Task 17. Roughly 4,000 lines in
 Mesh-Node and 1,200 in Mesh-Voice.
 
 ## Risks and mitigations
