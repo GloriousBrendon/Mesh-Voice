@@ -1,9 +1,10 @@
 # Spec: `dm` (Mesh)
 
-Status: **DRAFT 2026-11-10, for review.** Answer Q1–Q4 at the end (each has
-a recommendation) before any plan or code. *Revised 2026-11-11 with the
-audit's review (A–G): D2, D3, D5, D7, D8, D10, D11 and D12 changed, and D16
-(keys for someone away) added.* Module 7 of the build order in
+Status: **DRAFT 2026-11-10, for review.** Q1–Q4 are decided (as
+recommended, 2026-11-11). No plan or code until the spec is approved.
+*Revised 2026-11-11 with the audit's review (A–G): D2, D3, D5, D7, D8, D10,
+D11 and D12 changed. Review C's keys-only record moved to a note for
+`mailbox`; dm doesn't need it.* Module 7 of the build order in
 [CAPABILITY-MAP.md](CAPABILITY-MAP.md). Depends on
 [`social`](SPEC-social.md) (built; Checkpoint B passed) and
 [`e2ee`](SPEC-e2ee.md) (built; Checkpoint B passed). The map also lists
@@ -72,12 +73,12 @@ Discord, and test notes are retired.
 | # | Decision | Why |
 |---|---|---|
 | D1 | **One event format for everything in a chat.** A `dm` event is the body of an e2ee `Kind::Message` (e2ee D2). It has a version, a 16-byte random event ID, the sender's time, and one of: `Text`, `Edit`, `Delete`, `React`, `Read`, `Group` (a group change). It's encoded with `postcard`, which the keystore already uses. | The envelope already authenticates the sender, device and conversation (e2ee D10, D11), so the event doesn't need to repeat them or carry its own signature. One kind of thing to store, sync and replay. `spaces` can reuse it. |
-| D2 | **Ordering without a server.** Each event carries a per-chat counter, `seq`: one more than the highest `seq` its sender has seen in that chat, theirs or anyone's. A chat is shown in order of (`seq`, event ID). The sender's time is for display only; a time more than 5 minutes after it was received shows as the received time. Edits, deletes and reactions point at their target's event ID. One that arrives before its target is kept and applied when the target comes. *Changed 2026-11-11 (review F): sender time alone let an old time slide a message into history where nobody looks.* | Nobody holds the one true order (the map). A counter that only moves forward puts a message after everything its sender had seen, whatever their clock says. A sender can still pick a big `seq`, but that only moves their message to the bottom, where it's seen. |
+| D2 | **Ordering without a server.** Each event carries two counters. `seq` is per chat: one more than the highest `seq` its sender has seen in that chat, theirs or anyone's. `n` is per sending device: its own events in that chat, 1, 2, 3. A chat is shown in order of (`seq`, event ID). The sender's time is for display only; a time more than 5 minutes after it was received shows as the received time. **A reader checks `seq` both ways:** (1) **Too high:** a `seq` more than 1,000,000 above the highest it holds in that chat is refused, so nobody can run the counter out (a `u64`). (2) **Out of step:** for one sending device, a higher `n` must have a higher `seq`. An event that breaks that against one already held is refused. Honest clients never break it, whatever order events arrive in. (3) **Late and low:** an event that arrives with a `seq` at or below your read marker (D9) still counts as unread and is marked *arrived late*, so it can't hide in old history. Refused events are acknowledged `ok` (so they aren't sent again), dropped and counted (D14). Edits, deletes and reactions point at their target's event ID. One that arrives before its target is kept and applied when the target comes. *Changed 2026-11-11 (review F, then your review): sender time alone let an old time slide a message into history; `seq` can be forged the same way, hence the checks.* | Nobody holds the one true order (the map). A counter that only moves forward puts a message after everything its sender had seen, whatever their clock says. The checks are per sending device, not per person, and use `n` rather than arrival order: a person's two devices send with their own counters, and own-device sync (D8) delivers in batches newest chat first, so honest events often arrive out of order. Rule 3 also suits honest late messages, which should be unread anyway. A forged event may be refused on one reader and shown on another; only a modified client's event can differ that way. |
 | D3 | **Only the author edits or deletes.** An edit replaces the text and marks it "(edited)". The newest edit by sender time wins. A delete removes the text and attachments from the store on every device that gets it, **and every `Edit` that points at it**, in whichever segment each is, leaving a tombstone so a late copy (of the message or an edit) can't bring it back. **Delete for me** removes it on your own devices only. | It's what Discord does in DMs. A tombstone is what makes delete stick when copies arrive late and out of order. Edits hold the new text, often in a later segment, so scrubbing only the original would leave the edited text on disk (review E). |
 | D4 | **Reactions** are `React { target, emoji, on }` per person. The newest one by sender time for each (target, person, emoji) wins. Up to 20 different emoji per message. | Each person controls their own reactions, so there's nothing to merge. |
 | D5 | **Delivery and own-device sync are one mechanism: events wait, not envelopes.** Every event is in the sealed store (D11) anyway. Each device numbers the events it stores, 1, 2, 3, and so on. For every device it sends to (each friend's device, and your own other devices), it remembers a counter: the number up to which that device has acknowledged everything. When a connection to that device opens, it encrypts what's after the counter on the current session (or chain) and sends it over the `e2ee` service. To a friend's device it sends only your own events in chats with them, for up to 30 days and 2,000 events; past that they're marked as not delivered to that device. To your own devices it sends everything (D8). A friend's device that's new to you starts at the lowest counter of that friend's other devices, so a reinstall or a new device misses nothing. **Acknowledged** means the reader has opened *and stored* the event: it answers each envelope `ok` or `failed`. The counter moves past an event once it and everything before it are `ok`. Anything not `ok` is encrypted again and sent again with the same event ID (event IDs remove duplicates). **When a fresh session arrives from a device** (e2ee D4: the reader couldn't open a first message, and that first message is dropped), the sender at once sends everything that device hasn't acknowledged on the new session. A message shows **sending** until at least one of the other person's devices has acknowledged it `ok`, then **sent**. *Changed 2026-11-11 (review A and B).* | An envelope is tied to one device and one session. While it waits, the reader may add a device, reinstall or rotate keys, and then a stored envelope is useless or can't be made at all. Encrypting when you send avoids that, and one counter then covers delivery, retry and own-device catch-up. "Sent" is honest only if the ack means stored. Friends' devices already dial each other at unlock and at every refresh (social D12), so there's no new dialling. |
 | D6 | **Group DMs need everyone to be friends with everyone (Q1).** Creating or adding someone checks that you're friends with them. A member who isn't friends with every other member is refused, and the error names who isn't. Up to 10 members. | Devices take connections only from contacts (routing D9), and members find each other's keys only through contacts' records (e2ee *What later modules get*). Passing messages on for non-friends needs sealed relaying through members, which `spaces` has to build anyway. Building it once there is cheaper than twice. |
-| D7 | **Group changes are events** in the group's own chat: add, remove, leave, rename. Each names the change it follows (`after`; none for the creation), so they form a chain. A change is accepted only if it follows the newest change you hold and its sender is a member in that version, with the right to make it. Anyone can add their friends, leave or rename. Only the group's creator can remove someone. A change whose `after` you don't have yet waits for it. Two changes that follow the same one are a fork: the branch with the creator's change wins, otherwise the branch whose first change has the lower event ID. The other branch's changes are dropped, and their senders see them undone. An accepted change calls e2ee's `set_members`, which rotates the chain on the next send (e2ee D7). *Changed 2026-11-11 (review F).* | With "a member at that point" judged by sender time, a removed member with a changed client could back-date an add to just before their own removal. A chain judges membership by which version a change follows, which a sender can't fake. A removed member's change can only fork from before the removal, and the removal is the creator's, so it wins. Every member ends with the same list without anyone in charge. |
+| D7 | **Group changes are events** in the group's own chat: add, remove, leave, rename. Each names the change it follows (`after`; none for the creation), so they form a chain. A change is accepted only if it follows the newest change you hold and its sender is a member in that version, with the right to make it. Anyone can add their friends, leave or rename. Only the group's creator can remove someone. A change whose `after` you don't have yet waits for it. Two changes that follow the same one are a fork. **The branch that contains a change by the creator anywhere wins.** If both do, the branch whose first creator change has the lower (`seq`, event ID) wins: the creator's earlier decision stands. If neither does, the branch whose first change has the lower event ID wins. A fork of more than two branches picks the same way. The choice is made again as changes arrive, so a branch that wins for now can lose once a creator change reaches the other; the creator's devices follow the winner, so it settles. The other branch's changes are dropped, and their senders see them undone. An accepted change calls e2ee's `set_members`, which rotates the chain on the next send (e2ee D7). *Changed 2026-11-11 (review F).* | With "a member at that point" judged by sender time, a removed member with a changed client could back-date an add to just before their own removal. A chain judges membership by which version a change follows, which a sender can't fake. A removed member's change can only fork from before the removal, and the removal is the creator's, so it wins. Every member ends with the same list without anyone in charge. |
 | D8 | **Own-device sync is D5 aimed at your own devices.** When two of your devices connect, each sends the other everything after that device's counter, received events included, in batches of 200, newest chat first. A device that's new to you starts from 0 and gets everything (Q3). A batch is opened with e2ee's batch call (D11). | One mechanism covers a new device's history (e2ee D13: history is re-sent as messages, never as old keys), a laptop that missed a week, and edits made elsewhere. The counter is per device, so nothing has to agree on a global order. |
 | D9 | **Read state is yours alone.** "Read up to event X" is a `Read` event sent only to your own devices. The other person never sees it, and typing is the only live signal they get. Unread counts and mentions come from it. | Discord doesn't show read receipts in DMs. It's less data about you on someone else's device. |
 | D10 | **Typing goes over the live connection, not through e2ee or any store.** While you type, the helper sends `typing(conversation)` every 5 s on a new `typing` service (a stream of its own) to each member's connected devices. A reader shows it for 7 s. Never stored, never queued. The `presence` stream's frames don't change. *Changed 2026-11-11 (review G).* | The connection is already encrypted between device keys (transport D5) and goes to friends only. Running typing through the ratchet would advance it on every keystroke and save state to disk each time, for something that's thrown away. |
@@ -86,7 +87,6 @@ Discord, and test notes are retired.
 | D13 | **Keeping files.** A sent file is copied, still encrypted, into `<data>/blobs/`, and so is every file a device downloads. A device keeps up to 10 GB of blobs and drops the oldest-opened first. Files you sent are dropped last. A delete (D3) drops the blob at once. | Somebody has to keep files available for peers. Without a cap that's a disk that fills without telling you. |
 | D14 | **Limits**: text up to 4,000 characters (Discord Nitro's limit; well under the 64 KiB envelope), up to 10 attachments a message, a reply quotes one message. A malformed, oversized or unknown event is dropped and counted, never shown. | Named constants. A bad event from a modified client must not break the chat for anyone else. |
 | D15 | **Nothing identifying is logged**: no IDs, conversation IDs, names or contents, only counts. Errors are fixed text. | Same rule as routing D10, social D15 and e2ee D15. |
-| D16 | **Keys for someone who's been away.** Each device also publishes a **keys-only record** per contact: its signed device list, device key, e2ee bundle and fallback key, no address and no one-time key. It lasts **7 days**, the fallback key's life (e2ee), and is filed under a weekly lookup (the pair's lookup for the current week, as routing D1 derives the hourly one). It's put again when the fallback key changes, and otherwise once a day. A sender with no fresh address record for a device uses it to start a session, and the message waits (D5) until they connect. The seed gets a separate limit for how far ahead such a record may expire (7 days, against 3 hours for address records). *Added 2026-11-11 (review C). This changes routing (a second record kind) and the seed (its own expiry limit); those specs change when this is approved.* | Keys ride in address records, which expire after 2 hours (routing D4). Two friends never online within 2 hours of each other could otherwise never encrypt a first message (`no-keys`), and `mailbox` would hit the same wall. 7 days rather than 30, because a record carrying an expired fallback key is no use. |
 
 ### Options compared: the history store (D11)
 
@@ -181,9 +181,23 @@ Here a message reaches someone only while one of your devices and one of
 theirs are online at the same time. `mailbox` adds friends and seeds that
 hold sealed envelopes (e2ee D8). It plugs in at D5: at hand-over time the
 sender encrypts the waiting events into envelopes for a holder, and the
-reader's ack moves the counter as now. D16's keys-only record is what lets
-the sender make those envelopes for someone who's been away. Nothing in the
-event format or the store changes.
+reader's ack moves the counter as now. Nothing in the event format or the
+store changes.
+
+**A note for the `mailbox` spec: keys for someone who's been away** (review
+C, moved here 2026-11-11). dm doesn't need this: with D5, events are
+encrypted when a connection opens, and by then the sender holds a fresh
+address record with keys. `mailbox` hands envelopes to a holder while the
+reader is away, so it does. The idea: each device also publishes a
+**keys-only record** per contact: its signed device list, device key, e2ee
+bundle and fallback key, no address and no one-time key. It lasts **7
+days**, the fallback key's life (e2ee), under a weekly lookup (the pair's
+lookup for the current week, as routing D1 derives the hourly one). It's put
+again when the fallback key changes, and otherwise once a day. The seed
+would need its own limit for how far ahead such a record may expire
+(7 days, against 3 hours for address records). Not 30 days: a record
+carrying an expired fallback key is no use. This changes routing (a second
+record kind) and the seed; those specs change with `mailbox`.
 
 ## Tech stack
 
@@ -231,11 +245,18 @@ names vodozemac types. It sees opened bodies only.
   - `event.rs`: round trip for each event kind. Oversized, unknown and
     truncated events are refused.
   - `chat.rs`: order by `seq` with skewed clocks; an old sender time
-    can't move a message up. An edit or reaction
+    can't move a message up. `seq` too high: exactly 1,000,000 above is
+    taken, one more is refused. Out of step: a higher `n` with a lower
+    `seq` is refused, whichever arrives first, while honest events arriving
+    out of order are all taken. Late and low: an event below the read
+    marker counts as unread and is marked late. An edit or reaction
     arriving before its target. Only the author edits. A delete beats a
     late copy. Group replay with concurrent add and remove. A removal by a
     non-creator is ignored. A removed member's back-dated add (a fork from
-    before the removal) loses to the creator's branch.
+    before the removal) loses to the creator's branch, also when the
+    creator's change is not the branch's first. Both branches with creator
+    changes: the earlier creator change wins. The same winner whatever
+    order the changes arrive in.
   - `store.rs`: append and reopen. Opening reads one segment. Edit a
     message, then delete it: neither text is left on disk (the test greps
     the files). A damaged or swapped file is refused. A crash mid-append keeps
@@ -255,9 +276,6 @@ names vodozemac types. It sees opened bodies only.
   - Bob's second device can't open Alice's first message (its one-time key
     went to his first device, e2ee D4). It sends a fresh session back, and
     Alice's message arrives on it.
-  - Bob and Alice are never online within 2 hours of each other. Alice's
-    first message to Bob's new device still goes, from his keys-only record
-    (D16).
   - Alice's laptop locks for a while, then unlocks. It gets what it missed
     from the desktop (D8).
   - A new device restored from Alice's backup gets her whole history.
@@ -289,7 +307,7 @@ names vodozemac types. It sees opened bodies only.
     file against its hash and size (D12).
 - **Ask first:**
   - Any new dependency.
-  - Changing D1–D16.
+  - Changing D1–D15.
   - Link previews, or anything else that fetches URLs found in messages.
   - Read receipts shown to others.
 - **Never:**
@@ -329,22 +347,26 @@ names vodozemac types. It sees opened bodies only.
 | Files are unavailable when everyone who has them is offline | Medium | The preview always travels. `unavailable` is shown plainly. `mailbox` may hold small files later. |
 | History sync to a new device is heavy for long chats | Low | Newest chat first, in batches (D8), so recent chats appear first. Measured in success criterion 4. |
 
-## Open questions
+## Decided questions
 
-Each has a recommendation. "Continue" takes all of them.
+All four taken as recommended (2026-11-11).
 
 - **Q1. Must everyone in a group DM be friends with each other?**
-  Recommended: **yes, for v1** (D6). The alternative is letting a member
+  Decided: **yes, for v1** (D6). The alternative is letting a member
   pass messages on to members who aren't your friends. That's sealed
   relaying, which `spaces` must build anyway. Group DMs could then drop the
   rule. Discord lets any friend of the creator in, so until then this is
   stricter than Discord.
-- **Q2. The largest file?** Recommended: **100 MB.** Discord's free limit is
+- **Q2. The largest file?** Decided: **100 MB.** Discord's free limit is
   10 MB. Ours costs only the senders' and members' upload bandwidth, but a
   bigger file takes much longer from a home connection. 25 MB or 500 MB are
   the other sensible choices.
-- **Q3. How much history does a new device get?** Recommended:
+- **Q3. How much history does a new device get?** Decided:
   **everything** (D8), newest chats first. The alternative is the last 90
   days, which is faster to link but loses old chats on that device.
 - **Q4. Remove the test-note buttons from Mesh-Voice once DMs work?**
-  Recommended: **yes**. The helper keeps `e2eeNote` for the process tests.
+  Decided: **yes**. The helper keeps `e2eeNote` for the process tests.
+
+## Open questions
+
+None.
