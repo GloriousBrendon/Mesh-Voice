@@ -1,6 +1,7 @@
 # Plan: `dm` (Mesh)
 
-Status: **DRAFT 2026-11-11, plan only, for review.** Implements
+Status: **APPROVED 2026-11-11**, with the clock-anchored D2 and the intake
+measured right after Task 9. Implements
 [SPEC-dm.md](SPEC-dm.md) (approved 2026-11-11). No dm code until this plan
 is approved.
 
@@ -55,16 +56,21 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     events are refused.
   - Verify: `cargo test -p mesh-dm event`. Size S.
 - [ ] **Task 2: Order and the `seq` checks** (D2)
-  - What: `chat.rs`, the order part. Order by (`seq`, event ID). The three
-    checks: too high (over 1,000,000 above the highest held), out of step
-    (per sending device, by `n`), late and low (unread, marked late). The
-    baseline in an empty chat and for a device's first event. The 5-minute
-    display clamp.
-  - Accept: the spec's `chat.rs` tests for D2: exactly 1,000,000 above is
-    taken and one more refused; an empty chat takes a first event at
-    5,000,000; an out-of-step event is refused whichever arrives first,
-    while honest events out of order are all taken; late and low counts as
-    unread; an old sender time can't move a message up.
+  - What: `chat.rs`, the order part. Order by (`seq`, event ID). The
+    sender's next `seq`: one more than the highest held that isn't ahead of
+    its clock. The three checks, against the reader's clock and the
+    sender's earlier events only: ahead of the clock (more than 5 minutes
+    waits, more than a day is dropped, at most 1,000 waiting per sending
+    device), out of step (per sending device, by `n`), late and low
+    (unread, marked late). The 5-minute display clamp.
+  - Accept: the spec's `chat.rs` tests for D2: exactly 5 minutes ahead is
+    shown, a millisecond more waits and shows once the clock catches up,
+    over a day is dropped; the 1,001st waiting event is dropped; a sender
+    ignores a held `seq` ahead of its clock; big jumps sent to everyone but
+    one member don't stop that member taking the next honest event; a new
+    device takes its first event; an out-of-step event is refused whichever
+    arrives first, while honest events out of order are all taken; late
+    and low counts as unread; an old sender time can't move a message up.
   - Verify: `cargo test -p mesh-dm chat`. Size M.
 - [ ] **Task 3: Edits, deletes, reactions** (D3, D4)
   - What: `chat.rs`. Only the author edits or deletes; the newest edit
@@ -137,6 +143,11 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
   - Accept: unit tests over the frame and ack logic; the e2ee test notes
     still pass.
   - Size L.
+- [ ] **Task 9b: Measure the intake** (criterion 4, early)
+  - What: the `--ignored` intake test from Task 15, run now: one device
+    takes in 10,000 events from another (target under 30 s on the LAN),
+    so a miss is known before Tasks 10–14. Result recorded here.
+  - Size S.
 - [ ] **Task 10: Own-device sync** (D8)
   - What: the same path aimed at your own devices: everything after the
     counter, 200 a batch, newest chat first, stored order within a chat,
@@ -164,8 +175,8 @@ the Mesh-Voice screens. Hard stops at each checkpoint.
     removal; no ID, conversation ID or text in any log or the seed's files.
   - Size L.
 - [ ] **Task 15: Measurements** (criteria 4, 5)
-  - What: an `--ignored` test: open a 100,000-message chat (target under
-    50 ms), take in 10,000 events (target under 30 s), and the release
+  - What: the `--ignored` tests: open a 100,000-message chat (target under
+    50 ms), the intake again (Task 9b) with sync in place, and the release
     binary's growth (target under 300 KB). Results recorded here.
   - Size S.
 
@@ -193,36 +204,20 @@ the Windows PC and the Linux box. Across networks it needs the VPS seed
 
 ## Order and size
 
-Tasks 1–7 can go in any order after Task 1; Task 8 before Task 9; Tasks
-9–15 in order; Phase 4 after Checkpoint B. Roughly 4,000 lines in
+Tasks 1–7 can go in any order after Task 1; Task 8 before Task 9; Task 9b
+straight after Task 9; Tasks 10–15 in order; Phase 4 after Checkpoint B. Roughly 4,000 lines in
 Mesh-Node and 1,200 in Mesh-Voice.
 
 ## Risks and mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| The `seq` checks refuse honest events in a group with a forger (see the decision below) | Medium | Decide before Task 2; the check is one function there. |
+| A reader's clock is badly wrong | Low | Events ahead of it wait instead of being lost, up to a day; Mesh-Voice says the clock looks wrong while any wait. |
 | Criterion 4 misses with Olm's per-message cost | Medium | Task 8 removes the disk cost first; Task 15 measures before Phase 4. |
 | Segment rewrites on delete race appends | Low | One writer: the helper's loop owns the store. Task 5 tests a delete between appends. |
 | Acks change the `e2ee` service | Low | A flag bit, unset for test notes; Task 9 keeps their tests passing. |
 | The process test gets slow | Medium | It waits for state, not the next event, with short record lifetimes, as the earlier ones do. |
 
-## Decision for you (before Task 2)
-
-**A `seq` case D2 still gets wrong.** In a group, each member sends only its
-own events (D5), so a reader gets each sender's events on its own stream,
-interleaved differently from how others saw them. If a forger pushes `seq`
-up by close to 1,000,000, everyone who has seen that event continues from
-it, honestly. A reader that gets an honest member's next event *before* the
-forger's is more than 1,000,000 ahead, and refuses it for good. So the
-forger can make honest messages vanish for some readers. Own-device sync
-can cause the same order. Recommended: **hold, don't refuse.** A too-high
-event waits, like an edit before its target, until the reader's highest
-comes within range (the forger's event arrives), and is dropped after 30
-days or past 200 waiting per chat. The counter still can't be run out,
-because a waiting event doesn't move the highest. The alternative keeps the
-spec as it is and accepts the loss in that case.
-
 ## Open questions
 
-The decision above.
+None.
