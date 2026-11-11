@@ -68,8 +68,9 @@ ever rewritten for it.
   after each batch of acks, not each event. Its size depends on the number
   of devices and the acks in flight past a failure (at most a batch), never
   on history.
-- **Deletion markers.** Each chat folder gets an append-only sealed list of
-  deleted event IDs (16 bytes each), read whole when the chat opens. A
+- **Deletion markers.** The log also records each deleted event ID (16
+  bytes each), read with it at unlock. *(First planned as a list per chat;
+  one stream is simpler.)* A
   late copy, edit or reaction of a message deleted long ago is refused
   from it (`Taken::Ignored`) and never written, though the message's own
   segment isn't loaded.
@@ -175,7 +176,8 @@ its device had seen); noted in the code.
 
 ### Phase 2: the batch decrypt (Mesh-Node)
 
-- [ ] **Task 8: `E2ee::decrypt_batch`** (D11)
+- [x] **Task 8: `E2ee::decrypt_batch`** (D11) *Done 2026-11-11 (Mesh-Node
+  `2225959`): 1,000 envelopes, one save; a failed save hands nothing up.*
   - What: open many envelopes, save each person's state once, then hand them
     all up. "Save before handing up" holds per batch. `decrypt` stays, as a
     batch of one.
@@ -187,7 +189,7 @@ its device had seen); noted in the code.
 
 ### Phase 3: the helper (Mesh-Node)
 
-- [ ] **Task 9: Delivery and acks** (D5)
+- [x] **Task 9: Delivery and acks** (D5)
   - What: `crates/mesh-node/src/dm.rs`, a child module of the helper as
     `social.rs` is. Store the event, encrypt for connected devices, send;
     on a connection opening, send what's after that device's counter; the
@@ -198,11 +200,33 @@ its device had seen); noted in the code.
     a late copy of a message deleted before the reopen (*Saving and
     loading*).
   - Size L.
-- [ ] **Task 9b: Measure the intake** (criterion 4, early)
+  - Result (2026-11-11, Mesh-Node `7b8f71f`, `dd4427d`, `608d34d`): built
+    for 1:1 chats; groups and own-device sync come with Tasks 10 and 11.
+    The history lives in `mesh-dm`'s `history.rs`. Deletion markers went
+    into the device-wide log rather than a list per chat: one stream, read
+    once at unlock. `mesh-e2ee` gained `encrypt_device_batch` (one device,
+    many bodies, one save). A "fresh session" is recognised as an envelope
+    that opens to nothing; it triggers a resend to that device.
+- [x] **Task 9b: Measure the intake** (criterion 4, early)
   - What: the `--ignored` intake test from Task 15, run now: one device
     takes in 10,000 events from another (target under 30 s on the LAN),
     so a miss is known before Tasks 10–14. Result recorded here.
   - Size S.
+  - Result (2026-11-11, Ryzen 7 7700X, NVMe, release build): **1.5 s** for
+    10,000 events in all (the sender reading them back, encrypting, framing
+    and taking the acks), 0.8 s of it the reader opening and storing them.
+    Criterion 4 is 30 s. Three runs within 0.05 s of each other.
+    - It's measured as a new device of our own, which gets everything. A
+      friend's device would get only the newest 2,000 (D5); the test caught
+      that. Own-device encryption comes with Task 10, so the envelopes use
+      the pair's session: the same work per event.
+    - The network isn't in it: 10,000 frames are about 3 MB.
+    - On `/tmp` (RAM here) it read 1.1 s; the files are now on the real
+      disk.
+    - Seen on the way: **storing a sent message costs about 3 ms** (two log
+      syncs and the chat's small index rewritten per send). Fine for a
+      person typing; a batch of sends should share one sync (Task 11).
+    - A debug build takes 33 s: unoptimised crypto. Only release counts.
 - [ ] **Task 10: Own-device sync** (D8)
   - What: the same path aimed at your own devices: everything after the
     counter, 200 a batch, newest chat first, stored order within a chat,
