@@ -113,9 +113,7 @@ differs from the rows above, this wins.
   "mesh/v1/mail-tag", pair), sender device ‖ kind ‖ mseq ‖ envelope)`. A
   receipt has no Olm envelope; its body is three lists of `mseq` (ok,
   failed, couldn't open). A wrapper from a device that isn't a contact's
-  current one, or with the wrong tag, is dropped. *The pair tag is new in
-  mailbox revision 3 and waits on your review; the rest was approved with
-  revision 2's proposals.*
+  current one, or with the wrong tag, is dropped. *The pair tag came in mailbox revision 3, approved 2026-11-12.*
 
 ### Options compared
 

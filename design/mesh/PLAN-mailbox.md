@@ -1,8 +1,11 @@
 # Plan: `mailbox` (Mesh)
 
-Status: **DRAFT 2026-11-12, for your review** with
-[SPEC-mailbox.md](SPEC-mailbox.md) revision 3. No mailbox code until both
-are approved.
+Status: **APPROVED 2026-11-12** with [SPEC-mailbox.md](SPEC-mailbox.md)
+revision 3. *Edited 2026-11-12 after approval, at your request: dropped and
+unreachable holders (Task 12, tests 19 and 20) and format numbers (Tasks 1,
+3, 6, 11). Checkpoint A is a line in the report, not a stop, unless test 1
+fails or misses its 5 s; stops for review after Task 5, after Task 10 and at
+Checkpoint B.*
 
 The code goes in `GloriousBrendon/Mesh-Node` (the seed's mail store and
 services, the helper's mail path, the mail wrapper in `mesh-e2ee`, the clock
@@ -52,8 +55,8 @@ each checkpoint.
   `--record-ttl` is: refused above 60 days.
 - **`--cut <seed|live>`**, test-only, on the helper: `seed` drops its seed
   connections and refuses to open new ones until a `cutOff` command clears
-  it; `live` does the same for friends' devices. Tests 11 and 18 need it
-  (spec open question 2).
+  it; `live` does the same for friends' devices. Tests 11, 18 and 19 need
+  it (approved 2026-11-12).
 - **Choosing your own holder:** `--holder <ticket>` (repeatable, up to 3)
   and `MESH_HOLDERS`, read in `main.rs` exactly as `--seed` and
   `MESH_SEEDS` are, and listed in the device's mail record. Mesh-Voice
@@ -86,7 +89,8 @@ passes `cargo test --workspace`, `cargo clippy --workspace --all-targets --
     - Helper: after storing an event, and at lock (with `MAIL_FLUSH`), each
       event still waiting for a device with no open connection is
       encrypted on the existing session, sealed with the mail wrapper
-      (sender device, kind, `mseq`; no pair tag yet) and put into this
+      (format 1, sender device, kind, `mseq`; no pair tag yet: Task 8 adds
+      it before anything ships, so the format stays 1) and put into this
       week's box on the first `--seed` seed. At unlock, collect this week,
       open, store, take, and put an `ok` receipt into the pair's box; the
       sender, collecting it at its unlock, moves its counter.
@@ -95,11 +99,12 @@ passes `cargo test --workspace`, `cargo clippy --workspace --all-targets --
     written once, live). Without one, Alice needs Bob's mail record: that's
     Task 6 and test 17.
   - Accept: test 1 (the 5 s timed from the helper's `online` line); the dm
-    process test still passes.
+    process test still passes; a wrapper with a newer format is refused
+    (unit).
   - Size M.
 
-**Checkpoint A (short report):** test 1 passes; the 5 s measured on
-loopback.
+**Checkpoint A (a line in the report, not a stop, unless test 1 fails or
+misses its 5 s):** test 1 passes; the 5 s measured on loopback.
 
 ### Phase 2: the seed (Mesh-Node)
 
@@ -113,12 +118,14 @@ loopback.
     at unlock, thinly, until Task 7).
   - Size M.
 - [ ] **Task 3: Storage and expiry** (seed D9 as changed; test 7)
-  - What: the three logs, indexes, compaction, `.damaged`; the hourly
+  - What: the three logs, each opening with its format number (1),
+    indexes, compaction, `.damaged`; the hourly
     sweep (envelopes after `MAIL_LIFE`, claims after `CLAIM_LIFE`);
     `--clock-offset` on the seed.
   - Accept: restart keeps claims and mail; a crash mid-append keeps
     everything before it; a damaged log is moved aside and the seed starts;
-    compaction leaves the same contents; test 7.
+    compaction leaves the same contents; a log with a newer format stops
+    the seed with an error rather than being moved aside; test 7.
   - Size L.
 - [ ] **Task 4: Limits, `full` and closed seeds** (M14, M18; test 6)
   - What: the seed rates in *Limits*, per throwaway key, network and relay,
@@ -135,17 +142,21 @@ loopback.
     ahead is taken and one 7 days and a minute is refused; it sweeps.
   - Size S.
 
+**Stop for review after Task 5: the seed done.**
+
 ### Phase 3: the helper (Mesh-Node)
 
 - [ ] **Task 6: The mail record, read ahead and remembered** (M11; tests 9,
   10, 17)
   - What: put at unlock, daily and on change; read every contact's at
     unlock and daily (this week, then last week for misses); the
-    remembered records' sealed file; mail from the newest record, read or
+    remembered records' sealed file (format 1, with the dropped holders of
+    Task 12); mail from the newest record, read or
     remembered, starting a session from its fallback key when there's
     none; `--clock-offset` on the helper.
   - Accept: tests 9, 10 and 17; a read that finds nothing keeps the memory
-    (unit).
+    (unit); a remembered-records file with a newer format is refused and
+    left on disk (unit).
   - Size L.
 - [ ] **Task 7: Claims from the helper** (M6, M12, M13; test 5)
   - What: claim this week and `CLAIM_WEEKS_AHEAD` for every contact and the
@@ -180,18 +191,27 @@ loopback.
   - Accept: test 14; unit tests for both limits, and that test 13's
     couldn't-opens start nothing.
   - Size M.
+**Stop for review after Task 10.**
+
 - [ ] **Task 11: The saved marks** (M15; test 15)
   - What: per event and reader device, holder, put time and `mseq`, in the
-    counters file, written once per batch of puts; read at unlock.
+    counters file, written once per batch of puts; read at unlock. The
+    counters file goes to format 2; format 1 still opens, with no marks.
   - Accept: test 15; a crash between a put and the save mails it once more
-    at most (unit).
+    at most (unit); a format 1 counters file written by today's code opens
+    with every counter as it was (unit, from saved bytes).
   - Size S.
-- [ ] **Task 12: Holders and full holders** (M3, M10; test 4)
+- [ ] **Task 12: Holders: full, dropped and unreachable** (M3, M10, M12;
+  tests 4, 19, 20)
   - What: `--holder` and `MESH_HOLDERS`; the record's holder list (default
-    the built-in seeds); the next holder on `full`, `no-box`, `slow-down` or
-    `HOLDER_WAIT`; nothing taken means the event waits (D5).
-  - Accept: test 4; a reader listing two holders, the first full, gets its
-    mail from the second.
+    the built-in seeds); an unreachable holder (refused or failed
+    connection, unknown service) skipped at once; the next holder on
+    `full`, `no-box`, `slow-down` or `HOLDER_WAIT` after connecting;
+    nothing taken means the event waits (D5). A record no longer listing
+    the holder put to: mail again at once to the holders listed now. A
+    dropped holder kept, and collected from, until its claims end.
+  - Accept: tests 4, 19 and 20; a reader listing two holders, the first
+    full, gets its mail from the second.
   - Size M.
 - [ ] **Task 13: Groups and own devices** (spec delivers 2 and 3; dm D8 as
   changed; tests 2, 3)
@@ -209,7 +229,7 @@ loopback.
   - Accept: test 8.
   - Size S.
 
-**Checkpoint B (report):** acceptance tests 1 to 18 pass in `tests/mailbox.rs`;
+**Checkpoint B (stop for review):** acceptance tests 1 to 20 pass in `tests/mailbox.rs`;
 the dm, routing, social and e2ee process tests still pass.
 
 ### Phase 4: measuring (Mesh-Node)
@@ -274,4 +294,4 @@ None.
 
 ## Open questions
 
-The spec's two (the pair tag; the `--cut` switch). Nothing else.
+None. (The pair tag and `--cut`: yes, 2026-11-12.)
