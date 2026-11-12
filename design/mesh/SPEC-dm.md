@@ -10,7 +10,9 @@ D11 and D12 changed. Review C's keys-only record moved to a note for
 [`e2ee`](SPEC-e2ee.md) (built; Checkpoint B passed). The map also lists
 `mailbox` as a dependency. That's built after `dm`, so here a message waits
 on the sender's devices (see *What `mailbox` changes*). `spaces` reuses this
-module's message format, store and attachments.
+module's message format, store and attachments; the store's log is held
+whole in memory, which `spaces` must change first (CAPABILITY-MAP, *Open
+questions*).
 
 ## Objective
 

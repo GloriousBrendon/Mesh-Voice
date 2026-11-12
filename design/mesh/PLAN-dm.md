@@ -280,7 +280,7 @@ its device had seen); noted in the code.
     |---|---|---|
     | Newest page of a 100,000-message chat | under 50 ms | **0.6 ms** |
     | Intake of 10,000 events, sync in place | under 30 s | **1.48 s** (0.82 s the reader); unchanged from Task 9b |
-    | Release binary's growth (stripped, before Task 1 to now) | under 300 KB | **+691 KB: missed** (24.93 to 25.63 MB) |
+    | Release binary's growth (stripped, before Task 1 to now) | under 300 KB | **+691 KB** (24.93 to 25.63 MB): over the target, accepted as the result (2026-11-12), no build-setting changes |
     | Unlock with 100,000 events | — | **170 ms**, 16 MB held (about 170 bytes an event), 34 MB on disk |
     | Unlock with 1,000,000 events | — | **1.7 s**, 168 MB held, 347 MB on disk |
 
@@ -288,7 +288,9 @@ its device had seen); noted in the code.
       code (+134 KB), and std, tokio and serde code made for the new types
       (+285 KB). No outside dependency came in.
     - Unlock and memory grow in step with the history: the log is read
-      whole and held. 1,000,000 events is years of heavy use.
+      whole and held. 1,000,000 events is years of heavy use. Accepted for
+      dm (2026-11-12); `spaces` must change it before reusing the store
+      (noted in CAPABILITY-MAP and SPEC-dm).
     - The measures: `at_scale` in mesh-dm (`MESH_EVENTS=1000000 cargo
       test --release -p mesh-dm at_scale -- --ignored --nocapture`, run
       twice: the first builds the history under `target/`), and the intake

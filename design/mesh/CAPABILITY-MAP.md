@@ -103,3 +103,9 @@ chat while both of you are online. `mailbox` adds offline delivery.
   itself a new device key and get back in. The only real fix is a signed
   "I've moved to this new ID" message that friends follow (and Spaces, once
   they exist). Each module spec has its own questions too.
+- **Before `spaces` reuses the dm store, it must change how the history
+  log is held.** dm reads the device-wide log whole at unlock and keeps it
+  in memory: 168 MB and 1.7 s at 1,000,000 events, 16 MB and 170 ms at
+  100,000 (PLAN-dm Task 15). Accepted for dm (2026-11-12); a Space's
+  history grows far past one person's chats, so `spaces` must not inherit
+  it as it is.
