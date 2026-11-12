@@ -94,7 +94,9 @@ pub(crate) fn rows(page: &mesh::Page, me: &str, name: impl Fn(&str) -> String) -
         let first = rows.timeline.len();
         for (index, a) in m.attachments.iter().enumerate() {
             let full = file_url(&page.id, &m.id, index);
-            let preview = a.preview.as_deref().and_then(unhex).filter(|_| a.mime.starts_with("image/"));
+            let preview = (a.preview.as_deref().and_then(unhex))
+                .filter(|_| a.mime.starts_with("image/"))
+                .filter(|bytes| fits(bytes, PREVIEW_MAX_SIDE));
             let kind = match preview {
                 // A picture: its preview at once, the full one when opened (PLAN-dm Task 18).
                 Some(bytes) => {
@@ -143,6 +145,23 @@ pub(crate) fn rows(page: &mesh::Page, me: &str, name: impl Fn(&str) -> String) -
         }
     }
     rows
+}
+
+/// The biggest preview shown: twice what Mesh makes (320 px a side).
+const PREVIEW_MAX_SIDE: u32 = 640;
+/// The biggest picture shown inside Mesh (a 50 MP phone photo is 8,160 px
+/// wide); past it, it's shown in its folder instead.
+const FULL_MAX_SIDE: u32 = 10_000;
+
+/// Whether a picture's stated size, read from its header before anything
+/// decodes it, is at most `side` pixels each way. A picture is shown
+/// without a click, and its header is the sender's to write.
+fn fits(bytes: &[u8], side: u32) -> bool {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
+    match reader.ok().and_then(|r| r.into_dimensions().ok()) {
+        Some((w, h)) => w <= side && h <= side,
+        None => false,
+    }
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
@@ -200,14 +219,16 @@ fn open_received(path: &std::path::Path) -> std::io::Result<()> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match on_click(&name, &head[..n]) {
         Click::Open => open_url(&path.to_string_lossy()),
-        Click::ShowInFolder => {
-            #[cfg(windows)]
-            let shown = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
-            #[cfg(not(windows))]
-            let shown = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn();
-            shown.map(|_| ())
-        }
+        Click::ShowInFolder => show_in_folder(path),
     }
+}
+
+fn show_in_folder(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let shown = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+    #[cfg(not(windows))]
+    let shown = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn();
+    shown.map(|_| ())
 }
 
 /// Previews go in the message itself; mesh-node takes up to 16 KB (MAX_PREVIEW).
@@ -317,7 +338,15 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             if matches!(session.images.get(&key), Some(None)) {
                 // A picture being viewed: shown from memory, never opened.
                 match std::fs::read(path) {
-                    Ok(bytes) => show_image(&mut session.images, &mut session.animations, &key, bytes),
+                    Ok(bytes) if fits(&bytes, FULL_MAX_SIDE) => show_image(&mut session.images, &mut session.animations, &key, bytes),
+                    Ok(_) => {
+                        session.images.remove(&key);
+                        session.lightbox = None;
+                        session.status = Some(match show_in_folder(path) {
+                            Ok(()) => "That picture is too big to show here, so it's shown in its folder.".to_string(),
+                            Err(err) => format!("That picture is too big to show here, and its folder didn't open: {err}"),
+                        });
+                    }
                     Err(_) => {
                         session.images.remove(&key);
                         session.status = Some("Couldn't read that picture.".to_string());
@@ -384,7 +413,7 @@ mod tests {
             name: "map.png".into(),
             mime: "image/png".into(),
             size: 2048,
-            preview: Some("ffd8".into()),
+            preview: Some(hex(&gif_claiming(16))),
         }];
         let mut file = message("04", "mesh1bob", "");
         file.late = true;
@@ -423,7 +452,7 @@ mod tests {
         };
         assert_eq!(info.media.web_url(), Some("mesh-preview:03:0"));
         assert_eq!(info.full.as_ref().and_then(MediaRef::web_url), Some("mesh-file:mesh1bob:03:0"));
-        assert_eq!(previews, vec![("mesh-preview:03:0".to_string(), vec![0xff, 0xd8])]);
+        assert_eq!(previews, vec![("mesh-preview:03:0".to_string(), gif_claiming(16))]);
         assert_eq!(timeline[3].body, "📎 looks like text");
         let MessageKind::File(info) = &timeline[4].kind else { panic!("not a file") };
         assert_eq!(
@@ -440,6 +469,82 @@ mod tests {
     /// Clicking a received file never runs it: it opens only when both its
     /// contents and its name are a known-safe type; else it's shown in its
     /// folder (PLAN-dm Task 18).
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A GIF whose screen claims `side` by `side` pixels: a 2-colour table
+    /// and one 1-pixel frame (GIF has no checksum).
+    fn gif_claiming(side: u16) -> Vec<u8> {
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend(side.to_le_bytes());
+        gif.extend(side.to_le_bytes());
+        gif.extend([0x80, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff]);
+        gif.extend([0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0]);
+        gif.extend([0x02, 0x02, 0x44, 0x01, 0x00, b';']);
+        gif
+    }
+
+    /// A PNG header claiming `side` by `side` pixels, with a right checksum.
+    fn png_claiming(side: u32) -> Vec<u8> {
+        let crc = |bytes: &[u8]| {
+            let mut c = !0u32;
+            for b in bytes {
+                c ^= u32::from(*b);
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        };
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(side.to_be_bytes());
+        ihdr.extend(side.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(13u32.to_be_bytes());
+        png.extend(&ihdr);
+        png.extend(crc(&ihdr).to_be_bytes());
+        // The decoder reads up to the first image data before it tells the size.
+        png.extend(0u32.to_be_bytes());
+        png.extend(b"IDAT");
+        png.extend(crc(b"IDAT").to_be_bytes());
+        png
+    }
+
+    /// A received preview claiming 20,000 by 20,000 pixels is dropped before
+    /// anything decodes it; the message still shows, its file as a file.
+    #[test]
+    fn a_huge_preview_is_dropped() {
+        for huge in [gif_claiming(20_000), png_claiming(20_000)] {
+            let mut m = message("05", "mesh1bob", "look");
+            let preview = hex(&huge);
+            m.attachments = vec![mesh::Attachment {
+                name: "big.png".into(),
+                mime: "image/png".into(),
+                size: 9,
+                preview: Some(preview),
+            }];
+            let page = mesh::Page {
+                id: "mesh1bob".into(),
+                more: false,
+                events: vec![m],
+            };
+            let Rows { timeline, previews, .. } = rows(&page, "mesh1me", |_| "Bob".to_string());
+            assert!(previews.is_empty(), "not shown");
+            assert!(matches!(timeline[0].kind, MessageKind::File(_)), "{:?}", timeline[0].kind);
+            assert_eq!(timeline[1].body, "look");
+        }
+        // What Mesh makes, and a little more, still shows.
+        assert!(fits(&png_claiming(320), PREVIEW_MAX_SIDE));
+        assert!(fits(&gif_claiming(640), PREVIEW_MAX_SIDE));
+        assert!(!fits(&gif_claiming(641), PREVIEW_MAX_SIDE));
+        assert!(!fits(b"not a picture", PREVIEW_MAX_SIDE));
+        // A full picture: up to FULL_MAX_SIDE a side shows inside Mesh.
+        assert!(fits(&png_claiming(8_000), FULL_MAX_SIDE));
+        assert!(!fits(&png_claiming(20_000), FULL_MAX_SIDE));
+    }
+
     /// A picture's preview fits in a message, however big the picture.
     #[test]
     fn a_preview_fits() {
