@@ -96,6 +96,27 @@ keys, sessions with the devices it talks to, and one envelope format that
 | D14 | **Missing keys.** Key shares go in the same delivery as the first message that needs them. A device that still gets a message it can't open keeps it for 30 days and asks the sender's devices once (`key-request`). A device answers only for conversations it sends in, and only to current member devices. | "Unable to decrypt" is Matrix's best-known failure. Most of it comes from key shares and messages taking different routes. Bundling them removes that cause. The request covers the rest. |
 | D15 | **Nothing identifying is logged**: no IDs, keys, conversation IDs or message contents, only counts. Errors are fixed text. | Same rule as routing D10 and social D15. |
 
+### Changed 2026-11-12 by `mailbox`
+
+Approved with [SPEC-mailbox.md](SPEC-mailbox.md) (revision 3). Where this
+differs from the rows above, this wins.
+
+- **D4: the fresh-session answer is for live delivery only.** Mail that
+  can't be opened is dropped and listed as couldn't-open in the reader's
+  receipt; the *sender* then starts a fresh session (mailbox M16), at most
+  once an hour per device and never twice from one fallback key.
+- **D14: the 30-day keep and `key-request` don't apply to mail**: the
+  sender still holds the event, and sends it again.
+- **D8: mail's wrapper.** For mail, inside the seal and before the
+  envelope: `sender device [32] | kind u8 (1 mail, 2 receipt) | mseq u64 |
+  pair tag [16]`, the tag being `blake3::keyed_hash(derive_key(
+  "mesh/v1/mail-tag", pair), sender device ‖ kind ‖ mseq ‖ envelope)`. A
+  receipt has no Olm envelope; its body is three lists of `mseq` (ok,
+  failed, couldn't open). A wrapper from a device that isn't a contact's
+  current one, or with the wrong tag, is dropped. *The pair tag is new in
+  mailbox revision 3 and waits on your review; the rest was approved with
+  revision 2's proposals.*
+
 ### Options compared
 
 Crate facts checked on 2026-11-10 with `cargo info` and `cargo tree` in a

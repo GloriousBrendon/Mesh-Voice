@@ -78,6 +78,28 @@ requests over it, `dm` sends messages, `mailbox` knows when to hold mail.
 | D9 | **Mutual only, and only contacts get in.** A device posts records only for its contacts, so you can reach someone only when you've both added each other. Your device takes connections only from your contacts and your own devices: transport's handshake checks the dialler's ID before showing your certificate, and refuses anyone else (`not-allowed`, shown as `unreachable`). Removing a contact closes their connections. *Tightened 2026-11-09 with your OK: before, a removed contact who'd cached your address could still ping you.* | You're findable only by people you chose (the map: "no search or discovery"). Friend requests from strangers come through the seed instead (Q2, `social`). A removed contact who still knows your device key can tell the device is on (QUIC answers before the handshake), but gets nothing from it. |
 | D10 | **Nothing identifying is logged**, on the seed or in the helper's stderr: no IDs, keys, lookup IDs or relay URLs, only counts. Helper errors are fixed text. | Same rule as seed D10 and transport's error handling. |
 
+### Changed 2026-11-12 by `mailbox`
+
+Approved with [SPEC-mailbox.md](SPEC-mailbox.md) (revision 3). Where this
+differs from the rows above, this wins.
+
+- **D3: a second record kind, the mail record** (mailbox M11). Per (my
+  device, contact), under a weekly lookup `H("mesh/v1/mail-lookup", pair ‖
+  sender ID ‖ week)`, `week = unix days / 7`, with the same slot, encryption
+  and signing as the address record. It holds the signed device list, the
+  device key, the e2ee field without a one-time key (bundle and fallback
+  key), no relay URL, and up to 3 holders, each with its `since`. At most
+  4,096 bytes. Put at unlock, daily and on any change, for every contact and
+  the self pair. **Read for every contact at unlock and daily**: this week's
+  lookup, then last week's only for contacts with nothing this week.
+- **D5: two new services, `mrec-put` and `mrec-get`**, framed and batched as
+  `addr-put` and `addr-get` are, from the throwaway identity, against a store
+  of their own.
+- **D6: a mail record may expire up to 7 days ahead** (address records: 3
+  hours). Per throwaway key an hour: 2,048 puts and 4,096 lookups; per
+  network twice that; everyone through a relay, 100 times. Mail records
+  count against the seed's `MAIL_STORE_MAX` (seed), not `MAX_RECORDS`.
+
 ## Behaviour
 
 ### Seed side (D5, D6)

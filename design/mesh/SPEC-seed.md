@@ -69,6 +69,43 @@ can find each other without pasting a 60-character ID.
 | D10b | **What the seed operator can learn.** *Added 2026-11-11 (audit finding 10); earlier text here and in routing and e2ee claimed more.* The seed is **blind at rest**: its files hold lookup IDs, ciphertext and sizes, nothing that says whose they are. **A live operator can link sessions and addresses.** One throwaway key (D7b) lasts a whole unlock, and with it a client puts all its address records, fetches its contacts', holds its codes and collects its requests. If session A puts lookup X and session B fetches X, A and B are contacts: watched over time, that's the graph of sessions. On a direct path the seed sees the caller's IP (it uses it for limits), and the same operator runs the relay, which sees IPs and device keys. So the graph is one of homes, and timing links sessions across unlocks. The operator still can't read codes, records, requests or messages, or learn an ID from a code. **Planned with the VPS seed:** the throwaway node goes relay-only, through a relay the seed's operator doesn't run, and puts and gets use separate throwaway nodes. That removes the IP and halves what one key shows. It doesn't remove timing. | The privacy promise should match the system. Hiding who meets whom from a live seed needs more than this module (mixing, or no seed at all: map "seeds are phased out"). |
 | D11 | **Deployment**: a `Dockerfile` (multi-stage, distroless, non-root, read-only root filesystem, `/data` volume) and a `compose.yaml` for the homelab with the seed and relay containers. A systemd unit too, for running without Docker (the later VPS). | The map: "deployed with Docker or systemd". |
 
+### Changed 2026-11-12 by `mailbox`
+
+Approved with [SPEC-mailbox.md](SPEC-mailbox.md) (revision 3). Where this
+differs from the rows above, this wins.
+
+- **Mail services**, framed and batched, from the throwaway identity (D7b):
+  `mail-claim` (claim or renew `(box, slot, collect tag, expiry)`),
+  `mail-put` (into a claimed slot), `mail-get` (with the collect secret:
+  the slot's envelopes) and `mail-take` (with the collect secret: delete
+  them, once stored). The mail-record services `mrec-put` and `mrec-get`
+  (routing, changed 2026-11-12). Answers include `no-box`, `full` and
+  `slow-down`.
+- **D8: mail limits.** Per throwaway key an hour: 8,192 claims or renewals,
+  16,384 collect queries, 600 puts and 64 MiB of puts; per network twice
+  that; everyone through a relay, 100 times the per-key figures. Per box 4
+  MiB and 1,000 envelopes. Envelopes last 30 days from their put; claims 35
+  days from their last renewal. Claims, mail records and envelopes together
+  stop at `MAIL_STORE_MAX` (`--mail-max`; 2 GiB on the built-in seeds for
+  the beta), past which puts and claims answer `full`.
+- **D9: the mail store isn't one rewritten file.** Under `<data>/mail/`,
+  three append-only logs (claims, mail records, envelopes), each with its
+  index held in memory and the values on disk; a take or an expiry appends
+  a removal. Each log is compacted (written anew, synced, renamed) at start
+  and whenever its dead bytes pass its live ones. A damaged log is moved
+  aside (`.damaged`) and the seed starts with that part empty: clients
+  claim and put records again, and the `since` rule (mailbox M12) re-mails
+  what it held. *Chosen in PLAN-mailbox (mailbox decided Q10).*
+- **D10b: add mailbox M17's list**: per box, when it was claimed and
+  renewed; each put's padded size, time and session; each collect and
+  delete. A live operator can link the session that claims a box with the
+  session that puts into it, both ways once receipts flow.
+- **New flags.** `--mail` turns the mail services on; **off by default**,
+  so a seed that hasn't been told takes no mail. `--mail-token <secret>`
+  closes them to holders of the token, which the seed's ticket then carries
+  as `&mail=<token>`. `--mail-max <bytes>`. `--clock-offset <secs>`, for
+  tests only, as `--record-ttl` is on the helper.
+
 ## Behaviour
 
 ### Seed mode

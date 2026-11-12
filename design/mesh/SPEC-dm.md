@@ -90,6 +90,32 @@ Discord, and test notes are retired.
 | D14 | **Limits**: text up to 4,000 characters (Discord Nitro's limit; well under the 64 KiB envelope), up to 10 attachments a message, a reply quotes one message. A malformed, oversized or unknown event is dropped and counted, never shown. | Named constants. A bad event from a modified client must not break the chat for anyone else. |
 | D15 | **Nothing identifying is logged**: no IDs, conversation IDs, names or contents, only counts. Errors are fixed text. | Same rule as routing D10, social D15 and e2ee D15. |
 
+### Changed 2026-11-12 by `mailbox`
+
+Approved with [SPEC-mailbox.md](SPEC-mailbox.md) (revision 3). Where this
+differs from the rows above, this wins.
+
+- **D5: mail.** "When a connection to that device opens" becomes "when a
+  connection opens, or by mail while none is open" (mailbox M1, M2).
+  Receipts (mailbox M9) move the counter as live answers do. A `failed` by
+  receipt is sent again at once, then on `FAILED_BACKOFF` (30 minutes,
+  doubling to a day), within the 30 days. Couldn't-open by receipt is
+  mailbox M16.
+- **D5 and D11: what's saved.** The counters gain the "already mailed"
+  marks: per event and reader device, the holder, put time and `mseq` of
+  its last put (mailbox M15). The remembered mail records (mailbox M11) are
+  a sealed file of their own, rewritten after each daily read.
+- **D8: own devices** get by mail only the events authored on this device,
+  and read markers; everything else reaches them from its author.
+- **Receiving: a mailed batch.** The events of one collect go to dm as one
+  batch in D2's order (each chat's events by `seq`, then event ID), whoever
+  sent them. An event refused as "not a member yet" gets one more try at the
+  end of the batch, then is answered `failed`. **Live batches are
+  unchanged**: in arrival order, no retry at the end. (Revision 2's "group
+  changes first" was dropped: `group_refuses` judges an author against the
+  group as it stands, so a removal applied first drops the removed member's
+  earlier messages.)
+
 ### Options compared: the history store (D11)
 
 | Option | New crates | Encrypted at rest | Notes |
@@ -179,27 +205,10 @@ New commands, JSON lines as now:
 
 ### What `mailbox` changes
 
-Here a message reaches someone only while one of your devices and one of
-theirs are online at the same time. `mailbox` adds friends and seeds that
-hold sealed envelopes (e2ee D8). It plugs in at D5: at hand-over time the
-sender encrypts the waiting events into envelopes for a holder, and the
-reader's ack moves the counter as now. Nothing in the event format or the
-store changes.
-
-**A note for the `mailbox` spec: keys for someone who's been away** (review
-C, moved here 2026-11-11). dm doesn't need this: with D5, events are
-encrypted when a connection opens, and by then the sender holds a fresh
-address record with keys. `mailbox` hands envelopes to a holder while the
-reader is away, so it does. The idea: each device also publishes a
-**keys-only record** per contact: its signed device list, device key, e2ee
-bundle and fallback key, no address and no one-time key. It lasts **7
-days**, the fallback key's life (e2ee), under a weekly lookup (the pair's
-lookup for the current week, as routing D1 derives the hourly one). It's put
-again when the fallback key changes, and otherwise once a day. The seed
-would need its own limit for how far ahead such a record may expire
-(7 days, against 3 hours for address records). Not 30 days: a record
-carrying an expired fallback key is no use. This changes routing (a second
-record kind) and the seed; those specs change with `mailbox`.
+*Replaced 2026-11-12 by a pointer:* mail plugs in at D5 as this section
+said, and the keys-only record it proposed is now the mail record. Both are
+specified in [SPEC-mailbox.md](SPEC-mailbox.md) (M1, M11), and what they
+change here is under *Changed 2026-11-12 by `mailbox`*.
 
 ## Tech stack
 
