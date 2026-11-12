@@ -302,7 +302,7 @@ nothing the process test doesn't.*
 
 ### Phase 4: Mesh-Voice
 
-- [ ] **Task 16: `mesh.rs`**: the dm commands and events, with parse
+- [x] **Task 16: `mesh.rs`**: the dm commands and events, with parse
   tests. Size S.
 - [ ] **Task 17: Chats**: Mesh DMs in the sidebar under Mesh, opening in
   the existing timeline and composer (`TimelineMessage`, `web_id` = event

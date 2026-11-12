@@ -49,8 +49,102 @@ pub enum Event {
     /// On the new device: the identity arrived; ask for its username and a
     /// new password (`Node::link_finish`).
     LinkReceived(String),
+    /// The chat list (`Node::dm_list`); comes by itself whenever a chat changes.
+    DmChats(Vec<Chat>),
+    /// A page of the open chat, newest last (`Node::dm_open`); comes again
+    /// while that chat is open when it changes.
+    DmMessages(Page),
+    /// A new message in a chat that isn't open.
+    DmNotify(DmNotify),
+    /// Someone is typing in a chat (`id`): their IDs.
+    DmTyping {
+        id: String,
+        who: Vec<String>,
+    },
+    /// A file is ready to open, decrypted to `path` (`Node::dm_fetch`).
+    DmFile(DmFile),
     /// The helper exited; it's restarted by itself.
     Disconnected,
+}
+
+/// A `meshDmChats` row: a 1:1 (`id` is the friend's ID) or a group.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Chat {
+    pub id: String,
+    pub kind: ChatKind,
+    /// The friend's name, or the group's.
+    pub name: String,
+    pub members: Vec<String>,
+    /// Milliseconds since the epoch of the newest message; 0 for none.
+    pub last: u64,
+    pub unread: u64,
+    pub mentions: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatKind {
+    Direct,
+    Group,
+}
+
+/// A `meshDmMessages`: one chat's page, oldest first.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Page {
+    pub id: String,
+    pub events: Vec<DmMessage>,
+    /// Older messages exist (`Node::dm_open` with `before`).
+    pub more: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DmMessage {
+    /// The event ID: a `TimelineMessage`'s `web_id`.
+    pub id: String,
+    pub from: String,
+    pub text: String,
+    pub edited: bool,
+    pub reply_to: Option<String>,
+    pub attachments: Vec<Attachment>,
+    pub reactions: Vec<Reaction>,
+    /// Arrived well after it was sent (SPEC-dm D2).
+    pub late: bool,
+    /// Milliseconds since the epoch.
+    pub time: u64,
+    /// Ours, and taken by another device; false while "sending".
+    pub sent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    /// A small picture preview, hex-encoded.
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub who: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DmNotify {
+    pub id: String,
+    pub from: String,
+    /// Cut to 100 characters; a file's name if it has no text.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DmFile {
+    pub id: String,
+    pub message: String,
+    pub index: usize,
+    pub path: String,
 }
 
 /// Where the identity on this install stands. Only `Unlocked` says anything
@@ -422,6 +516,69 @@ impl Node {
         self.call("deviceRemove", &[key]);
     }
 
+    /// The chat list; answers with `DmChats`.
+    pub fn dm_list(&self) {
+        self.call("dmList", &[]);
+    }
+    /// Opens a chat (a friend's ID or a group's ID): its newest page, or the
+    /// one before `before`; answers with `DmMessages`.
+    pub fn dm_open(&self, chat: &str, before: Option<&str>) {
+        self.call("dmOpen", &[chat, before.unwrap_or("")]);
+    }
+    /// Sends a message, maybe as a reply; answers with `DmMessages`, or an
+    /// `Error` (`not-a-friend`, `too-long`, `not-member`, `locked`).
+    pub fn dm_send(&self, chat: &str, text: &str, reply_to: Option<&str>) {
+        self.call("dmSend", &[chat, text, reply_to.unwrap_or("")]);
+    }
+    /// Edits one of our messages; answers with `DmMessages` or `Error` (`not-author`).
+    pub fn dm_edit(&self, message: &str, text: &str) {
+        self.call("dmEdit", &[message, text]);
+    }
+    /// Deletes a message here, or for everyone (ours only); answers with `DmMessages`.
+    pub fn dm_delete(&self, message: &str, everyone: bool) {
+        self.call("dmDelete", &[message, if everyone { "true" } else { "false" }]);
+    }
+    /// Adds or takes back a reaction; answers with `DmMessages`.
+    pub fn dm_react(&self, message: &str, emoji: &str, on: bool) {
+        self.call("dmReact", &[message, emoji, if on { "true" } else { "false" }]);
+    }
+    /// Marks a chat read up to a message; answers with `DmChats`.
+    pub fn dm_read(&self, chat: &str, up_to: &str) {
+        self.call("dmRead", &[chat, up_to]);
+    }
+    /// Says we're typing in a chat; answers with nothing.
+    pub fn dm_typing(&self, chat: &str) {
+        self.call("dmTyping", &[chat]);
+    }
+    /// Makes a group with these friends; answers with `DmChats`, or an
+    /// `Error` (`not-a-friend`, `too-many`).
+    pub fn dm_group_create(&self, ids: &[String], name: &str) {
+        self.call("dmGroupCreate", &[&ids.join(","), name]);
+    }
+    pub fn dm_group_add(&self, group: &str, id: &str) {
+        self.call("dmGroupAdd", &[group, id]);
+    }
+    /// Only the group's creator can; answers with `DmChats` or `Error` (`not-creator`).
+    pub fn dm_group_remove(&self, group: &str, id: &str) {
+        self.call("dmGroupRemove", &[group, id]);
+    }
+    pub fn dm_group_leave(&self, group: &str) {
+        self.call("dmGroupLeave", &[group]);
+    }
+    pub fn dm_group_rename(&self, group: &str, name: &str) {
+        self.call("dmGroupRename", &[group, name]);
+    }
+    /// Sends the file at `path`, with an optional picture preview file;
+    /// answers with `DmMessages` or `Error` (`too-long` past 100 MB).
+    pub fn dm_send_file(&self, chat: &str, path: &str, preview: Option<&str>) {
+        self.call("dmSendFile", &[chat, path, preview.unwrap_or("")]);
+    }
+    /// Gets a message's file (`index` among its attachments); answers with
+    /// `DmFile`, or `Error` (`unavailable`: nobody connected has it).
+    pub fn dm_fetch(&self, chat: &str, message: &str, index: usize) {
+        self.call("dmFetch", &[chat, message, &index.to_string()]);
+    }
+
     fn call(&self, function: &str, args: &[&str]) {
         let _ = self.commands.send(serde_json::json!({ "fn": function, "args": args }).to_string() + "\n");
     }
@@ -513,6 +670,24 @@ fn line_event(line: &str) -> Option<Event> {
             let v: serde_json::Value = serde_json::from_str(payload).ok()?;
             Some(Event::LinkReceived(v["username"].as_str()?.to_owned()))
         }
+        "meshDmChats" => {
+            #[derive(Deserialize)]
+            struct Chats {
+                chats: Vec<Chat>,
+            }
+            serde_json::from_str::<Chats>(payload).ok().map(|c| Event::DmChats(c.chats))
+        }
+        "meshDmMessages" => serde_json::from_str(payload).ok().map(Event::DmMessages),
+        "meshDmNotify" => serde_json::from_str(payload).ok().map(Event::DmNotify),
+        "meshDmTyping" => {
+            let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+            let who = v["who"].as_array()?.iter().filter_map(|w| w.as_str().map(str::to_owned)).collect();
+            Some(Event::DmTyping {
+                id: v["id"].as_str()?.to_owned(),
+                who,
+            })
+        }
+        "meshDmFile" => serde_json::from_str(payload).ok().map(Event::DmFile),
         "meshNoteSent" => {
             let v: serde_json::Value = serde_json::from_str(payload).ok()?;
             Some(Event::NoteSent { conversation: v["conversation"].as_str().map(str::to_owned), devices: v["devices"].as_u64()? as usize })
@@ -621,5 +796,63 @@ mod tests {
 
         assert!(line_event(&line("meshParsed", r#"{"kind":"id"}"#)).is_none());
         assert!(line_event("not json").is_none());
+    }
+
+    /// The dm events, as the helper writes them (SPEC-dm *Client side*).
+    #[test]
+    fn dm_events() {
+        let chats = r#"{"chats":[{"id":"mesh1bob","kind":"direct","name":"bob","members":["mesh1bob"],"last":1794428700000,"unread":2,"mentions":0},{"id":"ab12","kind":"group","name":"hike","members":["mesh1a","mesh1b","mesh1c"],"last":0,"unread":0,"mentions":0}]}"#;
+        let Some(Event::DmChats(chats)) = line_event(&line("meshDmChats", chats)) else {
+            panic!("no chats")
+        };
+        assert_eq!(
+            (chats.len(), chats[0].kind, chats[0].unread, chats[0].last),
+            (2, ChatKind::Direct, 2, 1794428700000)
+        );
+        assert_eq!((chats[1].kind, chats[1].name.as_str(), chats[1].members.len()), (ChatKind::Group, "hike", 3));
+
+        let page = r#"{"id":"mesh1bob","more":true,"events":[{"id":"57dd","from":"mesh1me","text":"hi","edited":true,"replyTo":"11aa","attachments":[{"name":"trail.jpg","mime":"image/jpeg","size":300000,"preview":"ffd8"}],"reactions":[{"emoji":"🎉","who":["mesh1bob"]}],"late":false,"time":1794428384000,"sent":true}]}"#;
+        let Some(Event::DmMessages(page)) = line_event(&line("meshDmMessages", page)) else {
+            panic!("no page")
+        };
+        assert_eq!((page.id.as_str(), page.more, page.events.len()), ("mesh1bob", true, 1));
+        let m = &page.events[0];
+        assert_eq!(
+            (m.id.as_str(), m.from.as_str(), m.text.as_str(), m.edited, m.reply_to.as_deref(), m.sent, m.time),
+            ("57dd", "mesh1me", "hi", true, Some("11aa"), true, 1794428384000)
+        );
+        assert_eq!(
+            (m.attachments[0].name.as_str(), m.attachments[0].size, m.attachments[0].preview.as_deref()),
+            ("trail.jpg", 300000, Some("ffd8"))
+        );
+        assert_eq!((m.reactions[0].emoji.as_str(), m.reactions[0].who.len()), ("🎉", 1));
+        let bare = r#"{"id":"ab12","more":false,"events":[{"id":"01","from":"mesh1b","text":"","edited":false,"replyTo":null,"attachments":[{"name":"a","mime":"text/plain","size":1,"preview":null}],"reactions":[],"late":true,"time":5,"sent":false}]}"#;
+        let Some(Event::DmMessages(bare)) = line_event(&line("meshDmMessages", bare)) else {
+            panic!("no page")
+        };
+        assert_eq!(
+            (
+                bare.events[0].reply_to.as_deref(),
+                bare.events[0].late,
+                bare.events[0].attachments[0].preview.as_deref()
+            ),
+            (None, true, None)
+        );
+
+        let Some(Event::DmNotify(n)) = line_event(&line("meshDmNotify", r#"{"id":"ab12","from":"mesh1b","text":"hello"}"#)) else {
+            panic!("no notify")
+        };
+        assert_eq!((n.id.as_str(), n.from.as_str(), n.text.as_str()), ("ab12", "mesh1b", "hello"));
+        let Some(Event::DmTyping { id, who }) = line_event(&line("meshDmTyping", r#"{"id":"mesh1bob","who":["mesh1bob"]}"#)) else {
+            panic!("no typing")
+        };
+        assert_eq!((id.as_str(), who), ("mesh1bob", vec!["mesh1bob".to_owned()]));
+        let Some(Event::DmFile(f)) = line_event(&line(
+            "meshDmFile",
+            r#"{"id":"ab12","message":"57dd","index":0,"path":"/data/files/57dd-0/map.png"}"#,
+        )) else {
+            panic!("no file")
+        };
+        assert_eq!((f.message.as_str(), f.index, f.path.as_str()), ("57dd", 0, "/data/files/57dd-0/map.png"));
     }
 }

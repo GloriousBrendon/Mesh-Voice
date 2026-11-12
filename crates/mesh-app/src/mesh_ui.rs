@@ -350,6 +350,8 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             f.username = username;
             f.received = Some(f.username.clone());
         }
+        // The chat screens come with PLAN-dm Task 17.
+        mesh::Event::DmChats(_) | mesh::Event::DmMessages(_) | mesh::Event::DmNotify(_) | mesh::Event::DmTyping { .. } | mesh::Event::DmFile(_) => {}
         mesh::Event::Disconnected => {
             m.node = None;
             m.identity = None;
