@@ -1,13 +1,18 @@
 # Spec: `mailbox` (Mesh)
 
-Status: **DRAFT, revision 2 (2026-11-12), for review.** Not approved. No plan
-and no code until it is. Revision 2 closes the seven holes from the first
-review and takes your answers to its open questions (*Decided questions*).
+Status: **APPROVED 2026-11-12 with four changes, made here as revision 3
+(2026-11-12), for your review** with [PLAN-mailbox.md](PLAN-mailbox.md). No
+code until both are approved. Revision 3 changes the batch order (M8),
+reads every contact's mail record ahead of need (M11), collects last week at
+a refresh, and replaces healing by silence with a "couldn't open" list in
+receipts (M9, M16). Two things in it are new and not yet approved: the pair
+tag on the wrapper (M7) and a test flag to cut connections (tests 11, 18);
+see *Open questions*.
 Module 8 of the build order in [CAPABILITY-MAP.md](CAPABILITY-MAP.md).
 Depends on [`routing`](SPEC-routing.md), [`seed`](SPEC-seed.md),
-[`e2ee`](SPEC-e2ee.md) and [`dm`](SPEC-dm.md) (all built). It changes
-routing, seed, e2ee and dm; those changes are dated proposals at the end, not
-made yet.
+[`e2ee`](SPEC-e2ee.md) and [`dm`](SPEC-dm.md) (all built). The changes it
+makes to them are written into those specs, dated 2026-11-12 (*Changes made
+elsewhere*).
 
 ## Objective
 
@@ -36,8 +41,8 @@ message waits on the sender's devices, as it does today, and is never lost.
    holders keep your mail; a seed can be closed to everyone but its
    operator's friends (M14).
 5. **Keys for someone who's been away**: the keys-only record from
-   SPEC-dm's note, now the **mail record**, plus what a sender remembers
-   once that record has lapsed.
+   SPEC-dm's note, now the **mail record**, read for every contact ahead of
+   need and remembered after it lapses (M11).
 6. **Quotas and expiry** as named limits; a full or gone holder delays mail
    and never loses it.
 
@@ -55,8 +60,9 @@ message waits on the sender's devices, as it does today, and is never lost.
 ## Acceptance tests
 
 Process tests with real helpers and a seed, as `tests/dm.rs`. "Away" means
-locked. Tests 9 and 10 run the helpers with a moved clock (a test-only flag,
-as `--record-ttl` is today), not by waiting.
+locked. "The clock moves" means the helpers and the seed run with
+`--clock-offset` (decided Q14), not by waiting. "Cut" means a test-only
+switch that stops one helper's connections of one kind (the plan names it).
 
 **The first, before anything else is built:**
 
@@ -80,7 +86,7 @@ Then:
 5. **Wiped holder.** Alice mails Bob "three" and locks. The seed's mail is
    wiped. Bob unlocks: he finds his claims gone, claims again, and his mail
    record says the seed's claims are good only since now. Alice unlocks:
-   she sees that, and mails "three" again at once. Bob gets it once.
+   she reads that, and mails "three" again at once. Bob gets it once.
 6. **Junk.** A stranger can't put into anyone's box (`no-box`); a friend
    can't put past a box's quota; a closed seed refuses a claim or put
    without its token; a key over its hour's limits gets `slow-down`.
@@ -97,25 +103,46 @@ Then:
 11. **`failed` by mail.** A group of Alice and Bob; Bob is away. Alice adds
     Dave with her seed connection cut, so her add can't be mailed to Bob
     yet; Dave gets it live, sends "hi from Dave" (mailed to Bob) and locks.
-    Bob unlocks and collects Dave's message with no add: he answers `failed`
-    by receipt. Alice's connection comes back and her add is mailed; Bob
-    collects it at his next refresh. Dave unlocks, collects the `failed` and
-    mails his message again at once; Bob shows it. No `MAIL_LIFE` wait.
-12. **Changes first.** As test 11, but Alice's add is mailed before Bob
-    unlocks, so both are collected in one collect, Dave's put first: Bob
-    applies the add first and shows Dave's message straight away.
+    Bob unlocks and collects Dave's message with no add: after one more try
+    at the end of the batch, he answers `failed` by receipt. Alice's
+    connection comes back and her add is mailed; Bob collects it at his
+    next refresh. Dave unlocks, collects the `failed` and mails his message
+    again at once; Bob shows it. No `MAIL_LIFE` wait.
+12. **An add and a message in one collect.** As test 11, but Alice's add is
+    mailed before Bob unlocks, so both are collected in one collect, Dave's
+    put first: Bob shows Dave's message straight away, and answers no
+    `failed`.
 13. **Out of order.** Alice mails Bob 60 messages, then the two meet live
     and Alice sends them again on the live session; Bob collects the mail
     afterwards. Every message shows once; the mail Bob can't open any more
-    is dropped quietly, starts no session repair, and leaves no error.
+    is dropped quietly, starts no session repair, and leaves no error. His
+    receipt lists it as couldn't-open, and the ones he could open as `ok`
+    (duplicates); Alice starts no fresh session, because every one already
+    has an `ok`.
 14. **A broken session heals by mail.** Bob's stored session with Alice is
     deleted, as a damaged session file would be (a device restored from a
-    backup is a new device, with its own sessions). Alice, away, mails him; Bob
-    can't open it and drops it. Alice, still never online with Bob, sees
-    from his mail record that he's been online since and hasn't answered,
-    mails again on a fresh session, and Bob gets the message.
+    backup is a new device, with its own sessions). Alice, away, mails him
+    "four" and locks; Bob can't open it, drops it, and his receipt lists it
+    as couldn't-open. Bob locks. Alice unlocks, collects the receipt and
+    mails "four" again at once on a fresh session. Bob unlocks and gets it.
+    The two are never online together.
 15. **No re-mail on unlock.** Alice mails Bob 20 messages and locks; she
     unlocks again before Bob is back: nothing is mailed again.
+16. **A removal and earlier messages in one collect.** A group of Alice,
+    Bob and Dave, made by Alice. Bob locks. Over five days (the clock moves)
+    Dave sends "d1" to "d5", mailed to Bob, and locks. Alice removes Dave and
+    locks. Bob unlocks and collects all six in one collect: "d1" to "d5"
+    show, then the removal; nothing is refused or answered `failed`.
+17. **First mail from a record read ahead.** Alice and Bob are friends and
+    have never written to each other (no session). On day 0 both are
+    unlocked long enough for Alice to read Bob's mail record, then both
+    lock. On day 20 Alice unlocks (Bob's record has long lapsed) and sends
+    "first": it's mailed, on a session started from the remembered fallback
+    key. On day 25 Bob unlocks and gets it.
+18. **A refresh over a week's edge.** Bob stays unlocked across the end of a
+    week (the clock moves to a minute before it), with his live connection
+    to Alice cut. Alice mails him "edge" just before the edge; Bob's next
+    refresh comes after it, and he gets "edge" from last week's box.
 
 ## Decisions this spec makes
 
@@ -127,19 +154,19 @@ Then:
 | M4 | **One holder per message** (decided Q6), the next only on failure (M10). | Twice the space bought little; M10's re-mail covers a lost holder. |
 | M5 | **Boxes.** Mail sits in a box per (sender, reader) pair per week: `box = blake3::derive_key("mesh/v1/mail-box", pair ‖ reader ID ‖ week)`, 16 bytes, `week = unix days / 7`, `pair` from routing D1 (the self pair for your own devices). Inside it, one slot per reader device: `slot = H("mesh/v1/mail-slot", pair ‖ device key)`, 8 bytes. Weekly (decided Q2). | Only the two people can compute a box. It changes weekly, so a seed can't link a pair across weeks. Slots let a device collect only its own envelopes. |
 | M6 | **Claims.** A holder takes mail only into boxes and slots its owner claimed: `(box, slot, collect tag, expiry)`, `collect tag = H(collect secret)`, `collect secret = H("mesh/v1/mail-collect", device secret ‖ box)`. A device claims, for each contact and the self pair, this week and the next `CLAIM_WEEKS_AHEAD`, and renews daily while unlocked; a claim lasts `CLAIM_LIFE` after its last renewal. A put into an unclaimed slot answers `no-box`. | Strangers can't aim mail at you: they can't compute your boxes, and nothing unclaimed is held. The collect secret comes from the device's own key, so neither the sender nor your other devices can empty your slot. |
-| M7 | **Mail is sealed to the reader's device** (e2ee D8): an Olm envelope, padded (e2ee D9), inside the sealed-sender wrapper, which also carries the sender device's **mail sequence number** `mseq` (one counter per sender device and reader device, never visible to the holder). Puts, claims and collects go from the throwaway identity (seed D7b). | The holder sees a box, a slot, a padded length and times. `mseq` lets the reader open in the sender's order (M8). |
-| M8 | **Opening collected mail.** See *Opening mail*: order by `mseq`, mail before live backlog, mail that can't be opened dropped quietly with no session repair, group changes applied before other events. | vodozemac keeps 40 skipped keys per chain and five chains; opened out of order, mail fails. The sender still holds the event, so a quiet drop costs a re-send, never a message. |
-| M9 | **Receipts are mail, carrying `ok` and `failed`** (decided Q1). After storing collected events the reader puts a receipt into the sender's box at the sender's holders: per sender device, the `mseq` values it answered `ok` and those it answered `failed` (dm's `failed`: not yet a member, a newer version). On collecting it, the sender moves its counters on the `ok`s, as live; a `failed` is mailed again at once, then on `FAILED_BACKOFF`, within D5's 30 days. | Without receipts, people in different time zones show "sending" for ever. A `failed` must come back soon, not after `MAIL_LIFE`: it usually means "send it again once the add has reached me". |
+| M7 | **Mail is sealed to the reader's device** (e2ee D8): an Olm envelope, padded (e2ee D9), inside the sealed-sender wrapper. Inside the seal, before the Olm envelope, the wrapper carries **the sender device's key, the kind (mail or receipt), the mail sequence number `mseq`** (one counter per sender device and reader device) and a **pair tag**: `blake3::keyed_hash(derive_key("mesh/v1/mail-tag", pair), sender device ‖ kind ‖ mseq ‖ envelope)`, 16 bytes. *(The pair tag is new in revision 3.)* A wrapper whose sender device isn't a current device of a contact, or whose tag doesn't match that contact's pair, is dropped and listed nowhere. Puts, claims and collects go from the throwaway identity (seed D7b). | The holder sees a box, a slot, a padded length and times. `mseq` lets the reader open each sender's mail in order (M8). The seal alone proves nothing about the sender: anyone with the reader's device key can make one. The tag is what lets the reader trust "this is Alice's `mseq` 12" before Olm opens it, which M16 needs. Only the pair's own devices can make it; a seed can't. |
+| M8 | **Opening collected mail.** See *Opening mail*: each sender device's mail opened in `mseq` order; the opened events handed to dm in **dm D2's order across senders**, with one more try at the end of the batch for "not a member yet"; mail before the live backlog; mail that can't be opened dropped quietly with no session repair by the reader. *Changed in revision 3 (your review): "group changes first" is gone, for mail and for live. `group_refuses` judges an author against the group as it stands when the event is handled, and someone removed is refused for good, so a removal applied first drops the removed member's earlier messages (test 16).* | vodozemac keeps 40 skipped keys per chain and five chains; opened out of order, mail fails. Applying in D2's order is applying in the order the events were written, which is the order the group checks assume. |
+| M9 | **Receipts are mail, carrying `ok`, `failed` and couldn't-open** (decided Q1). After storing collected events the reader puts a receipt into the box the sender collects (M5, with the sender as reader), at the sender's holders from its newest mail record (M11): per sender device, the `mseq` values it answered `ok`, those it answered `failed` (dm's `failed`: not yet a member, a newer version), and those it **couldn't open** (M16). A duplicate collected by mail is answered `ok` again, as live. A receipt is sealed and tagged (M7) with no Olm inside, so a broken session can't stop it, and is never itself answered. On collecting it, the sender moves its counters on the `ok`s, as live; a `failed` is mailed again at once, then on `FAILED_BACKOFF`, within D5's 30 days. | Without receipts, people in different time zones show "sending" for ever. A `failed` must come back soon, not after `MAIL_LIFE`: it usually means "send it again once the add has reached me". |
 | M10 | **Full or gone holders.** A put answered `full`, `no-box` or `slow-down`, or unanswered for `HOLDER_WAIT`, goes to the reader's next holder; if none take it, the event keeps waiting on the sender (D5) and is tried again at the next refresh. Mail on a holder that lost it is mailed again by the **`since` rule** (M12). | A full or vanished holder delays mail; the sender keeps every event until the reader's `ok`. |
-| M11 | **The mail record, and what a sender remembers.** Per (my device, contact), under a weekly lookup `H("mesh/v1/mail-lookup", pair ‖ sender ID ‖ week)`, encrypted and signed as routing D3: the signed device list, device key, e2ee bundle and fallback key (no one-time key, no address), and the device's holders, each with its **`since`** (M12). It lasts `MAIL_RECORD_LIFE` (7 days), is put again daily and on any change; the getter asks for this week and last. **A sender remembers, per contact device, the last mail record it read** (holders, `since`, device key, fallback key) and keeps its Olm session, in its sealed store, for `REMEMBER_LIFE` after the record lapses. Mail to a device whose record has lapsed goes to the remembered holders on the existing session. | The record can't last 30 days: its device list would be stale. But a device that's away doesn't change its holders or rotate its fallback key (e2ee: replaced weekly, while unlocked), so what the sender saw last is still right while the reader is away. A device the sender has no session with, and no record for, can't be mailed: it waits (D5). The fallback key is replaced only when the device publishes records (`FALLBACK_LIFE`, 7 days, in `mesh-e2ee`), so only while it's unlocked. |
-| M12 | **The `since` rule (a wiped holder).** For each holder, the mail record says since when that holder's claims are good: the time of the device's first claim there that's still standing. A device that finds its claims gone (a renewal or collect answered `no-box`) claims again and sets `since` to now. A sender that reads a `since` later than a put it made there that has no `ok` mails that event again at once, to the reader's holders as listed now. The sender keeps, per event and reader device, the holder and time of its last put (M15). | The reader sees a wipe first, because its own claims are gone. A sender has no other way to know. Without this, a wiped holder still listed means nothing is mailed again for `MAIL_LIFE`. |
-| M13 | **Padding hides how many boxes are real.** Each device claims, renews and collects in buckets of `CLAIM_BUCKET` (64) boxes per week (decided Q3): someone with 70 contacts handles 128. The extra boxes are **dummies**: `H("mesh/v1/mail-dummy", device secret ‖ i ‖ week)`, stable across a week like real ones, claimed, renewed and collected exactly as real ones are. | If dummies changed at each renewal, or weren't collected, the seed would see which claims are real. It still sees which boxes ever get puts: padding hides your number of contacts, not who's writing to you this week (M17). |
+| M11 | **The mail record, read ahead and remembered.** Per (my device, contact), under a weekly lookup `H("mesh/v1/mail-lookup", pair ‖ sender ID ‖ week)`, encrypted and signed as routing D3: the signed device list, device key, e2ee bundle and fallback key (no one-time key, no address), and the device's holders, each with its **`since`** (M12). It lasts `MAIL_RECORD_LIFE` (7 days) and is put at unlock, daily and on any change. **Each device reads every contact's mail record at unlock and daily** (`MAIL_RECORD_READ`): this week's lookup for everyone, then last week's only for contacts with nothing this week. *(Changed in revision 3: before, a record was read only when mailing, so someone who first wrote on day 8 had nothing.)* **It remembers, per contact device, the newest record it has read** (holders, `since`, device key, fallback key), in its sealed store, for `REMEMBER_LIFE` after that record lapses, and keeps its Olm session with that device as long. A read that finds nothing leaves the memory as it is. Mail goes from the newest record, read or remembered. | The record can't last 30 days: its device list would be stale. But a device that's away doesn't change its holders or rotate its fallback key (`FALLBACK_LIFE`, 7 days in `mesh-e2ee`, renews only when the device publishes records, so only while unlocked), so what the sender read last is still right while the reader is away. Reading ahead means the sender has it whenever it first needs it (test 17). A device the sender has never read a record for, and has no session with, can't be mailed: it waits (D5). |
+| M12 | **The `since` rule (a wiped holder).** For each holder, the mail record says since when that holder's claims are good: the time of the device's first claim there that's still standing. A device that finds its claims gone (a renewal or collect answered `no-box`) claims again and sets `since` to now. A sender that reads a `since` later than a put it made there that has no `ok` mails that event again at once, to the reader's holders as listed now. The sender keeps, per event and reader device, the holder, time and `mseq` of its last put (M15). | The reader sees a wipe first, because its own claims are gone. A sender has no other way to know. Without this, a wiped holder still listed means nothing is mailed again for `MAIL_LIFE`. |
+| M13 | **Padding hides how many boxes are real.** Each device claims, renews and collects in buckets of `CLAIM_BUCKET` (64) boxes per week (decided Q3): someone with 70 contacts handles 128. The extra boxes are **dummies**: `H("mesh/v1/mail-dummy", device secret ‖ i ‖ week)`, stable across a week like real ones, claimed, renewed and collected exactly as real ones are. | If dummies changed at each renewal, or weren't collected, the seed would see which claims are real. What it doesn't hide is in M17. |
 | M14 | **Closed seeds** (decided Q8). `--mail-token <secret>`: the seed takes claims and puts only with that token. Its ticket carries it (`&mail=…`), which reaches friends only inside the encrypted mail record. Without the flag a seed is open. | Lets anyone run a seed for their own friends without serving the world. A token passed on is changed by the operator; the next records carry the new one. |
-| M15 | **The "already mailed" mark is saved.** Per (event, reader device): the holder, put time and `mseq` of its last put, kept with dm's counters in the sealed log index, saved once per batch of puts. Unlock reads it; only events with no mark, or that M9, M10 or M12 says to mail again, are put. | Without it every unlock re-mails everything still waiting. |
-| M16 | **Healing a broken session by mail.** A sender whose mail to a reader device has had no receipt for `HEAL_AFTER` while that device's mail record shows it has been online since (the record's `created` is later than the puts) concludes the session is broken. It starts a fresh outbound session from the record's fallback key and mails what's unacknowledged on it. At most once per `HEAL_AFTER` per device. | The reader can't say "I couldn't open that" (it can't tell from whom), and mail failures are usually just order (M8). A device that's been online and still hasn't answered anything is the one signal that something is really broken. |
-| M17 | **What a seed learns, plainly.** Per box: when it was claimed and renewed, by a throwaway session; each put's padded size and time, and the session and network it came from; each collect and delete, with its session. It can't see who anyone is, what's said, which chat, or which boxes belong together, from its files. Padding hides how many contacts a session has, **not which of its boxes are getting mail this week**. A live operator can link sessions, as seed D10b already says for address records: the session that claims box X and the session that puts into X are contacts; over a week, that graph with volumes and times. | Stated so nobody is surprised. It's what any store-and-forward server learns, minus names and content. |
+| M15 | **The "already mailed" mark is saved.** Per (event, reader device): the holder, put time and `mseq` of its last put, kept with dm's counters in the sealed log index, saved once per batch of puts. Unlock reads it; only events with no mark, or that M9, M10, M12 or M16 says to mail again, are put. | Without it every unlock re-mails everything still waiting. The `mseq` is how a receipt's lists map back to events. |
+| M16 | **Couldn't open, by receipt.** The reader unseals the wrapper and checks its tag (M7) before Olm opens, so it knows the sender device and `mseq` of mail it can't open, and lists them in its receipt (M9). The reader does nothing else: no session repair. The sender, for each listed `mseq` its marks (M15) say it put to that device: **ignores it if the event already has an `ok`**; otherwise mails the event again at once **on a fresh outbound session** from the newest fallback key it holds for that device (read or remembered, M11), which replaces the old session for everything after. At most one fresh session per reader device per `FRESH_SESSION_MIN` (1 hour, e2ee D4's limit), and never twice from the same fallback key: a further couldn't-open waits for a newer record. *Changed in revision 3 (your review): replaces `HEAL_AFTER` and the reading of the record's `created`.* | Revision 2 said the reader couldn't tell whose mail it couldn't open; with the tag it can. Most couldn't-opens are only order (test 13): those events already have an `ok` and nothing happens. A truly broken session heals in one round of mail, with the two never online together (test 14). The limits stop a stale fallback key from starting a session every hour for a month. |
+| M17 | **What a seed learns, plainly.** Per box: when it was claimed and renewed, by a throwaway session; each put's padded size and time, and the session and network it came from; each collect and delete, with its session. It can't see who anyone is, what's said, which chat, or which boxes belong together, from its files. Padding hides how many contacts a session has from **a holder that isn't also its record seed**: the seed you put address and mail records on already sees one put per contact (routing D4, M11). It hides **not which of its boxes are getting mail this week**: dummies never get puts. A live operator can link sessions, as seed D10b already says for address records: the session that claims box X and the session that puts into X are contacts; over a week, that graph with volumes and times. Receipts show it both ways. | Stated so nobody is surprised. It's what any store-and-forward server learns, minus names and content. |
 | M18 | **Junk on an open seed.** Puts only into claimed slots within the box's quota, so a friend can fill only the boxes between you two. A stranger can still claim boxes of their own and fill them: bounded by the seed's rates per throwaway key, per network and through a relay, and by `MAIL_STORE_MAX`. A full seed answers `full`, and mail waits on the sender (M10): an attack costs delay, not loss. No stamp for the beta (decided Q7); the built-in seeds run with a small `MAIL_STORE_MAX`. If the stamp proposal is adopted later, mail services take the same per-key-per-hour stamp as the others. | No holder can tell a stranger from a friend. The defence is that a stranger can spend only the seed's space, not aim it at anyone, and only so fast. |
-| M19 | **Nothing identifying is logged**: counts only (claims, puts, collects, refusals, bytes held per hour). | As seed D10 and routing D10. |
+| M19 | **Nothing identifying is logged**: counts only (claims, puts, collects, couldn't-opens, refusals, bytes held per hour). | As seed D10 and routing D10. |
 
 ### Opening mail (M8)
 
@@ -159,23 +186,27 @@ So a device opens in this order:
 1. **Collect first.** At unlock, a device collects from all its holders
    before it takes the backlog of a live connection. Live envelopes that
    arrive meanwhile wait, up to `HOLDER_WAIT`.
-2. **Unseal everything collected**, then group by sender device and sort by
-   `mseq`. Open each sender device's envelopes in that order. Mail from
-   several holders merges by `mseq`, so which holder it came from doesn't
-   matter.
-3. **What can't be opened is dropped quietly.** A `MissingMessageKey`,
-   `TooBigMessageGap` or old-chain failure on mail means the sender
-   re-encrypted it since (it went live, or was mailed again): the sender
-   still holds the event and will send it again if it has no `ok`. It's
-   counted in the log, answered nowhere, and **never starts a session repair
-   on its own** (e2ee D4's fresh-session answer is for live first messages
-   only). A healing session (M16) arrives as a first message, which opens.
-4. **Hand to dm in one batch per collect, group changes first**: every
-   `Group` body in the batch is applied before the other events, so a
-   member's message collected with their add shows at once. Anything dm
-   still answers `failed` goes back by receipt (M9).
+2. **Unseal and check every wrapper** (M7); drop those that fail. Group the
+   rest by sender device, sort by `mseq`, and open each sender device's
+   envelopes with Olm in that order. Mail from several holders merges by
+   `mseq`, so which holder it came from doesn't matter. This order is for
+   Olm only.
+3. **What can't be opened is dropped quietly** and listed as couldn't-open
+   in the receipt (M16). A `MissingMessageKey`, `TooBigMessageGap` or
+   old-chain failure on mail usually means the sender re-encrypted it since
+   (it went live, or was mailed again). It's counted in the log and **never
+   starts a session repair on the reader's side** (e2ee D4's fresh-session
+   answer is for live first messages only). A fresh session from the sender
+   arrives as a first message, which opens.
+4. **Hand the opened events to dm as one batch, in D2's order:** each chat's
+   events sorted by (`seq`, event ID), whoever sent them. dm applies them in
+   that order, as it applies a live batch. **An event answered "not a member
+   yet" gets one more try at the end of the batch**, after everything else
+   in it; if it's still refused, it goes back `failed` by receipt (M9).
 5. **Then the live backlog**, as today. Its duplicates of mail just opened
    are removed by event ID.
+
+Live delivery is unchanged: no reordering, no retry at the end.
 
 ### Limits (named, derived from the 30-day promise)
 
@@ -185,57 +216,68 @@ So a device opens in this order:
 | `MAIL_LIFE` | 30 days | An envelope is kept this long after its put: the promise |
 | `CLAIM_WEEKS_AHEAD` | 5 | Weeks claimed beyond this one: ⌈30 / 7⌉ + 1, so a box exists for every day of 30 away |
 | `CLAIM_LIFE` | 35 days | 30 days away plus the 5 days of a partial first week; mail put on day 30 is still collectable |
-| `COLLECT_WEEKS_BACK` | 5 | Weeks collected behind this one at unlock (this week only at a refresh) |
+| `COLLECT_WEEKS_BACK` | 5 at unlock, 1 at a refresh | Unlock: the promise. Refresh: last week too, so a device unlocked over a week's edge misses nothing (test 18) |
 | `MAIL_RECORD_LIFE` | 7 days | The fallback key's week |
-| `REMEMBER_LIFE` | 30 days | The promise: a sender keeps a lapsed record's holders and the session this long |
+| `MAIL_RECORD_READ` | at unlock and every 24 hours | A sender holds every contact's record before it first needs it (M11) |
+| `REMEMBER_LIFE` | 30 days | The promise: a sender keeps a lapsed record and the session this long |
 | `CLAIM_BUCKET` | 64 | Decided Q3 |
 | `BOX_MAX_BYTES` | 4 MiB | Per box (one sender, one reader, one week) |
 | `BOX_MAX_ENVELOPES` | 1,000 | Per box; D5's 2,000 events over the weeks they span |
 | `MAX_HOLDERS` | 3 | Fits the mail record |
+| `MAIL_TAG` | 16 bytes | The pair tag (M7) |
 | `MAIL_FLUSH` | 3 s | Lock and quit wait this long for puts |
 | `HOLDER_WAIT` | 10 s | A holder silent this long is skipped |
 | `FAILED_BACKOFF` | 30 min, doubling to 1 day | A `failed` is mailed again at once, then after these |
-| `HEAL_AFTER` | 2 days | No receipt this long, with the reader seen online since |
-| `MAIL_STORE_MAX` | 2 GiB on the built-in seeds for the beta; operator flag `--mail-max` | Decided Q7. Claims and mail count against it together |
-| Seed rates | per throwaway key: 8,192 claims or renewals and 600 puts an hour, 64 MiB of puts an hour, 120 collects a minute; per network twice that; everyone through a relay, 100 times the per-key figures | Sized for `MAX_CONTACTS` (1,000): 1,001 boxes padded to 1,024, × 6 weeks, is 6,144 claims a day |
+| `FRESH_SESSION_MIN` | 1 hour | e2ee D4's once an hour per device (M16) |
+| `MAIL_STORE_MAX` | 2 GiB on the built-in seeds for the beta (decided Q12); operator flag `--mail-max` | Claims, mail records and mail count against it together |
+| Seed rates | per throwaway key, an hour: 8,192 claims or renewals; 16,384 collect queries; 600 puts and 64 MiB of puts; 2,048 mail-record puts; 4,096 mail-record lookups. Per network twice that; everyone through a relay, 100 times the per-key figures | Sized for `MAX_CONTACTS` (1,000): 1,001 boxes padded to 1,024 × 6 weeks is 6,144 claims, and an unlock's 6,144 collect queries plus two refreshes of 2,048 is 10,240; one record per contact, and up to two lookups each at a read |
 
 ### What it costs
 
-Assumptions: one holder; a typical mail record of about 1.1 KB (two
-devices' list, the e2ee field, three holders); a claim of 64 bytes (box,
-slot, tag, expiry) and a renewal or collect query of 24 bytes (box, slot);
-frames and seals are included in round figures. "Round trips" are on one
-connection to the seed, which is already open for address records.
+Assumptions: one holder; one device per contact; a typical mail record of
+about 1.1 KB (two devices' list, the e2ee field, three holders); a claim of
+64 bytes (box, slot, tag, expiry), a renewal or collect query of 24 bytes
+(box, slot) and a record lookup of 16; frames and seals are included in
+round figures. "Round trips" are on one connection to the seed, which is
+already open for address records. *Revision 3 adds the record reads, last
+week in refresh collects, and the records on the seed, which revision 2
+left out.*
 
 | | 100 contacts | 1,000 contacts |
 |---|---|---|
 | Boxes per week (with the self pair, padded to 64) | 128 | 1,024 |
 | **At unlock** | | |
-| Collect: this week and 5 back | 1 round trip, 768 queries, 18 KB up, plus any mail down | 1 round trip, 6,144 queries, 147 KB up |
+| Collect: this week and 5 back (first, before anything below) | 1 round trip, 768 queries, 18 KB up, plus any mail down | 1 round trip, 6,144 queries, 147 KB up |
 | Claims: 6 weeks (first unlock only; later the daily renewal covers them) | 1 round trip, 768 claims, 49 KB | 1 round trip, 6,144 claims, 393 KB |
+| Mail records read (M11) | 1 round trip (2 at a week's start), 101 lookups, 2 KB up, about 110 KB down | 1 to 2 round trips, 1,001 lookups, 16 KB up, about 1.1 MB down |
+| Mail records put | 1 round trip, 110 KB up | 1 round trip, 1.1 MB up |
 | **Per day** | | |
 | Renewals (daily) | 1 round trip, 768, 18 KB | 1 round trip, 6,144, 147 KB |
-| Refresh collects (this week only, every 30 min, 48 a day) | 48 round trips, 128 each: 147 KB a day | 48 round trips, 1,024 each: 1.2 MB a day |
-| Mail records put (daily, one per contact) | 1 round trip, 110 KB | 1 round trip, 1.1 MB |
-| Mail records got (only for contacts mailed while away, at most once a day each) | up to 100, typically a few | up to 1,000, typically a few |
-| Remembered records in the sealed store | about 50 KB | about 500 KB |
-| Saved "mailed" marks (M15) | 16 bytes per waiting event and device | the same |
-| **On the seed, per person** | claims: 768 × 64 B = 49 KB | 6,144 × 64 B = 393 KB |
+| Refresh collects (this week and last, every 30 min, 48 a day) | 48 round trips, 256 each: 295 KB a day | 48 round trips, 2,048 each: 2.4 MB a day |
+| Mail records put (daily) | 110 KB | 1.1 MB |
+| Mail records read (daily) | about 110 KB | about 1.1 MB |
+| Remembered records in the sealed store | about 110 KB | about 1.1 MB |
+| Saved "mailed" marks (M15) | about 24 bytes per waiting event and device | the same |
+| **On the seed, per person** | claims 49 KB, records about 220 KB (this week's and last week's): **about 270 KB** | claims 393 KB, records about 2.2 MB: **about 2.6 MB** |
 
-At 1,000 contacts the daily total is about 2.5 MB up, against routing's
+At 1,000 contacts the daily total is about **4.7 MB**, against routing's
 existing address records of about 24 MB a day at that size (1,000 × 500 B ×
-48). At 100 it's about 300 KB. The beta's seeds (2 GiB of mail) hold claims
-for about 5,000 people of 1,000 contacts, or 40,000 of 100, before any mail.
+48). At 100 it's about **530 KB**. A beta seed's 2 GiB holds claims and
+records for about **800 people of 1,000 contacts, or 7,900 of 100**, before
+any mail. Revision 2 said 5,000 and 40,000; it had left the records out.
 
 **Test 1's 5 seconds.** Bob's helper is online when its relay connection is
 up (measured: a cold ping by ID took 0.64 s on n0's relays, routing smoke
 2026-11-09). His first seed connection opens for address records anyway;
-the collect is one more round trip on it: 768 queries, 18 KB, answered with
-one envelope. Opening and storing it is under 10 ms (dm's intake: 10,000
-events in 1.5 s). So "one" shows about 1 to 1.5 s after the helper is
-online, over the internet with a 100 ms round trip; 5 s leaves room for a
-slow relay. At 1,000 contacts the collect is 147 KB up, about 1 s more on a
-slow uplink: still inside 5 s.
+the collect is the first thing sent on it, one round trip: 768 queries,
+18 KB, answered with one envelope. Bob needs nothing of Alice's to open it:
+it's a first message on his own keys, or the next on their session.
+Opening and storing it is under 10 ms (dm's intake: 10,000 events in 1.5 s).
+So "one" shows about 1 to 1.5 s after the helper is online, over the
+internet with a 100 ms round trip; 5 s leaves room for a slow relay. At
+1,000 contacts the collect is 147 KB up, about 1 s more on a slow uplink:
+still inside 5 s. The record read and puts (about 2.2 MB) go after it and
+don't hold it up.
 
 ## Behaviour
 
@@ -245,10 +287,10 @@ slow uplink: still inside 5 s.
 2. For each device it goes to with no open connection, the helper takes
    what's after that device's counter (D5's limits) and not already marked
    mailed (M15), encrypts it on the session with that device (or starts one
-   from the mail record's fallback key), seals it with the next `mseq`
+   from the record's fallback key), seals and tags it with the next `mseq`
    (M7), and puts it into this week's box at the first of the reader's
    holders that takes it (M10). The reader's holders and keys come from the
-   latest mail record, or the remembered one (M11).
+   newest mail record, read or remembered (M11).
 3. Live delivery is unchanged.
 4. Own devices get mail only for events authored on this device and for
    read markers; everything else reaches them from its author.
@@ -256,130 +298,106 @@ slow uplink: still inside 5 s.
 ### Receiving
 
 1. At unlock: collect (this week and `COLLECT_WEEKS_BACK`), open as *Opening
-   mail* says, store, delete (collect secret), put receipts (M9). Renew
-   claims if due; if a renewal or collect answers `no-box`, claim again and
-   move that holder's `since` (M12).
-2. At each refresh: collect this week only, the same way.
+   mail* says, store, delete (collect secret), put receipts (M9). Then read
+   every contact's mail record (M11), act on receipts and `since` (M9, M12,
+   M16), and put this device's records. Renew claims if due; if a renewal
+   or collect answers `no-box`, claim again and move that holder's `since`
+   (M12).
+2. At each refresh: collect this week and last, the same way. Once a day,
+   read the records again.
 
-## Changes this needs elsewhere (proposals, dated 2026-11-12, not made)
+### Choosing your own holder (v1)
 
-**routing**
+`--holder <ticket>` (repeatable, up to `MAX_HOLDERS`) or `MESH_HOLDERS`
+(space-separated), on the helper, as `--seed` and `MESH_SEEDS` are. The
+device lists those in its mail record, in that order; with neither set, the
+built-in seeds. Each device sets its own. No screen in v1 (PLAN-mailbox
+says why).
 
-- *D3:* a second record kind, the **mail record** (M11), beside the address
-  record: weekly lookup (`mesh/v1/mail-lookup`), same slot, encryption and
-  signing, at most 4,096 bytes; put daily and on change for every contact
-  and the self pair.
-- *D5:* the record kind travels with `addr-put` and `addr-get`, or two new
-  services; the plan picks.
-- *D6:* the seed keeps a mail record up to 7 days ahead (address records:
-  3 hours), within the same totals.
+## Changes made elsewhere (2026-11-12)
 
-**seed**
+Approved with the spec, less "changes first", and written into each spec
+under a dated heading:
 
-- *New D:* services `mail-claim` (claim or renew), `mail-put`, `mail-get`
-  and `mail-take` (collect secret, then delete), batched, from the
-  throwaway identity.
-- *D8:* the mail rates and caps in *Limits*; `full` at `MAIL_STORE_MAX`.
-- *D9:* mail doesn't fit one file rewritten on change; the plan picks the
-  layout (decided Q10).
-- *D10b:* add M17's list.
-- *New flags:* `--mail-token` (M14), `--mail-max`.
+- **routing** (*Changed 2026-11-12 by `mailbox`*): D3 the mail record as a
+  second record kind; D5 two services, `mrec-put` and `mrec-get`; D6 its
+  limits and its 7 days ahead.
+- **seed** (*Changed 2026-11-12 by `mailbox`*): the mail services; D8's mail
+  rates and `full`; D9 the mail store's layout; D10b M17; the flags
+  `--mail`, `--mail-token`, `--mail-max`, `--clock-offset`.
+- **e2ee** (*Changed 2026-11-12 by `mailbox`*): D4's fresh-session answer is
+  live only; D14's keep and `key-request` don't apply to mail; D8's wrapper
+  carries the sender device, kind, `mseq` and the pair tag (the tag pending
+  your review).
+- **dm** (*Changed 2026-11-12 by `mailbox`*): D5 mail and receipts; D5's
+  saved index with marks and remembered records; D8 what own devices get by
+  mail; receiving, a mailed batch in D2's order with one more try at the
+  end; the note "What `mailbox` changes" now points here.
 
-**e2ee**
+## Attacking revision 3
 
-- *D4:* "a first message that still can't be opened is answered with a
-  fresh session" applies to live delivery only; mail that can't be opened
-  is dropped (M8), and a broken session heals by M16.
-- *D14:* the 30-day keep and `key-request` don't apply to mail (M8, step 3):
-  the sender holds the event.
-- *D8:* the sealed wrapper carries `mseq` (M7).
+Revisions 1 and 2's attacks still stand as answered there, now in M1 to
+M19, except revision 2's 2 and 3 (healing on absence, healing from a stale
+record), which M16's new form replaces. New ones:
 
-**dm**
-
-- *D5:* "when a connection to that device opens" becomes "when a connection
-  opens, or by mail with none open (mailbox M1, M2)". Receipts (M9) move the
-  counter as live answers do; a `failed` by receipt is sent again as M9 says.
-- *D5:* the counters' saved index gains M15's marks and M11's remembered
-  records.
-- *D8:* own devices get by mail only events authored on this device and
-  read markers.
-- *Receiving:* a batch applies its group changes first (M8, step 4). Today
-  dm applies a live batch in order; the same rule suits live too, and costs
-  nothing.
-- *The note "What mailbox changes"* becomes a pointer here.
-
-## Attacking revision 2
-
-Revision 1's attacks (send-then-quit, the holder's word, counted claims, the
-sender emptying a box, strangers' own boxes, a flooding friend, where the
-holders go, revoked devices, weekly linking, group weight, duplicates, a
-wiped seed) still stand as answered there, now in M1 to M18. New ones:
-
-1. **Dummies give themselves away.** If dummy boxes changed at each
-   renewal, or were claimed but never collected, a seed could tell them
-   from real ones. *Changed:* dummies are derived per week and treated
-   exactly like real boxes (M13). What's left: dummies never get puts, so a
-   box that does is real. Stated in M17.
-2. **Healing on a mere absence.** A reader who's simply away doesn't
-   answer either. If silence alone triggered a fresh session, every long
-   absence would start one. *Changed:* healing needs the reader's mail
-   record to show it's been online since (M16).
-3. **Healing from a stale record.** M16 needs a fresh mail record; with
-   only a remembered one (the reader's record has lapsed), the sender can't
-   tell. *Accepted:* a reader who's away can't be healed until they've been
-   online again for a day (a new record), which is when healing can help
-   anyway.
-4. **The remembered fallback key goes stale.** A reader online while the
-   sender is away rotates its fallback key weekly; the sender's memory
-   then holds a key the reader no longer has. *Not a problem in practice:*
-   the sender only needs a fallback key for a device it has no session
-   with; for one it has a session with, the session carries on. A brand-new
-   device the sender has never reached waits for a live meeting or a fresh
-   record (stated in M11).
-5. **A `failed` loop.** A message that will always fail (its sender really
-   isn't a member) would be mailed again for ever. *Bounded:*
-   `FAILED_BACKOFF` doubles to a day and stops at D5's 30 days; D7's
-   `NotInChat` is dropped as now, not answered `failed`.
-6. **Receipts telling the seed who replies to whom.** A receipt is a put
-   from the reader's session into the sender's box, so the operator sees
-   the pair's traffic both ways. *Accepted:* M17 already says a live
-   operator can link the pair.
-7. **`since` spoofing.** Could someone make a sender mail everything again
-   by faking a `since`? *No:* it's in the reader's signed, encrypted mail
-   record, which only the pair can read and only the reader can sign.
-8. **A wiped seed while the reader is away too.** Nobody sees the wipe
-   until the reader returns, re-claims and publishes `since`; the sender
-   then mails again when it next unlocks. *Accepted:* delay, not loss (puts
-   into the wiped seed meanwhile answer `no-box` and wait on the sender).
-9. **2,000 mailed envelopes.** Opened in `mseq` order the gap is one each
-   time, so `MAX_MESSAGE_GAP` doesn't bite; only a hole of 2,000 lost
-   envelopes would, and D5 stops at 2,000 events anyway.
-10. **The promise vs a full seed.** A 2 GiB beta seed can fill. *Stated:*
-    the promise holds while the holder has room; past that, mail waits on
-    the sender (the Objective says so).
-11. **Clock skew at a week's edge.** Sender and reader may disagree on the
-    week. *Covered:* the reader claims weeks ahead and collects five back,
-    so either week's box is claimed and collected.
-12. **The first collect delays live messages.** Live envelopes wait up to
-    `HOLDER_WAIT` while mail is collected. *Accepted:* at most 10 s, once
-    per unlock, and only when a holder is slow; normally one round trip.
+1. **A removed member back-dates.** Dave, removed, sends with a `seq` from
+   before his removal, and it reaches Bob in the same collect as the
+   removal: sorted by D2, it's taken. *Accepted, not new:* live, the same
+   message reaching Bob before the removal is taken too. Once Bob holds the
+   removal, anything from Dave is refused, whatever its `seq`. D2's
+   one-day-ahead bound doesn't stop back-dating, and never did.
+2. **"Not a member yet" at the end of a batch, still not.** The add is in a
+   later collect. *Covered:* `failed` by receipt, mailed again at once (test
+   11).
+3. **A forged couldn't-open.** Could someone make Alice start fresh
+   sessions with Bob, or re-send? *No, short of the pair:* the list arrives
+   only in a receipt with Bob's pair tag, which the seed and Bob's other
+   friends can't make; and Alice acts only on `mseq` values she put that
+   have no `ok`, which she'd re-send anyway. The pair's own devices could
+   churn sessions, at most once an hour.
+4. **A fresh session from a stale fallback key.** Bob rotated twice while
+   Alice was away (vodozemac keeps the current and previous fallback key),
+   so her remembered key is gone: the fresh session fails too. *Bounded:*
+   M16 never starts a second from the same key; the next daily read brings
+   Bob's newest, which works.
+5. **A receipt itself can't be opened.** It's sealed with no Olm, so only a
+   bad seal or tag stops it, and then it was never Bob's: dropped.
+6. **The record seed counts your contacts.** Reading every record daily
+   shows that seed one lookup per contact. *Not new:* address-record puts
+   already show it one put per contact (routing D4). Stated in M17: padding
+   hides the count only from a holder that isn't your record seed, such as
+   your own seed holding mail while records go to the built-in ones.
+7. **Reading ahead costs.** 1.1 MB a day at 1,000 contacts. *In the table.*
+   Last week's lookup only for misses halves it.
+8. **A read that finds nothing wipes the memory.** Then test 17 fails.
+   *Changed:* nothing found leaves the memory (M11).
+9. **The beta store fills with records, not mail.** 2.6 MB a person at
+   1,000 contacts. *Stated:* about 800 such people per 2 GiB; the beta has a
+   handful. `MAIL_STORE_MAX` counts records too, so a full seed answers
+   `full` and mail waits on the sender.
+10. **A week's edge on a refresh.** *Changed:* a refresh collects last week
+    too (test 18).
+11. **The end-of-batch retry hides a real refusal.** It's one more call into
+    dm with the same checks; a refusal other than "not a member yet" isn't
+    retried.
 
 ## Testing strategy
 
 - Unit tests: box, slot and dummy derivation; claim padding; quotas and
-  expiry; the collect secret; receipts with `ok` and `failed`; `mseq`
-  ordering across holders; the `since` rule; the saved marks; healing's
-  trigger.
+  expiry; the collect secret; the pair tag; receipts with `ok`, `failed`
+  and couldn't-open; `mseq` ordering across holders; D2 order across
+  senders and the end-of-batch retry; the `since` rule; the saved marks;
+  the fresh-session limits; reading ahead and remembering.
 - Seed tests for each service, limit, token and `full`.
-- Process tests: acceptance tests 1 to 15, with a moved clock for 9 and 10;
-  Mesh-Voice's checkpoint test gains test 1 through the app.
+- Process tests: acceptance tests 1 to 18, with a moved clock for 9, 10, 16,
+  17 and 18; Mesh-Voice's checkpoint test gains test 1 through the app.
 
 ## Boundaries
 
 - **Always:** the counter moves only on the reader's `ok`; logs hold counts
   only; every limit a named constant.
 - **Ask first:** a new dependency; a change to any limit; anything that
-  lets a holder see more than M17 says.
+  lets a holder see more than M17 says; turning mail on at the home seed.
 - **Never:** unsealed mail on a holder; collecting without the collect
   secret; mail that skips the reader's own checks (dm D2, D7).
 
@@ -395,19 +413,18 @@ wiped seed) still stand as answered there, now in M1 to M18. New ones:
    built-in seeds; decided before a public release (M18).
 8. Closed seeds: **yes** (M14).
 9. A "held" mark: **no**.
-10. Seed storage for mail: **the plan decides**.
+10. Seed storage for mail: **the plan decides** (PLAN-mailbox).
+11. Group changes first for live batches: **no**, and not for mail either
+    (M8).
+12. `MAIL_STORE_MAX` for the beta: **2 GiB per built-in seed**.
+13. Refresh collects: **every 30 minutes, this week and last**.
+14. The moved clock: **`--clock-offset <secs>`, test-only, on the helper and
+    the seed**, as `--record-ttl` is.
 
 ## Open questions, with what I recommend
 
-1. **Batch order in dm for live delivery too.** M8 step 4 applies group
-   changes first in a mailed batch. Recommend **the same for live
-   batches**: it's free, and it removes the live case of test 11.
-2. **`MAIL_STORE_MAX` for the beta.** Recommend **2 GiB per built-in seed**:
-   claims for a few thousand people with room for their mail; the homelab's
-   disk takes it easily.
-3. **Refresh collects.** Recommend **every 30 minutes, this week only**, as
-   above: mail for someone online is rare (it's what live delivery is for),
-   so this is a backstop, and at 1,000 contacts it's 1.2 MB a day.
-4. **The moved clock for tests 9 and 10.** Recommend a **test-only helper
-   flag** (`--clock-offset <secs>`), like `--record-ttl`, rather than
-   waiting or faking time in a library.
+1. **The pair tag (M7).** New in revision 3: without it the wrapper can't be
+   trusted for M16. 16 bytes per envelope, no new dependency. Recommend
+   **yes**.
+2. **The test switch that cuts connections** (tests 11 and 18). Recommend a
+   test-only helper flag, `--cut <seed|live>`, beside `--clock-offset`.
