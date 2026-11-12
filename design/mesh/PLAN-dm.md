@@ -371,14 +371,31 @@ each copy involved (`grep mesh-node: ~/meshA.log`).
    lines in the group and one to C in a new 1:1 (C's row → **Message**).
    Reopen C and unlock it. *See:* all three arrive within 5 s, in order;
    A's "sending" marks clear then.
-7. **Linking** (PLAN-link task 6). On A, Your ID → Linked devices → **Link
-   a device**; on the Windows PC, **I already have Mesh**, type the code,
-   then A's username and a new password for the PC. *See:* the PC shows
-   A's friends, and once it has caught up, A's chats with B and the group.
-   Then on A remove the PC from Linked devices. *See:* A lists one device,
-   and the PC can't reach A or B any more (Ping from the PC fails).
-   On the PC, start Mesh from PowerShell with `2> meshPC.log`; if this
-   step fails, also send that log's `mesh-node:` lines.
+7. **Linking** (PLAN-link task 6). First, the PC's build (below). On A,
+   Your ID → Linked devices → **Link a device**; on the PC, **I already
+   have Mesh**, and type the code. When A asks "Link *name*?", **wait 40 s
+   before clicking Link**: before be2d617 the PC gave up after 30 s, so
+   this checks the fix. Then, on the PC, A's username and a new password
+   for it. *See:* the PC shows A's friends, and once it has caught up, A's
+   chats with B and the group. Then on A remove the PC from Linked
+   devices. *See:* A lists one device, and the PC can't reach A or B any
+   more (Ping from the PC fails). If this step fails, also send the
+   `mesh-node:` lines from the PC's log.
+
+   **The PC's build of both programs.** Mesh-Voice and Mesh-Node are
+   checked out side by side on the PC (the folder names `Mesh-Voice` and
+   `Mesh-Node`; Mesh-Node is private, so the PC needs your GitHub login).
+   In each, `git pull` to the pushed commits (Mesh-Node 51480eb, Mesh-Voice
+   0014a8a or later; linking needs nothing newer). Then in Mesh-Voice, in PowerShell,
+   `installer\build.ps1`: it builds Mesh, its two web helpers and
+   `mesh-node` from the Mesh-Node checkout in release, and makes
+   `dist\Mesh-Setup-<version>.exe` (it needs Inno Setup 6). Run that to
+   install: Mesh goes to `%LOCALAPPDATA%\Programs\Mesh` with
+   `mesh-node.exe` beside it. Release Mesh is a window app with no console,
+   so start it with its log kept like this:
+   `Start-Process "$env:LOCALAPPDATA\Programs\Mesh\Mesh.exe"
+   -RedirectStandardError "$HOME\meshPC.log"` (`mesh-node` writes into the
+   same log).
 8. **The seed.** Send me the time you finished. I'll read its hourly line
    for that hour; it should show callers 4 direct, 0 relayed, 0 both ways
    (all on the home network), 0 requests from callers not told apart, and
