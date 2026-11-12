@@ -187,7 +187,9 @@ inside   = version u8 | conversation [16] | kind u8 | sender list seq u64
 ### Mesh-Voice
 
 - A friend's profile gains **Send a test note** and a short list of notes
-  received from them. `dm` replaces both with the chat view.
+  received from them. `dm` replaces both with the chat view. *(Retired
+  2026-11-12, PLAN-dm Task 19: the button and list are gone; the helper
+  keeps `e2eeNote` for its tests.)*
 - Your ID's Linked devices shows "secure messages ready" per device once its
   bundle is published.
 
@@ -298,7 +300,9 @@ constants, derivation contexts and domains as constants
   - A note copied off the wire and replayed is refused.
   - The seed's files and every helper's stderr contain no ID, key or note
     text (the test greps for them).
-- **Two-machine check** (by hand, the module gate, with the homelab seed):
+- **Two-machine check** (by hand, the module gate, with the homelab seed).
+  *Since 2026-11-12 the app has no test notes: send a Mesh chat message
+  instead wherever this says a test note.*
   1. Windows and the Linux box are friends (from social's gate). The Linux
      box locks. Windows sends a test note.
   2. The Linux box unlocks. The note shows within 5 s of connecting.

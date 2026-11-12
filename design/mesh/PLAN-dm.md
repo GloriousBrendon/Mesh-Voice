@@ -406,7 +406,7 @@ each copy involved (`grep mesh-node: ~/meshA.log`).
    address puts and gets above 0 (the devices' records and the link
    record). It holds no ID or text.
 
-- [ ] **Task 19: Retire test notes** (Q4): the buttons go; the helper keeps
+- [x] **Task 19: Retire test notes** (Q4): the buttons go; the helper keeps
   `e2eeNote` for its tests. Size S.
 
 **Checkpoint C (module gate, needs you; in CAPABILITY-MAP's *Before beta*

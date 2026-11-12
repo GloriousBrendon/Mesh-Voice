@@ -132,7 +132,8 @@ its steps are.
 6. **The module gates, two machines on different networks**: seed,
    routing, social, e2ee and dm Checkpoint C (each plan's last
    checkpoint). They need a seed reachable from outside home: the VPS
-   (finding 6). One sitting, after it's up.
+   (finding 6). One sitting, after it's up. e2ee's check sends a Mesh chat
+   message where it says a test note (retired 2026-11-12).
 
 e2ee Checkpoint B's step 4 (a window restored from a backup shows the
 notes) was skipped by hand; the dm process test now checks that a device
