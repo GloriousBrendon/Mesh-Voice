@@ -100,6 +100,10 @@ memory.
   can ignore.
 - Large Spaces (50,000+ members) are future work.
 - Group video is limited by home upload speeds.
+- *Added 2026-11-12 (mailbox M8):* messages from someone removed from a
+  group, written before the removal but not yet seen by whoever removed
+  them, are dropped for good on every device. Discord keeps them, because
+  its server saw them first.
 
 ## Process (Brendon asked for this)
 
