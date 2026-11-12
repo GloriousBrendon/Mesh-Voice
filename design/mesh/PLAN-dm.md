@@ -312,6 +312,31 @@ nothing the process test doesn't.*
 seed. Live chat both ways, edit, delete, react, a picture, and a message
 sent while the other window is closed.
 
+Steps (2026-11-12), on the Linux box at home, with release builds and
+`mesh-node` next to Mesh's binary:
+
+1. Open Mesh as A (your identity). Open a second copy as B with
+   `MESH_DATA=~/meshB` and a new identity. B adds A's ID; A accepts.
+2. A opens a chat with B (needs **Message** on a friend row: Task 18, or
+   pulled forward) and sends "one". It shows on B in under 1 s, with a
+   sound and a notification if B's window isn't focused; on A, "sending"
+   turns to nothing once B has it.
+3. B replies to "one", A reacts 👍 to the reply, B edits its reply (it
+   shows "edited" on both), A deletes "one" for everyone (it goes on both).
+   While one types, the other sees "… is typing…".
+4. Close B. A sends "two" and "three". Reopen B and unlock it: both
+   arrive in order within 5 s, and A's "sending" marks clear.
+5. A picture: waits for Task 18 (files open and send from there).
+6. Linking (PLAN-link task 6): on A, Your ID → Linked devices → **Link a
+   device**; on the Windows PC, **I already have Mesh**, type the code,
+   then A's username and a new password. The PC shows A's friends and,
+   once it has caught up, A's chat with B. Then remove the PC from A's
+   Linked devices: it can't reach A any more.
+7. The seed's hourly line for that hour: callers 3 direct, 0 relayed,
+   0 both ways (all three on the home network), 0 requests from callers
+   not told apart; address puts and gets above 0 (the devices' records,
+   and the link record); no ID or text anywhere in its log.
+
 - [ ] **Task 18: Files and entry points**: pictures from the preview
   first, then `dmFetch`; **Message** on friend rows and profiles; **New
   group**. Size M. **Clicking a received file never runs it:** pictures
