@@ -111,7 +111,7 @@ its steps are.
    play and desktop notifications show; that clicking `run.sh` really
    opens the file manager on its folder and a PDF really opens its viewer
    (the test checks the decision, not the launch); the composer by
-   keyboard (Enter, Shift+Enter, Esc out of a reply); timing as a person
+   keyboard (Enter, Shift+Enter, Esc out of a reply or an edit); timing as a person
    feels it (a message in under 1 s, a waiting one within 5 s of
    reopening).
 2. **Linking** (PLAN-link task 6; steps in PLAN-dm Checkpoint B, step 7):

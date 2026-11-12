@@ -3131,6 +3131,9 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                     session.reacting = None;
                 } else if session.replying.is_some() {
                     session.replying = None;
+                } else if session.editing.take().is_some() {
+                    // As the edit bar's ✕: the draft was the message's text.
+                    session.message_draft = text_editor::Content::new();
                 } else if session.emoji_open {
                     session.emoji_open = false;
                 } else {

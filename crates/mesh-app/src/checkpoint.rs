@@ -311,6 +311,11 @@ fn checkpoint_b_steps_1_to_6() {
     world.until(&mut b, "A's reaction on B", |app| {
         has_row(app, "two") && row(app, "two").reactions.iter().any(|r| r.key == "👍" && !r.by_me)
     });
+    // Esc leaves an edit, as it leaves a reply.
+    let _ = update(&mut b.app, Message::MeshEdit(two.clone(), "two".into()));
+    assert!(session(&b.app).editing.is_some());
+    let _ = update(&mut b.app, Message::Escape);
+    assert!(session(&b.app).editing.is_none() && draft(session(&b.app)).is_empty(), "Esc leaves the edit");
     let _ = update(&mut b.app, Message::MeshEdit(two.clone(), "two".into()));
     send(&mut b, "two, edited");
     world.until(&mut a, "the edit on A", |app| {
