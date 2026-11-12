@@ -5,7 +5,11 @@ revision 3. *Edited 2026-11-12 after approval, at your request: dropped and
 unreachable holders (Task 12, tests 19 and 20) and format numbers (Tasks 1,
 3, 6, 11). Checkpoint A is a line in the report, not a stop, unless test 1
 fails or misses its 5 s; stops for review after Task 5, after Task 10 and at
-Checkpoint B.*
+Checkpoint B. Edited again 2026-11-12 after your review of Tasks 1 to 5:
+Task 5's wording (mail records in the mail store's third log, approved);
+four seed fixes before Task 6 (Task 5b); claims, the record put and the
+record read at once for a new contact (Tasks 6 and 7); two more
+measurements (Task 16).*
 
 The code goes in `GloriousBrendon/Mesh-Node` (the seed's mail store and
 services, the helper's mail path, the mail wrapper in `mesh-e2ee`, the clock
@@ -135,14 +139,37 @@ misses its 5 s):** test 1 passes; the 5 s measured on loopback.
   - Accept: test 6 in full; each limit at its edge in unit tests.
   - Size M.
 - [ ] **Task 5: Mail records on the seed** (routing D3, D5, D6 as changed)
-  - What: `addrs.rs`'s store generic over its limits; `mrec-put` and
-    `mrec-get` as a second instance (7 days ahead, its own rates, counted
-    in `MAIL_STORE_MAX`), in `mail/records`.
+  - What: `mrec-put` and `mrec-get` over the mail store's third log,
+    `mail/records` (seed D9's append-only logs; *changed 2026-11-12 at
+    your review*: not `addrs.rs`'s store made generic, which rewrites one
+    whole file and won't do at gigabytes). Read as address records are
+    (`addr_outer`), answered as `addr-put` and `addr-get` are; 7 days
+    ahead, its own rates, counted in `MAIL_STORE_MAX`. The address-record
+    store is untouched.
   - Accept: the address-record tests pass unchanged; a mail record 7 days
-    ahead is taken and one 7 days and a minute is refused; it sweeps.
+    ahead is taken and one past that (and `CLOCK_ROOM`, Task 5b) refused;
+    it sweeps; it replaces by slot.
   - Size S.
 
-**Stop for review after Task 5: the seed done.**
+**Stop for review after Task 5: the seed done.** *Reviewed 2026-11-12:
+Tasks 1 to 5 accepted, with Task 5b first.*
+
+- [ ] **Task 5b: Four seed fixes** (added 2026-11-12 at your review; one
+  commit each, tests first)
+  1. Clocks: claims and mail records may expire `CLOCK_ROOM` (1 h) past
+     what the seed would allow by its own clock, as address records have
+     3 h allowed for 2 asked; the helper counts refused claims in its log.
+     Accept: test 1 with the helpers' clocks 30 s ahead of the seed's, and
+     30 s behind.
+  2. A damaged envelopes log, moved aside, takes the claims with it, so
+     readers see `no-box` and the `since` rule mails again (seed D9).
+     Accept: unit test.
+  3. `mrec-put` carries the token as claims and puts do; a closed seed
+     answers `closed` without it (M14). Accept: unit and process tests.
+  4. `mail-take` deletes up to a number: each envelope numbered in its
+     slot as it's put, a get answering the highest number it handed over.
+     Accept: a sweep between a get and its take, with a put after it,
+     deletes only what the get handed over.
 
 ### Phase 3: the helper (Mesh-Node)
 
@@ -153,7 +180,9 @@ misses its 5 s):** test 1 passes; the 5 s measured on loopback.
     remembered records' sealed file (format 1, with the dropped holders of
     Task 12); mail from the newest record, read or
     remembered, starting a session from its fallback key when there's
-    none; `--clock-offset` on the helper.
+    none; `--clock-offset` on the helper. *Added 2026-11-12:* on a new
+    contact, put our mail record for them and read theirs at once, not at
+    the next daily round.
   - Accept: tests 9, 10 and 17; a read that finds nothing keeps the memory
     (unit); a remembered-records file with a newer format is refused and
     left on disk (unit).
@@ -163,8 +192,11 @@ misses its 5 s):** test 1 passes; the 5 s measured on loopback.
     self pair, padded to `CLAIM_BUCKET` with dummies; renew daily; collect
     real and dummy boxes alike; on `no-box`, claim again and move `since`;
     a sender that reads a later `since` mails again what it put there
-    without an `ok`.
-  - Accept: test 5; unit tests that a seed's view of claims, renewals and
+    without an `ok`. *Added 2026-11-12:* on a new contact, claim for them
+    at once (test 1 found it: Bob added Alice after his unlock and had no
+    claim until his next refresh).
+  - Accept: test 5; Bob adds Alice and locks, Alice mails him, he gets it
+    (with no refresh between); unit tests that a seed's view of claims, renewals and
     collects is the same with 70 contacts as with 127.
   - Size M.
 - [ ] **Task 8: The wrapper's tag and receipts** (M7, M9; test 11)
@@ -244,6 +276,10 @@ the dm, routing, social and e2ee process tests still pass.
        fill it (claims and records for a week, mail at 10 envelopes a
        person a day): disk per log, memory held, start time (compaction),
        and a sweep's time.
+    3. *Added 2026-11-12:* a batch of 256 puts (each synced under the
+       store's lock): its time, and what other calls wait meanwhile.
+    4. *Added 2026-11-12:* a compaction of a full store while calls come
+       in: its time, and the longest any call waits.
   - Accept: results recorded here, against the spec's table (about 1 s
     more than test 1 at 1,000 contacts; about 2.6 MB a person on disk).
   - Size S.

@@ -96,7 +96,9 @@ differs from the rows above, this wins.
   `addr-put` and `addr-get` are, from the throwaway identity, against a store
   of their own.
 - **D6: a mail record may expire up to 7 days ahead** (address records: 3
-  hours). Per throwaway key an hour: 2,048 puts and 4,096 lookups; per
+  hours), and an hour more for a device's clock ahead of the seed's
+  (mailbox `CLOCK_ROOM`, added 2026-11-12). `mrec-put` carries the seed's
+  mail token first, as mail claims do (mailbox M14, added 2026-11-12). Per throwaway key an hour: 2,048 puts and 4,096 lookups; per
   network twice that; everyone through a relay, 100 times. Mail records
   count against the seed's `MAIL_STORE_MAX` (seed), not `MAX_RECORDS`.
 

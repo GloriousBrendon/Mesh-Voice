@@ -78,7 +78,10 @@ differs from the rows above, this wins.
   `mail-claim` (claim or renew `(box, slot, collect tag, expiry)`),
   `mail-put` (into a claimed slot), `mail-get` (with the collect secret:
   the slot's envelopes) and `mail-take` (with the collect secret: delete
-  them, once stored). The mail-record services `mrec-put` and `mrec-get`
+  them, once stored). *Changed 2026-11-12:* each envelope is numbered as
+  it's put; a get answers the highest number it handed over and a take
+  deletes up to that, so a sweep between them can't make a take delete
+  mail put after the get. The mail-record services `mrec-put` and `mrec-get`
   (routing, changed 2026-11-12). Answers include `no-box`, `full` and
   `slow-down`.
 - **D8: mail limits.** Per throwaway key an hour: 8,192 claims or renewals,
@@ -95,7 +98,8 @@ differs from the rows above, this wins.
   and whenever its dead bytes pass its live ones. A damaged log is moved
   aside (`.damaged`) and the seed starts with that part empty: clients
   claim and put records again, and the `since` rule (mailbox M12) re-mails
-  what it held. *Chosen in PLAN-mailbox (mailbox decided Q10).*
+  what it held. *Changed 2026-11-12:* a damaged envelopes log takes the
+  claims with it, so readers see `no-box` and their `since` moves. *Chosen in PLAN-mailbox (mailbox decided Q10).*
 - **D10b: add mailbox M17's list**: per box, when it was claimed and
   renewed; each put's padded size, time and session; each collect and
   delete. A live operator can link the session that claims a box with the
