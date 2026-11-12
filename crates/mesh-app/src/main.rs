@@ -333,11 +333,12 @@ struct Session {
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
     web_chat: Option<WebChat>,
-    /// In a Mesh chat: the messages that are ours (they can be edited and
-    /// deleted for everyone), each row's small mark ("sending", "edited"),
-    /// and the one being edited.
+    /// In a Mesh chat: the messages that are ours (deleted for everyone),
+    /// the ones that can be edited (ours, without files), each message's
+    /// small mark ("sending · edited · late"), and the one being edited.
     mesh_mine: std::collections::HashSet<String>,
-    web_marks: HashMap<String, &'static str>,
+    mesh_editable: std::collections::HashSet<String>,
+    web_marks: HashMap<String, String>,
     editing: Option<String>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
@@ -483,6 +484,7 @@ impl Session {
             deleting: None,
             web_chat: None,
             mesh_mine: Default::default(),
+            mesh_editable: Default::default(),
             web_marks: HashMap::new(),
             editing: None,
             jump: None,
@@ -501,6 +503,8 @@ struct Attachment {
     filename: String,
     mime: String,
     data: Vec<u8>,
+    /// Where it was picked from; `None` for a pasted picture.
+    path: Option<PathBuf>,
 }
 
 /// The clipboard's image (a screenshot, say) as a PNG attachment.
@@ -510,7 +514,8 @@ fn clipboard_image() -> Option<Attachment> {
     let mut data = Vec::new();
     pixels.write_to(&mut std::io::Cursor::new(&mut data), image::ImageFormat::Png).ok()?;
     let filename = format!("screenshot-{}.png", Local::now().format("%Y%m%d-%H%M%S"));
-    Some(Attachment { filename, mime: "image/png".to_string(), data })
+    let mime = "image/png".to_string();
+    Some(Attachment { filename, mime, data, path: None })
 }
 
 /// A best-effort MIME type from a filename's extension (images and the common
@@ -591,7 +596,13 @@ impl Clients<'_> {
     /// WhatsApp's media (message photos, its profile picture CDN) goes
     /// through its own tab; everything else through Discord's.
     fn fetch_media(&self, url: &str) {
-        if url.starts_with("wa-") || url.contains(".whatsapp.net/") {
+        if let Some(rest) = url.strip_prefix("mesh-file:") {
+            // `<chat>:<message>:<index>`; it comes back as `DmFile` (mesh_dm).
+            let mut parts = rest.split(':');
+            if let (Some(chat), Some(message), Some(Ok(index)), Some(node)) = (parts.next(), parts.next(), parts.next().map(str::parse), self.mesh) {
+                node.dm_fetch(chat, message, index);
+            }
+        } else if url.starts_with("wa-") || url.contains(".whatsapp.net/") {
             self.whatsapp.map(|e| e.fetch_media(url));
         } else {
             self.discord.map(|e| e.fetch_media(url));
@@ -1995,7 +2006,8 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                 let data = file.read().await;
                 let filename = file.file_name();
                 let mime = mime_guess_from(&filename);
-                Some(Attachment { filename, mime, data })
+                let path = Some(file.path().to_owned());
+                Some(Attachment { filename, mime, data, path })
             },
             Message::AttachmentPicked,
         ),
@@ -2064,10 +2076,18 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                         session.status = Some("Sending files to Discord isn't ready yet — only WhatsApp and Matrix.".to_string());
                         let _ = chat;
                     }
-                    // ponytail: PLAN-dm Task 18 sends files to Mesh chats.
-                    Some(chat) if chat.network == Network::Mesh => {
-                        session.status = Some("Sending files to Mesh chats comes next.".to_string());
-                    }
+                    Some(chat) if chat.network == Network::Mesh => match (&state.mesh.node, mesh_dm::staged(&attachment)) {
+                        (Some(node), Ok((path, preview))) => {
+                            node.dm_send_file(&chat.id, &path.to_string_lossy(), preview.as_deref().map(|p| p.to_string_lossy()).as_deref());
+                            if !caption.is_empty() {
+                                node.dm_send(&chat.id, &caption, None);
+                            }
+                            session.pending_attachment = None;
+                            session.message_draft = text_editor::Content::new();
+                        }
+                        (None, _) => session.status = Some("Mesh isn't running, so this can't be sent.".to_string()),
+                        (_, Err(err)) => session.status = Some(format!("Couldn't send the file: {err}")),
+                    },
                     _ => {
                         let Some(room_id) = session.selected_room.clone() else {
                             session.status = Some("Pick a chat first.".to_string());
@@ -3183,7 +3203,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             session.selected_room = None;
             session.web_chat = Some(channel);
             (session.hovered, session.reacting, session.replying, session.editing) = (None, None, None, None);
-            (session.mesh_mine, session.web_marks) = Default::default();
+            (session.mesh_mine, session.mesh_editable, session.web_marks) = Default::default();
             session.confirm_delete = None;
             session.focused = Pane::Chat;
             session.timeline.clear();
@@ -3684,6 +3704,15 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                     }
                     None => "WhatsApp isn't running, so this can't be forwarded.".to_string(),
                 });
+            }
+            Task::none()
+        }
+        Message::OpenMedia(url) if url.starts_with("mesh-file:") => {
+            // Fetched (or found kept) by mesh-node, then opened or shown in
+            // its folder by `mesh_dm` (never run).
+            clients!(state).fetch_media(&url);
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.status = Some("Opening…".to_string());
             }
             Task::none()
         }
@@ -6367,9 +6396,9 @@ fn message_content<'a>(
         }
     }
 
-    // A Mesh message's "sending" or "edited".
+    // A Mesh message's "sending", "edited" or "late".
     if let Some(mark) = message.web_id.as_ref().and_then(|id| session.web_marks.get(id)) {
-        col = col.push(ui::mono(*mark, 10.0, p.text_muted()));
+        col = col.push(ui::mono(mark.as_str(), 10.0, p.text_muted()));
     }
     if !message.reactions.is_empty() {
         let mut pills = row![].spacing(6);
@@ -6419,8 +6448,9 @@ fn message_content<'a>(
     }
     let mut layers = stack![col];
     if picking || session.hovered.as_deref() == Some(id) {
+        let ours = (session.mesh_mine.contains(id), session.mesh_editable.contains(id));
         layers = layers.push(
-            container(message_actions(message, id, session.mesh_mine.contains(id), p))
+            container(message_actions(message, id, ours, p))
                 .width(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Right),
         );
@@ -6463,8 +6493,9 @@ fn quote_of(message: &TimelineMessage) -> mesh_core::Quote {
 }
 
 /// The hover bar on a message: copy; on WhatsApp react, reply, forward; on
-/// Mesh react, reply, edit (`mine`) and delete (for everyone when `mine`).
-fn message_actions<'a>(message: &TimelineMessage, id: &str, mine: bool, p: &'a theme::Palette) -> Element<'a, Message> {
+/// Mesh react, reply, edit (`editable`: ours, without files) and delete (for
+/// everyone when it's `mine`).
+fn message_actions<'a>(message: &TimelineMessage, id: &str, (mine, editable): (bool, bool), p: &'a theme::Palette) -> Element<'a, Message> {
     let action = |glyph: &'static str, tip: &'static str, press: Message| {
         iced::widget::tooltip(
             button(text(glyph).size(15)).on_press(press).padding([2, 7]).style(flat_button_style(p)),
@@ -6487,8 +6518,7 @@ fn message_actions<'a>(message: &TimelineMessage, id: &str, mine: bool, p: &'a t
         bar = bar.push(action("↪", "Forward", Message::ForwardStart(id.to_string())));
     }
     if message.sender_network == Network::Mesh {
-        // A file's row has no text of its own to edit.
-        if mine && !message.body.starts_with("📎 ") {
+        if editable {
             bar = bar.push(action("✎", "Edit", Message::MeshEdit(id.to_string(), message.body.clone())));
         }
         let (tip, everyone) = if mine { ("Delete for everyone", true) } else { ("Delete here", false) };

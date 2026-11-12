@@ -30,6 +30,8 @@ pub(crate) struct Mesh {
     pub chats: Vec<mesh::Chat>,
     /// Who's typing, by name, in which chat, and when it was heard.
     pub typing: Option<(String, Vec<String>, std::time::Instant)>,
+    /// New group, while it's open: the friends picked, and its name.
+    new_group: Option<(Vec<String>, String)>,
     form: Form,
     settings: Settings,
 }
@@ -189,6 +191,11 @@ pub(crate) enum Msg {
     SendNote(String),
     /// Removes another of our linked devices, by its key.
     RemoveDevice(String),
+    /// New group: open (true) or close it, pick or unpick a friend, its name, make it.
+    NewGroup(bool),
+    GroupPick(String),
+    GroupName(String),
+    GroupCreate,
     /// Your ID: show a link code for a new device.
     LinkStart,
     /// Your ID: yes or no to the device that typed the code.
@@ -217,6 +224,12 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
     ) {
         return crate::mesh_dm::event(state, event);
     }
+    if let mesh::Event::Error(error) = &event
+        && error.func.starts_with("dm")
+    {
+        crate::mesh_dm::failed(state, error);
+        return Task::none();
+    }
     let m = &mut state.mesh;
     let unlocked = m.identity.as_ref().is_some_and(|i| i.state == State::Unlocked);
     match event {
@@ -228,7 +241,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 m.codes.clear();
                 m.social = mesh::Social::default();
                 m.notes.clear();
-                (m.chats, m.typing) = (Vec::new(), None);
+                (m.chats, m.typing, m.new_group) = (Vec::new(), None, None);
             } else if let Some(node) = &m.node {
                 // Unlocking doesn't send them by itself.
                 node.social();
@@ -392,7 +405,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.codes.clear();
             m.social = mesh::Social::default();
             m.notes.clear();
-            (m.chats, m.typing) = (Vec::new(), None);
+            (m.chats, m.typing, m.new_group) = (Vec::new(), None, None);
             m.form.busy = false;
             m.settings = Settings::default();
         }
@@ -641,6 +654,26 @@ pub(crate) fn update(state: &mut App, msg: Msg) -> Task<Message> {
             s.busy = Some("deviceRemove");
             s.note = None;
             node.remove_device(&key);
+        }
+        Msg::NewGroup(open) => m.new_group = open.then(Default::default),
+        Msg::GroupPick(id) => {
+            if let Some((picked, _)) = &mut m.new_group {
+                match picked.iter().position(|p| *p == id) {
+                    Some(i) => drop(picked.remove(i)),
+                    None => picked.push(id),
+                }
+            }
+        }
+        Msg::GroupName(name) => {
+            if let Some((_, n)) = &mut m.new_group {
+                *n = name;
+            }
+        }
+        Msg::GroupCreate => {
+            // It shows in the sidebar once mesh-node has made it (`DmChats`).
+            if let Some((picked, name)) = m.new_group.take() {
+                node.dm_group_create(&picked, name.trim());
+            }
         }
         // Another command is still waiting for its answer.
         Msg::Remove(_) | Msg::Accept(_) | Msg::Decline(_) | Msg::Block(_) | Msg::Unblock(_) | Msg::Verify(..) | Msg::Status(_) | Msg::SendNote(_) | Msg::RemoveDevice(_) => {}
@@ -1212,6 +1245,15 @@ pub(crate) fn home(state: &App) -> Option<Element<'_, Message>> {
     Some(column![friends_view(state), more].spacing(12).into())
 }
 
+/// A flat button whose label is made at runtime.
+fn small_owned<'a>(label: String, color: iced::Color, msg: Msg, p: &'a theme::Palette) -> Element<'a, Message> {
+    button(ui::sans(label, 12.0, Weight::Normal, color))
+        .on_press(Message::MeshForm(msg))
+        .padding([4, 10])
+        .style(flat_button_style(p))
+        .into()
+}
+
 /// Friends (SPEC-social): our status, requests to us, friends, the ones we
 /// asked, and who we've blocked.
 fn friends_view(state: &App) -> Element<'_, Message> {
@@ -1269,6 +1311,31 @@ fn friends_view(state: &App) -> Element<'_, Message> {
     if !social.friends.is_empty() {
         col = col.push(field("TEST NOTE (END-TO-END ENCRYPTED)", &s.note_text, Msg::NoteText, false, Msg::NoteText(s.note_text.clone()), p));
     }
+    // A group needs at least two friends; up to nine with you (SPEC-dm D6).
+    if social.friends.len() >= 2 {
+        match &state.mesh.new_group {
+            None => col = col.push(small("New group", p.accent(), Msg::NewGroup(true))),
+            Some((picked, name)) => {
+                let mut pick = column![ui::mono("NEW GROUP: PICK 2 TO 9 FRIENDS", 11.0, p.text_muted())].spacing(4);
+                for f in &social.friends {
+                    let on = picked.contains(&f.id);
+                    let label = format!("{} {}", if on { "☑" } else { "☐" }, friend_name(f));
+                    pick = pick.push(small_owned(label, if on { p.text_bright() } else { p.text() }, Msg::GroupPick(f.id.clone()), p));
+                }
+                let ready = (2..=9).contains(&picked.len()) && !name.trim().is_empty();
+                col = col.push(pick).push(field("GROUP NAME", name, Msg::GroupName, false, Msg::GroupCreate, p)).push(
+                    row![
+                        button(ui::sans("Create", 12.0, Weight::Normal, p.accent()))
+                            .on_press_maybe(ready.then_some(Message::MeshForm(Msg::GroupCreate)))
+                            .padding([4, 10])
+                            .style(flat_button_style(p)),
+                        small("Cancel", p.text_bright(), Msg::NewGroup(false)),
+                    ]
+                    .spacing(4),
+                );
+            }
+        }
+    }
     if social.friends.is_empty() && social.incoming.is_empty() {
         col = col.push(ui::sans("No friends yet. Check a friend's code below and send a request.", 12.0, Weight::Normal, p.text_muted()));
     }
@@ -1286,12 +1353,23 @@ fn friends_view(state: &App) -> Element<'_, Message> {
         col = col.push(column![
             line(friend_name(f), detail),
             row![
+                button(ui::sans("Message", 12.0, Weight::Normal, p.accent()))
+                    .on_press(Message::WebChatSelected(WebChat {
+                        network: Network::Mesh,
+                        id: f.id.clone(),
+                        name: friend_name(f),
+                        dm: true
+                    }))
+                    .padding([4, 10])
+                    .style(flat_button_style(p)),
                 small(if pinging { "Pinging…" } else { "Ping" }, p.text_bright(), Msg::PingContact(f.id.clone())),
                 small("Send a test note", p.text_bright(), Msg::SendNote(f.id.clone())),
                 small("Remove", p.danger(), Msg::Remove(f.id.clone())),
                 small("Block", p.danger(), Msg::Block(f.id.clone())),
             ]
-            .spacing(4),
+            .spacing(4)
+            // Five don't fit the narrow Accounts panel on one line.
+            .wrap(),
         ]);
         if let Some((_, pong)) = s.contact_pong.as_ref().filter(|(id, _)| *id == f.id) {
             col = col.push(ui::sans(format!("{} answered · {}", pong.name, pong_line(pong)), 12.0, Weight::Normal, p.success()));
