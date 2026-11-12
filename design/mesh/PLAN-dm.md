@@ -298,7 +298,8 @@ its device had seen); noted in the code.
 
 *Checkpoint B moved to after Task 17 (2026-11-11): without the screens it
 could only be done by typing JSON commands into two helpers, which checks
-nothing the process test doesn't.*
+nothing the process test doesn't. Moved again to after Task 18
+(2026-11-12), so it covers pictures and files in one sitting.*
 
 ### Phase 4: Mesh-Voice
 
@@ -308,36 +309,7 @@ nothing the process test doesn't.*
   the existing timeline and composer (`TimelineMessage`, `web_id` = event
   ID), replies, edits, reactions, the typing line, unread badges and
   sounds, a "sending" mark. Size L.
-**Checkpoint B (by hand, you), after Task 17:** two windows on one machine with the home
-seed. Live chat both ways, edit, delete, react, a picture, and a message
-sent while the other window is closed.
-
-Steps (2026-11-12), on the Linux box at home, with release builds and
-`mesh-node` next to Mesh's binary:
-
-1. Open Mesh as A (your identity). Open a second copy as B with
-   `MESH_DATA=~/meshB` and a new identity. B adds A's ID; A accepts.
-2. A opens a chat with B (needs **Message** on a friend row: Task 18, or
-   pulled forward) and sends "one". It shows on B in under 1 s, with a
-   sound and a notification if B's window isn't focused; on A, "sending"
-   turns to nothing once B has it.
-3. B replies to "one", A reacts 👍 to the reply, B edits its reply (it
-   shows "edited" on both), A deletes "one" for everyone (it goes on both).
-   While one types, the other sees "… is typing…".
-4. Close B. A sends "two" and "three". Reopen B and unlock it: both
-   arrive in order within 5 s, and A's "sending" marks clear.
-5. A picture: waits for Task 18 (files open and send from there).
-6. Linking (PLAN-link task 6): on A, Your ID → Linked devices → **Link a
-   device**; on the Windows PC, **I already have Mesh**, type the code,
-   then A's username and a new password. The PC shows A's friends and,
-   once it has caught up, A's chat with B. Then remove the PC from A's
-   Linked devices: it can't reach A any more.
-7. The seed's hourly line for that hour: callers 3 direct, 0 relayed,
-   0 both ways (all three on the home network), 0 requests from callers
-   not told apart; address puts and gets above 0 (the devices' records,
-   and the link record); no ID or text anywhere in its log.
-
-- [ ] **Task 18: Files and entry points**: pictures from the preview
+- [x] **Task 18: Files and entry points**: pictures from the preview
   first, then `dmFetch`; **Message** on friend rows and profiles; **New
   group**. Size M. **Clicking a received file never runs it:** pictures
   and other known-safe types (images, audio, video, PDF, plain text) open
@@ -345,6 +317,74 @@ Steps (2026-11-12), on the Linux box at home, with release builds and
   the file's type as Mesh reads it, not the name the sender gave. Test:
   a received `.exe`, `.bat`, `.sh` or `.lnk` is shown in its folder and
   never opened.
+  - Built 2026-11-12. A file opens only when its name and its first bytes
+    agree on a known-safe type (`mesh_dm::on_click`): on Windows `start`
+    would run a `.bat` whatever it holds, so the contents alone aren't
+    enough. Pictures show their preview at once and the full one, fetched
+    when opened, from memory only: Mesh's pictures never go to the media
+    cache. A message with files can't be edited; the "late" mark (D2)
+    shows beside "sending" and "edited". There's no separate friend
+    profile screen: **Message** is on the friend row, which shows on Home
+    and in Accounts → Mesh.
+
+
+**Checkpoint B (by hand, you), after Task 18 (moved 2026-11-12, so pictures
+are in it):** copies of Mesh on one machine with the home seed, then the
+linking check.
+
+Before you start, on the Linux box: build both in release (`cargo build
+--release` in Mesh-Node and in Mesh-Voice), copy Mesh-Node's
+`target/release/mesh-node` next to Mesh-Voice's `target/release/mesh-app`,
+and start each copy from a terminal with its log kept:
+`MESH_DATA=~/meshA target/release/mesh-app 2> ~/meshA.log` (B and C the
+same with their own folder). `mesh-node` writes its lines into that log.
+Its lines carry counts only, so the log is safe to send; never send a
+screenshot of a chat or any message text. For any failure, send me the
+step number, what you saw instead, any status line under the composer
+(those carry no message text), and the `mesh-node:` lines from the log of
+each copy involved (`grep mesh-node: ~/meshA.log`).
+
+1. **Friends.** Make an identity in each of A, B and C; make them all
+   friends (B and C add A's ID, A accepts; B adds C's, C accepts).
+   *See:* each has the other two under Friends.
+2. **Start a chat with Message.** On A, Home → B's row → **Message**, and
+   send a line. *See:* the chat opens with B's name, the line shows on B
+   in under 1 s with a sound (and a notification if B's window isn't
+   focused), B's chat appears in B's sidebar with an unread count that
+   clears when B opens it, and A's "sending" mark goes once B has it.
+   Then on B: reply to it, react to it, edit the reply ("edited" shows on
+   both), and delete the reply for everyone (it goes on both). While one
+   types, the other sees "… is typing…".
+3. **A picture.** On A, the paperclip → pick a photo (JPEG or PNG) → send.
+   *See:* on B, a small preview shows at once; clicking it opens the full
+   picture inside Mesh. Nothing outside Mesh opens.
+4. **A file that isn't a picture.** Make `run.sh` holding `echo hi`, and
+   send it from A with the paperclip. *See:* on B, clicking it opens your
+   file manager on the folder holding `run.sh`; it doesn't run, and no
+   terminal or editor opens it. Then send a PDF: clicking it opens it in
+   your PDF viewer.
+5. **A group of three.** On A, Home → **New group**, pick B and C, name it,
+   **Create**; send a line in it. *See:* the group shows in all three
+   sidebars with three members, the line reaches B and C, and B's and C's
+   replies reach the other two.
+6. **While the other is closed.** Close C's window. From A, send two
+   lines in the group and one to C in a new 1:1 (C's row → **Message**).
+   Reopen C and unlock it. *See:* all three arrive within 5 s, in order;
+   A's "sending" marks clear then.
+7. **Linking** (PLAN-link task 6). On A, Your ID → Linked devices → **Link
+   a device**; on the Windows PC, **I already have Mesh**, type the code,
+   then A's username and a new password for the PC. *See:* the PC shows
+   A's friends, and once it has caught up, A's chats with B and the group.
+   Then on A remove the PC from Linked devices. *See:* A lists one device,
+   and the PC can't reach A or B any more (Ping from the PC fails).
+   On the PC, start Mesh from PowerShell with `2> meshPC.log`; if this
+   step fails, also send that log's `mesh-node:` lines.
+8. **The seed.** Send me the time you finished. I'll read its hourly line
+   for that hour; it should show callers 4 direct, 0 relayed, 0 both ways
+   (all on the home network), 0 requests from callers not told apart, and
+   address puts and gets above 0 (the devices' records and the link
+   record). It holds no ID or text.
+
 - [ ] **Task 19: Retire test notes** (Q4): the buttons go; the helper keeps
   `e2eeNote` for its tests. Size S.
 
@@ -355,7 +395,7 @@ the Windows PC and the Linux box. Across networks it needs the VPS seed
 ## Order and size
 
 Tasks 1–7 can go in any order after Task 1; Task 8 before Task 9; Task 9b
-straight after Task 9; Tasks 10–15 in order; Phase 4 after Task 15, with Checkpoint B after Task 17. Roughly 4,000 lines in
+straight after Task 9; Tasks 10–15 in order; Phase 4 after Task 15, with Checkpoint B after Task 18. Roughly 4,000 lines in
 Mesh-Node and 1,200 in Mesh-Voice.
 
 ## Risks and mitigations
