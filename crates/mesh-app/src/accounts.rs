@@ -92,6 +92,14 @@ pub(crate) fn link(state: &App, network: Network) -> Link {
             (None, Some(_)) => Link::Connecting,
             (None, None) => Link::Offline,
         },
+        // Not listed here: its identity has its own screens (mesh_ui).
+        Network::Mesh => match state.mesh.identity.as_ref().and_then(|i| i.username.clone()) {
+            Some(name) => Link::Linked {
+                name,
+                meta: count(state.mesh.chats.len(), "chat"),
+            },
+            None => Link::SignedOut,
+        },
     }
 }
 

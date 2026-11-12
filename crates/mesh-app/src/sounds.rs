@@ -26,7 +26,8 @@ pub enum Sound {
 }
 
 impl Sound {
-    pub const ALL: [Sound; 9] = [
+    pub const ALL: [Sound; 10] = [
+        Sound::Message(Network::Mesh),
         Sound::Message(Network::Matrix),
         Sound::Message(Network::Discord),
         Sound::Message(Network::WhatsApp),
@@ -153,13 +154,15 @@ fn builtin(sound: Sound) -> Vec<i16> {
                 Network::Matrix => 1046.5,
                 Network::Discord => 880.0,
                 Network::WhatsApp => 1318.5,
+                Network::Mesh => 987.8,
             };
             tone(&mut out, &[f], 70, 0.35);
             silence(&mut out, 35);
             tone(&mut out, &[f * 1.5], 110, 0.35);
         }
         // Each network rings its own way.
-        Sound::Ring(Network::Matrix) => {
+        // Mesh calls come with `calls`; until then it rings as Matrix does.
+        Sound::Ring(Network::Matrix | Network::Mesh) => {
             tone(&mut out, &[440.0, 480.0], 1000, 0.3);
             silence(&mut out, 2000);
         }

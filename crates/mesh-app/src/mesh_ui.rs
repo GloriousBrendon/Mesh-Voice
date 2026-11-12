@@ -26,8 +26,32 @@ pub(crate) struct Mesh {
     social: mesh::Social,
     /// Test notes received this run (SPEC-e2ee), oldest first.
     notes: Vec<mesh::Note>,
+    /// The chat list (SPEC-dm), newest activity first.
+    pub chats: Vec<mesh::Chat>,
+    /// Who's typing, by name, in which chat, and when it was heard.
+    pub typing: Option<(String, Vec<String>, std::time::Instant)>,
     form: Form,
     settings: Settings,
+}
+
+impl Mesh {
+    /// Our `mesh1…` ID, while unlocked.
+    pub fn my_id(&self) -> Option<String> {
+        self.identity.as_ref().and_then(|i| i.id.clone())
+    }
+
+    /// A person's name: ours, our name for a friend, the name they gave
+    /// themselves, else the start of their ID.
+    pub fn name_of(&self, id: &str) -> String {
+        if self.my_id().as_deref() == Some(id) {
+            return self.identity.as_ref().and_then(|i| i.username.clone()).unwrap_or_else(|| "you".to_string());
+        }
+        match self.social.friends.iter().find(|f| f.id == id) {
+            Some(f) if !f.nick.is_empty() => f.nick.clone(),
+            Some(f) if !f.name.is_empty() => f.name.clone(),
+            _ => id.chars().take(12).collect(),
+        }
+    }
 }
 
 /// What's typed into the onboarding, restore or unlock form.
@@ -187,6 +211,12 @@ pub(crate) fn started(state: &App) -> bool {
 }
 
 pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
+    if matches!(
+        event,
+        mesh::Event::DmChats(_) | mesh::Event::DmMessages(_) | mesh::Event::DmNotify(_) | mesh::Event::DmTyping { .. } | mesh::Event::DmFile(_)
+    ) {
+        return crate::mesh_dm::event(state, event);
+    }
     let m = &mut state.mesh;
     let unlocked = m.identity.as_ref().is_some_and(|i| i.state == State::Unlocked);
     match event {
@@ -198,9 +228,11 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 m.codes.clear();
                 m.social = mesh::Social::default();
                 m.notes.clear();
+                (m.chats, m.typing) = (Vec::new(), None);
             } else if let Some(node) = &m.node {
                 // Unlocking doesn't send them by itself.
                 node.social();
+                node.dm_list();
             }
             m.identity = Some(identity);
             m.settings.busy = None;
@@ -350,7 +382,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             f.username = username;
             f.received = Some(f.username.clone());
         }
-        // The chat screens come with PLAN-dm Task 17.
+        // Taken above (mesh_dm).
         mesh::Event::DmChats(_) | mesh::Event::DmMessages(_) | mesh::Event::DmNotify(_) | mesh::Event::DmTyping { .. } | mesh::Event::DmFile(_) => {}
         mesh::Event::Disconnected => {
             m.node = None;
@@ -360,6 +392,7 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
             m.codes.clear();
             m.social = mesh::Social::default();
             m.notes.clear();
+            (m.chats, m.typing) = (Vec::new(), None);
             m.form.busy = false;
             m.settings = Settings::default();
         }

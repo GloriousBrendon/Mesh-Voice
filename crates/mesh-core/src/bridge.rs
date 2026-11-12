@@ -17,11 +17,13 @@ pub enum Network {
     Discord,
     /// WhatsApp, through the engine's WhatsApp Web tab (never a Matrix room).
     WhatsApp,
+    /// Mesh's own chats, through `mesh-node` (SPEC-dm).
+    Mesh,
 }
 
 impl Network {
     /// Every network Mesh can show chats from.
-    pub const ALL: [Network; 3] = [Network::Matrix, Network::Discord, Network::WhatsApp];
+    pub const ALL: [Network; 4] = [Network::Matrix, Network::Discord, Network::WhatsApp, Network::Mesh];
 
     /// Its registry entry: tag, name, colour, sign-in.
     pub fn spec(self) -> &'static NetworkSpec {
@@ -29,6 +31,7 @@ impl Network {
             Network::Matrix => "mx",
             Network::Discord => "dc",
             Network::WhatsApp => "wa",
+            Network::Mesh => "mesh",
         };
         networks::spec(id).unwrap_or(&networks::NETWORKS[0])
     }

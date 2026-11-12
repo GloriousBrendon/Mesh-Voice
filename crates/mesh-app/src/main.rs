@@ -4,6 +4,7 @@
 
 mod accounts;
 mod cache;
+mod mesh_dm;
 mod mesh_ui;
 mod rain;
 mod sounds;
@@ -332,6 +333,12 @@ struct Session {
     /// The Discord text channel or DM shown in the chat pane (through the
     /// hidden client) instead of `selected_room`.
     web_chat: Option<WebChat>,
+    /// In a Mesh chat: the messages that are ours (they can be edited and
+    /// deleted for everyone), each row's small mark ("sending", "edited"),
+    /// and the one being edited.
+    mesh_mine: std::collections::HashSet<String>,
+    web_marks: HashMap<String, &'static str>,
+    editing: Option<String>,
     /// The Ctrl+K jump palette's query, while it's open.
     jump: Option<String>,
     /// Who's typing, per room.
@@ -475,6 +482,9 @@ impl Session {
             confirm_delete: None,
             deleting: None,
             web_chat: None,
+            mesh_mine: Default::default(),
+            web_marks: HashMap::new(),
+            editing: None,
             jump: None,
             typing: HashMap::new(),
             images: HashMap::new(),
@@ -535,11 +545,19 @@ struct WebChat {
     dm: bool,
 }
 
+/// `Clients` from `App`'s fields (a macro, so it can sit beside a `&mut` session).
+macro_rules! clients {
+    ($state:expr) => {
+        Clients { discord: $state.discord.as_ref(), whatsapp: $state.whatsapp.as_ref(), mesh: $state.mesh.node.as_ref() }
+    };
+}
+
 /// The hidden web clients, for sending a web chat's actions to its own.
 /// Built from `App`'s fields, so it can sit beside a `&mut` session.
 struct Clients<'a> {
     discord: Option<&'a mesh_discord::Engine>,
     whatsapp: Option<&'a whatsapp::Engine>,
+    mesh: Option<&'a mesh::Node>,
 }
 
 impl Clients<'_> {
@@ -549,6 +567,7 @@ impl Clients<'_> {
         match chat.network {
             Network::Discord => self.discord.map(|e| e.open_channel(&chat.id)).is_some(),
             Network::WhatsApp => self.whatsapp.map(|e| e.open_chat(&chat.id)).is_some(),
+            Network::Mesh => self.mesh.map(|n| n.dm_open(&chat.id, None)).is_some(),
             Network::Matrix => false,
         }
     }
@@ -556,14 +575,16 @@ impl Clients<'_> {
         match chat.network {
             Network::Discord => self.discord.map(mesh_discord::Engine::close_channel),
             Network::WhatsApp => self.whatsapp.map(whatsapp::Engine::close_chat),
-            Network::Matrix => None,
+            // Opening another chat is enough for mesh-node.
+            Network::Mesh | Network::Matrix => None,
         };
     }
-    /// `reply_to` (a web message id) quotes that message; WhatsApp only.
+    /// `reply_to` (a web message id) quotes that message; WhatsApp and Mesh.
     fn send(&self, chat: &WebChat, text: &str, reply_to: Option<&str>) -> bool {
         match chat.network {
             Network::Discord => self.discord.map(|e| e.send_message(&chat.id, text)).is_some(),
             Network::WhatsApp => self.whatsapp.map(|e| e.send_message(&chat.id, text, reply_to)).is_some(),
+            Network::Mesh => self.mesh.map(|n| n.dm_send(&chat.id, text, reply_to)).is_some(),
             Network::Matrix => false,
         }
     }
@@ -1256,6 +1277,10 @@ enum Message {
     /// Copy a message's text to the clipboard.
     CopyText(String),
     CancelReply,
+    /// Edit one of our Mesh messages: its text goes into the composer.
+    MeshEdit(String, String),
+    /// Delete a Mesh message: for everyone (ours), or only here.
+    MeshDelete(String, bool),
     /// Play or pause a voice note (by media key).
     VoiceToggle(String),
     /// Play a voice note from this far in (0–1).
@@ -1714,7 +1739,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             };
             session.selected_room = Some(room_id.clone());
             if let Some(chat) = session.web_chat.take() {
-                Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }.close(&chat);
+                clients!(state).close(&chat);
             }
             session.focused = Pane::Chat;
             session.timeline.clear();
@@ -1948,6 +1973,12 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
         Message::Noop => Task::none(),
         Message::ComposerEdit(action) => {
             if let Screen::LoggedIn(session) = &mut state.screen {
+                // Mesh tells the chat we're typing (mesh-node keeps it to one every 2 s).
+                if action.is_edit()
+                    && let (Some(chat), Some(node)) = (session.web_chat.as_ref().filter(|c| c.network == Network::Mesh), &state.mesh.node)
+                {
+                    node.dm_typing(&chat.id);
+                }
                 session.message_draft.perform(action);
             }
             Task::none()
@@ -2033,6 +2064,10 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                         session.status = Some("Sending files to Discord isn't ready yet — only WhatsApp and Matrix.".to_string());
                         let _ = chat;
                     }
+                    // ponytail: PLAN-dm Task 18 sends files to Mesh chats.
+                    Some(chat) if chat.network == Network::Mesh => {
+                        session.status = Some("Sending files to Mesh chats comes next.".to_string());
+                    }
                     _ => {
                         let Some(room_id) = session.selected_room.clone() else {
                             session.status = Some("Pick a chat first.".to_string());
@@ -2065,9 +2100,15 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             }
             // A web chat sends through its hidden client; the echo comes back
             // with its messages.
+            if let (Some(id), Some(node)) = (&session.editing, &state.mesh.node) {
+                node.dm_edit(id, &body);
+                session.message_draft = text_editor::Content::new();
+                session.editing = None;
+                return Task::none();
+            }
             if let Some(chat) = &session.web_chat {
                 let reply_to = session.replying.as_ref().map(|(id, _)| id.as_str());
-                if (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).send(chat, &body, reply_to) {
+                if clients!(state).send(chat, &body, reply_to) {
                     session.message_draft = text_editor::Content::new();
                     session.replying = None;
                 } else {
@@ -2398,7 +2439,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                         && session.web_chat.as_ref().is_some_and(|c| c.id == messages.channel_id)
                     {
                         session.timeline = discord_timeline(messages);
-                        load_web_media(session, &Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() });
+                        load_web_media(session, &clients!(state));
                     }
                 }
                 mesh_discord::Event::Media { url, bytes } => return web_media_loaded(state, url, bytes),
@@ -2517,7 +2558,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                             }
                         }
                         session.timeline = whatsapp_timeline(messages);
-                        load_web_media(session, &Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() });
+                        load_web_media(session, &clients!(state));
                     }
                 }
                 whatsapp::Event::Media { url, bytes } => return web_media_loaded(state, url, bytes),
@@ -3131,7 +3172,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             let Screen::LoggedIn(session) = &mut state.screen else {
                 return Task::none();
             };
-            let clients = Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() };
+            let clients = clients!(state);
             if let Some(previous) = session.web_chat.as_ref().filter(|c| c.network != channel.network) {
                 clients.close(previous);
             }
@@ -3141,7 +3182,8 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             }
             session.selected_room = None;
             session.web_chat = Some(channel);
-            (session.hovered, session.reacting, session.replying) = (None, None, None);
+            (session.hovered, session.reacting, session.replying, session.editing) = (None, None, None, None);
+            (session.mesh_mine, session.web_marks) = Default::default();
             session.confirm_delete = None;
             session.focused = Pane::Chat;
             session.timeline.clear();
@@ -3212,6 +3254,8 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
                         engine.sign_out();
                     }
                 }
+                // Not in the accounts panel: its identity has its own screens.
+                Network::Mesh => {}
             }
             Task::none()
         }
@@ -3380,11 +3424,24 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::React { id, emoji } => {
-            if let Some(engine) = &state.whatsapp {
+            let Screen::LoggedIn(session) = &mut state.screen else { return Task::none() };
+            session.reacting = None;
+            if session.web_chat.as_ref().is_some_and(|c| c.network == Network::Mesh) {
+                // "" takes ours back: Mesh needs to know which one.
+                let ours = || {
+                    let row = session.timeline.iter().find(|m| m.web_id.as_deref() == Some(id.as_str()));
+                    row.and_then(|m| m.reactions.iter().find(|r| r.by_me)).map(|r| r.key.clone())
+                };
+                let (emoji, on) = if emoji.is_empty() {
+                    (ours().unwrap_or_default(), false)
+                } else {
+                    (emoji, true)
+                };
+                if let Some(node) = state.mesh.node.as_ref().filter(|_| !emoji.is_empty()) {
+                    node.dm_react(&id, &emoji, on);
+                }
+            } else if let Some(engine) = &state.whatsapp {
                 engine.react(&id, &emoji);
-            }
-            if let Screen::LoggedIn(session) = &mut state.screen {
-                session.reacting = None;
             }
             Task::none()
         }
@@ -3396,7 +3453,25 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
         }
         Message::CancelReply => {
             if let Screen::LoggedIn(session) = &mut state.screen {
+                if session.editing.take().is_some() {
+                    session.message_draft = text_editor::Content::new();
+                }
                 session.replying = None;
+            }
+            Task::none()
+        }
+        Message::MeshEdit(id, text) => {
+            if let Screen::LoggedIn(session) = &mut state.screen {
+                session.replying = None;
+                session.editing = Some(id);
+                session.message_draft = text_editor::Content::with_text(&text);
+                session.message_draft.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+            }
+            focus_composer()
+        }
+        Message::MeshDelete(id, everyone) => {
+            if let Some(node) = &state.mesh.node {
+                node.dm_delete(&id, everyone);
             }
             Task::none()
         }
@@ -3503,7 +3578,7 @@ fn handle(state: &mut App, message: Message) -> Task<Message> {
             if let Some(full) = &full
                 && wants(&mut session.images, cache::Kind::Media, full)
             {
-                (Clients { discord: state.discord.as_ref(), whatsapp: state.whatsapp.as_ref() }).fetch_media(full);
+                clients!(state).fetch_media(full);
             }
             session.lightbox = Some((key, full));
             Task::none()
@@ -4145,7 +4220,7 @@ fn session_view<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message
             let rail = rail_view(session, discord, whatsapp, state.discord_command.is_some(), p, l, x.show_network_tags);
             let mut panes = row![
                 tile(session, Pane::Rail, rail, 64.0 + 2.0 * l.border_size, p, l, x),
-                tile(session, Pane::Channels, channel_pane(session, discord, whatsapp, p, l), 248.0, p, l, x),
+                tile(session, Pane::Channels, channel_pane(session, discord, whatsapp, state, p, l), 248.0, p, l, x),
                 tile(session, Pane::Chat, chat_pane(session, state), 0.0, p, l, x),
             ]
             .spacing(l.gaps_out)
@@ -4624,6 +4699,7 @@ fn net_icon(network: Network) -> ui::Icon {
         Network::Discord => ui::Icon::Discord,
         Network::Matrix => ui::Icon::Matrix,
         Network::WhatsApp => ui::Icon::WhatsApp,
+        Network::Mesh => ui::Icon::At,
     }
 }
 
@@ -4798,6 +4874,7 @@ fn folder_index(network: Network) -> usize {
         Network::Discord => 0,
         Network::Matrix => 1,
         Network::WhatsApp => 2,
+        Network::Mesh => 3,
     }
 }
 
@@ -4855,7 +4932,7 @@ fn space_tile<'a>(
                 .into(),
             None => match group.network() {
                 Network::Discord => ui::icon(ui::Icon::Discord, 22.0, if active { net_color(Network::Discord, p) } else { fg }),
-                Network::Matrix | Network::WhatsApp => ui::icon(ui::Icon::Matrix, 22.0, if active { net_color(Network::Matrix, p) } else { fg }),
+                _ => ui::icon(ui::Icon::Matrix, 22.0, if active { net_color(Network::Matrix, p) } else { fg }),
             },
         };
     let tile: Element<'_, Message> = rail_tile(
@@ -4924,6 +5001,7 @@ fn channel_pane<'a>(
     session: &'a Session,
     discord: Option<&'a mesh_discord::Snapshot>,
     whatsapp: Option<&'a whatsapp::Snapshot>,
+    state: &'a App,
     p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
@@ -5023,6 +5101,13 @@ fn channel_pane<'a>(
                 let open = WebChat { network: Network::Discord, id: dm.id.clone(), name: dm.name.clone(), dm: true };
                 (dm.last_ms, web_chat_row(session, open, dm.avatar.as_deref(), dm.unread, dm.mentions, p, l))
             }));
+            // Mesh's own chats, 1:1 and groups (SPEC-dm).
+            if shows(Network::Mesh) {
+                for chat in &state.mesh.chats {
+                    let open = mesh_dm::web_chat(chat);
+                    rows.push((chat.last, web_chat_row(session, open, None, chat.unread > 0, chat.unread, p, l)));
+                }
+            }
             rows.extend(whatsapp_chats.iter().filter(|chat| !chat.group).map(|chat| {
                 let open = WebChat { network: Network::WhatsApp, id: chat.id.clone(), name: chat.name.clone(), dm: !chat.group };
                 (chat.last_ms, web_chat_row(session, open, chat.avatar.as_deref(), chat.unread > 0, chat.unread, p, l))
@@ -5491,7 +5576,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
 
     // Timeline, status line and composer: the same for a room or a Discord channel.
     let me = session.my_profile.as_ref().map(|me| &me.user_id);
-    let body = |mut col: iced::widget::Column<'a, Message>, placeholder: String, typing_in: Option<&OwnedRoomId>| {
+    let body = |mut col: iced::widget::Column<'a, Message>, placeholder: String, typing: &'a [String]| {
         col = col.push(
             scrollable(
                 container(timeline_view(session, me, state.density, &state.extras, p))
@@ -5503,7 +5588,7 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
         if let Some(status) = &session.status {
             col = col.push(container(text(status.clone()).size(13).color(p.danger())).padding([0, 16]));
         }
-        col.push(composer(session, placeholder, typing_in, p, l))
+        col.push(composer(session, placeholder, typing, p, l))
     };
 
     if let Some(channel) = &session.web_chat {
@@ -5512,7 +5597,12 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
             _ => (if channel.dm { "" } else { "#" }, channel.network.spec().name),
         };
         let placeholder = format!("message {hash}{}  —  sends with your {account} account", channel.name);
-        return body(col, placeholder, None).into();
+        let typing = if channel.network == Network::Mesh {
+            mesh_dm::typing(state, &channel.id)
+        } else {
+            &[]
+        };
+        return body(col, placeholder, typing).into();
     }
 
     let Some(room) = room else {
@@ -5545,16 +5635,16 @@ fn chat_pane<'a>(session: &'a Session, state: &'a App) -> Element<'a, Message> {
 
     let placeholder = match room.network {
         Network::Discord => format!("message {}  —  sends to discord via bridge", room_label(room)),
-        Network::Matrix | Network::WhatsApp => format!("message {}", room_label(room)),
+        Network::Matrix | Network::WhatsApp | Network::Mesh => format!("message {}", room_label(room)),
     };
-    body(col, placeholder, Some(&room.id)).into()
+    body(col, placeholder, session.typing.get(&room.id).map(Vec::as_slice).unwrap_or_default()).into()
 }
 
-/// The message box; `typing_in` is the Matrix room whose typing line shows under it.
+/// The message box; `typing` is who shows as typing under it.
 fn composer<'a>(
     session: &'a Session,
     placeholder: String,
-    typing_in: Option<&OwnedRoomId>,
+    typing: &'a [String],
     p: &'a theme::Palette,
     l: &theme::Layout,
 ) -> Element<'a, Message> {
@@ -5629,6 +5719,23 @@ fn composer<'a>(
             }),
         );
     }
+    if session.editing.is_some() {
+        outer = outer.push(
+            container(
+                row![
+                    ui::mono("editing your message · Enter saves", 11.0, p.accent()).width(Length::Fill),
+                    ui::icon_button(ui::Icon::Close, Some(Message::CancelReply), false, p, l),
+                ]
+                .align_y(iced::Alignment::Center),
+            )
+            .padding([6, 10])
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::border::rounded(radius).color(edge).width(1),
+                ..container::Style::default()
+            }),
+        );
+    }
     if let Some((_, quote)) = &session.replying {
         outer = outer.push(
             container(
@@ -5662,7 +5769,7 @@ fn composer<'a>(
     )
     .push(
         row![
-            typing_line(typing_in.and_then(|id| session.typing.get(id)).map(Vec::as_slice).unwrap_or_default(), p),
+            typing_line(typing, p),
             Space::new().width(Length::Fill),
             ui::mono("Enter send · Shift+Enter new line", 11.0, p.text_muted()),
         ],
@@ -6260,6 +6367,10 @@ fn message_content<'a>(
         }
     }
 
+    // A Mesh message's "sending" or "edited".
+    if let Some(mark) = message.web_id.as_ref().and_then(|id| session.web_marks.get(id)) {
+        col = col.push(ui::mono(*mark, 10.0, p.text_muted()));
+    }
     if !message.reactions.is_empty() {
         let mut pills = row![].spacing(6);
         for reaction in &message.reactions {
@@ -6309,7 +6420,7 @@ fn message_content<'a>(
     let mut layers = stack![col];
     if picking || session.hovered.as_deref() == Some(id) {
         layers = layers.push(
-            container(message_actions(message, id, message.sender_network == Network::WhatsApp, p))
+            container(message_actions(message, id, session.mesh_mine.contains(id), p))
                 .width(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Right),
         );
@@ -6351,8 +6462,9 @@ fn quote_of(message: &TimelineMessage) -> mesh_core::Quote {
     mesh_core::Quote { author: message.sender_name.clone(), text }
 }
 
-/// The hover bar on a message: copy, and on WhatsApp react, reply, forward.
-fn message_actions<'a>(message: &TimelineMessage, id: &str, whatsapp: bool, p: &'a theme::Palette) -> Element<'a, Message> {
+/// The hover bar on a message: copy; on WhatsApp react, reply, forward; on
+/// Mesh react, reply, edit (`mine`) and delete (for everyone when `mine`).
+fn message_actions<'a>(message: &TimelineMessage, id: &str, mine: bool, p: &'a theme::Palette) -> Element<'a, Message> {
     let action = |glyph: &'static str, tip: &'static str, press: Message| {
         iced::widget::tooltip(
             button(text(glyph).size(15)).on_press(press).padding([2, 7]).style(flat_button_style(p)),
@@ -6366,11 +6478,21 @@ fn message_actions<'a>(message: &TimelineMessage, id: &str, whatsapp: bool, p: &
     if !message.body.is_empty() && !matches!(message.kind, MessageKind::Image(_) | MessageKind::File(_)) {
         bar = bar.push(action("⧉", "Copy", Message::CopyText(message.body.clone())));
     }
-    if whatsapp {
+    if matches!(message.sender_network, Network::WhatsApp | Network::Mesh) {
         bar = bar
             .push(action("🙂", "React", Message::ToggleReactPicker(id.to_string())))
-            .push(action("↩", "Reply", Message::ReplyTo(id.to_string(), quote_of(message))))
-            .push(action("↪", "Forward", Message::ForwardStart(id.to_string())));
+            .push(action("↩", "Reply", Message::ReplyTo(id.to_string(), quote_of(message))));
+    }
+    if message.sender_network == Network::WhatsApp {
+        bar = bar.push(action("↪", "Forward", Message::ForwardStart(id.to_string())));
+    }
+    if message.sender_network == Network::Mesh {
+        // A file's row has no text of its own to edit.
+        if mine && !message.body.starts_with("📎 ") {
+            bar = bar.push(action("✎", "Edit", Message::MeshEdit(id.to_string(), message.body.clone())));
+        }
+        let (tip, everyone) = if mine { ("Delete for everyone", true) } else { ("Delete here", false) };
+        bar = bar.push(action("🗑", tip, Message::MeshDelete(id.to_string(), everyone)));
     }
     container(bar)
     .padding(2)

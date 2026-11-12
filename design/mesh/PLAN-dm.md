@@ -304,7 +304,7 @@ nothing the process test doesn't.*
 
 - [x] **Task 16: `mesh.rs`**: the dm commands and events, with parse
   tests. Size S.
-- [ ] **Task 17: Chats**: Mesh DMs in the sidebar under Mesh, opening in
+- [x] **Task 17: Chats**: Mesh DMs in the sidebar under Mesh, opening in
   the existing timeline and composer (`TimelineMessage`, `web_id` = event
   ID), replies, edits, reactions, the typing line, unread badges and
   sounds, a "sending" mark. Size L.
