@@ -4,6 +4,8 @@
 
 mod accounts;
 mod cache;
+#[cfg(test)]
+mod checkpoint;
 mod mesh_dm;
 mod mesh_ui;
 mod rain;
@@ -4028,6 +4030,10 @@ fn media_moving(state: &App) -> bool {
 /// can block for a moment). On Windows it goes out as `Mesh.Mesh`, which the
 /// installer registers with Mesh's name and icon (else it'd show as PowerShell).
 fn notify(title: String, body: String) {
+    // The tests drive the app with real messages; none reach the desktop.
+    if cfg!(test) {
+        return;
+    }
     std::thread::spawn(move || {
         let mut n = notify_rust::Notification::new();
         n.appname("Mesh").summary(&title).body(&body);

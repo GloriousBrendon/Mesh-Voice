@@ -211,19 +211,33 @@ pub(crate) fn on_click(name: &str, head: &[u8]) -> Click {
     if safe { Click::Open } else { Click::ShowInFolder }
 }
 
-/// Opens `path` in its app, or shows it in its folder, by [`on_click`].
-fn open_received(path: &std::path::Path) -> std::io::Result<()> {
+/// What clicking the received file at `path` does, by [`on_click`] on its
+/// name and first bytes.
+fn click_of(path: &std::path::Path) -> std::io::Result<(String, Click)> {
     use std::io::Read;
     let mut head = [0u8; 512];
     let n = std::fs::File::open(path)?.read(&mut head)?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    match on_click(&name, &head[..n]) {
+    let click = on_click(&name, &head[..n]);
+    Ok((name, click))
+}
+
+/// Opens `path` in its app, or shows it in its folder. The tests stop short
+/// of starting another program.
+fn act(path: &std::path::Path, click: Click) -> std::io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    match click {
         Click::Open => open_url(&path.to_string_lossy()),
         Click::ShowInFolder => show_in_folder(path),
     }
 }
 
 fn show_in_folder(path: &std::path::Path) -> std::io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
     #[cfg(windows)]
     let shown = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
     #[cfg(not(windows))]
@@ -354,8 +368,14 @@ pub(crate) fn event(state: &mut App, event: mesh::Event) -> Task<Message> {
                 }
             } else {
                 session.status = None;
-                if let Err(err) = open_received(path) {
-                    session.status = Some(format!("Couldn't open that file: {err}"));
+                match click_of(path) {
+                    Ok((name, click)) => {
+                        if let Err(err) = act(path, click) {
+                            session.status = Some(format!("Couldn't open that file: {err}"));
+                        }
+                        state.mesh.last_click = Some((name, click));
+                    }
+                    Err(err) => session.status = Some(format!("Couldn't open that file: {err}")),
                 }
             }
         }

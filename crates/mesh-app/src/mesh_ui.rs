@@ -23,13 +23,15 @@ pub(crate) struct Mesh {
     /// This device's live friend codes.
     codes: Vec<mesh::Code>,
     /// Friends, requests both ways, blocks and our status (social).
-    social: mesh::Social,
+    pub social: mesh::Social,
     /// Test notes received this run (SPEC-e2ee), oldest first.
     notes: Vec<mesh::Note>,
     /// The chat list (SPEC-dm), newest activity first.
     pub chats: Vec<mesh::Chat>,
     /// Who's typing, by name, in which chat, and when it was heard.
     pub typing: Option<(String, Vec<String>, std::time::Instant)>,
+    /// The last received file clicked, and what that did (`mesh_dm::on_click`).
+    pub last_click: Option<(String, crate::mesh_dm::Click)>,
     /// New group, while it's open: the friends picked, and its name.
     new_group: Option<(Vec<String>, String)>,
     form: Form,

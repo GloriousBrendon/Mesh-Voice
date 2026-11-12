@@ -587,10 +587,15 @@ impl Node {
 /// Runs `mesh-node --data <data>` for as long as `events` is open, restarting
 /// it when it exits (the same backoff as `whatsapp::run_native`).
 pub async fn run(exe: PathBuf, data: PathBuf, events: mpsc::UnboundedSender<Event>) {
+    run_with(exe, Vec::new(), data, events).await;
+}
+
+/// `run`, with more flags for `mesh-node` (a test's relay and seed).
+pub async fn run_with(exe: PathBuf, args: Vec<String>, data: PathBuf, events: mpsc::UnboundedSender<Event>) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     while !events.is_closed() {
         let mut cmd = tokio::process::Command::new(&exe);
-        cmd.arg("--data").arg(&data).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
+        cmd.args(&args).arg("--data").arg(&data).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         let mut child = match cmd.spawn() {
