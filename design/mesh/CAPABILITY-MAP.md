@@ -96,6 +96,48 @@ chat while both of you are online. `mailbox` adds offline delivery.
 - **A second seed on a VPS comes after testing**, once the homelab seed is
   shown to work.
 
+## Before beta: every check that needs a person
+
+Everything below needs someone at the machines; what a test can check is
+already a test. They can mostly share one sitting. Each points at where
+its steps are.
+
+1. **A solo look at the chat screens** (PLAN-dm Checkpoint B), on Linux
+   and on Windows. The machine test (`cargo test -p mesh-app checkpoint
+   -- --ignored`) drives steps 1 to 6 through the app's own state, but
+   draws nothing. This look covers what it can't see: how the sidebar
+   rows, marks, hover bar, picture preview and lightbox, typing line and
+   group panel look and fit (the narrow Accounts panel too); that sounds
+   play and desktop notifications show; that clicking `run.sh` really
+   opens the file manager on its folder and a PDF really opens its viewer
+   (the test checks the decision, not the launch); the composer by
+   keyboard (Enter, Shift+Enter, Esc out of a reply); timing as a person
+   feels it (a message in under 1 s, a waiting one within 5 s of
+   reopening).
+2. **Linking** (PLAN-link task 6; steps in PLAN-dm Checkpoint B, step 7):
+   the Windows PC linked from the Linux box at home, with the 40 s wait
+   before Link that checks be2d617; the friends and chats arrive; removing
+   it keeps it out.
+3. **Identity on Windows** (PLAN-identity Checkpoint D): create, export
+   and import across the machines, the same safety number, wrong
+   passwords, unlock times, Keep unlocked.
+4. **Transport on Windows** (PLAN-transport Checkpoint C): ping both ways
+   from different networks, forced relay, a network switch, a UDP-blocked
+   network if there is one, no admin rights and the firewall prompt, idle
+   numbers.
+5. **Routing, two windows** (PLAN-routing Checkpoint B): add each other,
+   ping by ID. In effect it passed inside social's and e2ee's Checkpoint B
+   on Windows (2026-11-10) but was never ticked on its own; confirm or run
+   it (a few minutes).
+6. **The module gates, two machines on different networks**: seed,
+   routing, social, e2ee and dm Checkpoint C (each plan's last
+   checkpoint). They need a seed reachable from outside home: the VPS
+   (finding 6). One sitting, after it's up.
+
+e2ee Checkpoint B's step 4 (a window restored from a backup shows the
+notes) was skipped by hand; the dm process test now checks that a device
+restored from a backup gets the whole history, so it isn't listed.
+
 ## Open questions
 
 - **Move to a new ID?** Settle before `spaces`. Every device holds the root

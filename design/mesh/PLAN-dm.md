@@ -328,9 +328,13 @@ nothing the process test doesn't. Moved again to after Task 18
     and in Accounts → Mesh.
 
 
-**Checkpoint B (by hand, you), after Task 18 (moved 2026-11-12, so pictures
-are in it):** copies of Mesh on one machine with the home seed, then the
-linking check.
+**Checkpoint B, after Task 18 (moved 2026-11-12, so pictures are in it):**
+steps 1 to 6 are a test since 2026-11-12 (Mesh-Voice
+`crates/mesh-app/src/checkpoint.rs`: `cargo test -p mesh-app checkpoint --
+--ignored`, about 45 s, with the Mesh-Node checkout beside it). It no
+longer blocks. What a person still has to see, and the linking check (step
+7), are in CAPABILITY-MAP's *Before beta* list; the steps below are what
+that look follows.
 
 Before you start, on the Linux box: build both in release (`cargo build
 --release` in Mesh-Node and in Mesh-Voice), copy Mesh-Node's
@@ -405,8 +409,8 @@ each copy involved (`grep mesh-node: ~/meshA.log`).
 - [ ] **Task 19: Retire test notes** (Q4): the buttons go; the helper keeps
   `e2eeNote` for its tests. Size S.
 
-**Checkpoint C (module gate, needs you):** the spec's two-machine check on
-the Windows PC and the Linux box. Across networks it needs the VPS seed
+**Checkpoint C (module gate, needs you; in CAPABILITY-MAP's *Before beta*
+list):** the spec's two-machine check on the Windows PC and the Linux box. Across networks it needs the VPS seed
 (finding 6), like every other module's gate.
 
 ## Order and size
