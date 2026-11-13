@@ -1,4 +1,5 @@
-//! PLAN-dm Checkpoint B, steps 1 to 6, by machine: three copies of the app,
+//! PLAN-dm Checkpoint B, steps 1 to 6, and PLAN-mailbox Task 17 (step 7:
+//! the mailbox spec's test 1), by machine: three copies of the app,
 //! each with a real `mesh-node`, a loopback relay and a seed, driven with the
 //! messages Mesh's buttons send, and checked through the app's own state (the
 //! chat list the sidebar draws, unread counts, timeline rows and their
@@ -132,6 +133,13 @@ impl World {
         self.press_until(copy, "unlocking", || Message::MeshForm(Msg::Submit), unlocked);
     }
 
+    /// Locking, through the call the app has for it (no button yet).
+    fn lock(&self, copy: &mut Copy) {
+        copy.app.mesh.node.as_ref().expect("the helper").lock();
+        let locked = |a: &App| a.mesh.identity.as_ref().is_some_and(|i| i.state == mesh::State::Locked);
+        self.until(copy, "locked", locked);
+    }
+
     /// Check an ID, then Add by ID.
     fn add(&self, copy: &mut Copy, other: &str) {
         let _ = update(&mut copy.app, Message::MeshForm(Msg::CheckInput(other.into())));
@@ -244,7 +252,7 @@ fn checkpoint_b_steps_1_to_6() {
     let mut seed = Command::new(&exe)
         .args(["seed", "--data"])
         .arg(root.join("seed"))
-        .args(["--relay", &url])
+        .args(["--relay", &url, "--mail"])
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -423,6 +431,22 @@ fn checkpoint_b_steps_1_to_6() {
     let lines: Vec<String> = rows(&c.app).into_iter().map(|(body, _)| body).collect();
     assert_eq!(lines, ["g1", "g2 from bob", "while away 1", "while away 2"], "in order");
     world.until(&mut a, "c1 sent", |app| mark(app, "c1").is_empty());
+
+    // 7. PLAN-mailbox Task 17, the spec's test 1 through the app: B locks; A
+    // sends and locks; B unlocks while A is away and the line shows; A's
+    // "sending" mark clears when A unlocks (B's receipt, by mail).
+    world.lock(&mut b);
+    open(&mut a, &id_b, true);
+    send(&mut a, "by mail");
+    world.until(&mut a, "A's own row", |app| has_row(app, "by mail"));
+    assert_eq!(mark(&a.app, "by mail"), "sending", "B is away");
+    world.lock(&mut a);
+    world.unlock(&mut b);
+    open(&mut b, &id_a, true);
+    world.until(&mut b, "the mailed line on B", |app| has_row(app, "by mail"));
+    world.unlock(&mut a);
+    open(&mut a, &id_b, true);
+    world.until(&mut a, "\"by mail\" sent", |app| has_row(app, "by mail") && mark(app, "by mail").is_empty());
 
     for copy in [a, b, c] {
         copy.helper.abort();
