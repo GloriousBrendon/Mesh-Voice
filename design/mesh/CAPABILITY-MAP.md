@@ -134,6 +134,46 @@ its steps are.
    checkpoint). They need a seed reachable from outside home: the VPS
    (finding 6). One sitting, after it's up. e2ee's check sends a Mesh chat
    message where it says a test note (retired 2026-11-12).
+7. **Mail through the home seed, from your own PC** (added 2026-11-13).
+   The home seed holds mail since Task 18 of PLAN-mailbox; this checks
+   it with a real install. On the home network or Tailscale (the seed is
+   home-only):
+   1. **Get the new engine.** Quit Mesh. Pull both repos (Mesh-Node at
+      `cc482e6` or later, beside Mesh-Voice), then on Linux run
+      `installer/install-linux.sh`; on Windows run `installer\build.ps1`
+      and then the `dist\Mesh-Setup-<version>.exe` it made. Either way
+      `mesh-node` lands next to Mesh, which is where Mesh looks for it.
+   2. **Two people on one PC.** Start Mesh (A, your own). Start a second
+      copy with its own folder (B): `MESH_DATA=/tmp/meshB mesh` on Linux,
+      `$env:MESH_DATA='C:\meshB'; & "$env:LOCALAPPDATA\Programs\Mesh\Mesh.exe"`
+      in PowerShell. Create an identity in B and add each other with a
+      friend code (Your ID → Friend codes). Leave both open a minute: each
+      puts its mail record at the seed when it unlocks.
+   3. **Mail.** Quit B (there's no Lock button yet; quitting takes B
+      offline just the same). In A, send B a line. Its mark stays at
+      "sending".
+   4. **Back.** Start B again and unlock it. The line shows in B within a
+      few seconds, and A's "sending" mark clears.
+   5. **The counts.** Each hourly line covers the hour before it, so read
+      the one or two lines after you finished (`docker compose logs seed
+      | grep "last hour mail"` in the seed's deploy folder). The seed
+      counts requests, and a claim or a collect is one per friend per
+      week, so the totals grow with A's friends. Against the all-zero
+      lines before, expect at least:
+      - **claims 12**: the new friendship claims six weeks on each side;
+        A's first unlock on the new engine claims for all its friends too.
+      - **mail record puts 2**: each side's record for the other, again
+        at every unlock.
+      - **mail record gets 2**: each unlock reads its friends' records.
+      - **puts 1**: A's line.
+      - **collects 6 or more**: six weeks per friend at each unlock, and
+        two weeks every 30 minutes while a copy is open.
+      - **takes 1**: B taking the line once it has it.
+      - **0 envelopes held** at the end.
+
+      If puts moved but takes didn't, the line is still at the seed. If
+      claims or mail record puts stay at 0, the install still runs the
+      old engine (step 1).
 
 e2ee Checkpoint B's step 4 (a window restored from a backup shows the
 notes) was skipped by hand; the dm process test now checks that a device
