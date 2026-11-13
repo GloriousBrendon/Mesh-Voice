@@ -329,7 +329,12 @@ the dm, routing, social and e2ee process tests still pass.
        76 ms after the unlock (three runs: 76, 76, 77 ms). At 1,000
        contacts, three runs of six showed it 0.77, 0.80 and 4.3 s after
        the unlock; **the other three never did: the helper sent nothing
-       for 90 s after unlocking** (not found yet; see the report). The
+       for 90 s after unlocking.** *Found 2026-11-13:* load, not a race.
+       With the tests' 8 s records Bob refreshes every 2 s, and a refresh
+       at 1,000 contacts takes several seconds of CPU: one core, all the
+       time. At 100 and 300 contacts it held (155 and 296 ms); at 1,000
+       with a 30 s refresh it held 3 of 3 (0.83 to 0.86 s). Recorded in
+       the spec's *What it costs*. The
        helper's `online` comes after the seed's answer here, so the time
        is from the unlock. Bytes, from the formats, not measured: the
        collect is 6,144 gets of 56 bytes (about 370 KB up with frames) and

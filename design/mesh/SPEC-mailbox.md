@@ -326,6 +326,16 @@ internet with a 100 ms round trip; 5 s leaves room for a slow relay. At
 still inside 5 s. The record read and puts (about 2.2 MB) go after it and
 don't hold it up.
 
+*Measured 2026-11-13 (PLAN-mailbox Task 16, measurement 1, loopback):*
+"one" shows 76 ms after the unlock at one contact, 155 ms at 100, 296 ms
+at 300 and 0.83 to 0.86 s at 1,000 (with a 30 s refresh). **The size it
+holds to:** at the beta's 30-minute refresh, 1,000 contacts (the most,
+`MAX_CONTACTS`). A refresh at 1,000 contacts costs a few seconds of one
+core (its dials, record puts and a 2,048-slot collect), so with a refresh
+every 2 s (the tests' 8 s records) the helper never catches up: 300
+contacts held, 1,000 didn't in half the runs. Tests above 300 contacts use
+records of 120 s or more.
+
 ## Behaviour
 
 ### Sending
