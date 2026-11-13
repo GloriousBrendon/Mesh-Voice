@@ -367,7 +367,7 @@ every other module's gate.
 
 ### Phase 6: the home seed (asks you first)
 
-- [ ] **Task 18: Mail on at the home seed. I stop and ask before this.**
+- [x] **Task 18: Mail on at the home seed. I stop and ask before this.**
   - What, once you say so: the homelab's compose file gains `--mail
     --mail-max 2147483648` for the seed container; the image is rebuilt
     and the container restarted; then I read the next hourly lines (claims,
@@ -375,6 +375,12 @@ every other module's gate.
   - Until then, the home seed runs without `--mail` and refuses every mail
     service.
   - Size S.
+  - *Done 2026-11-13 on your word:* the home seed's source copy was brought
+    to Mesh-Node `cc482e6` (it was the Nov 11 copy, without the mail
+    services; the old copy is kept as a backup beside it), its compose file
+    (not the repo's template) gained the two flags, and only the seed was
+    rebuilt and restarted, on its data volume, so its ticket is the same.
+    It started holding 0 envelopes.
 
 ## Order and size
 
