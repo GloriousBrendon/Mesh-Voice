@@ -157,19 +157,21 @@ its steps are.
    5. **The counts.** Each hourly line covers the hour before it, so read
       the one or two lines after you finished (`docker compose logs seed
       | grep "last hour mail"` in the seed's deploy folder). The seed
-      counts requests, and a claim or a collect is one per friend per
-      week, so the totals grow with A's friends. Against the all-zero
-      lines before, expect at least:
-      - **claims 12**: the new friendship claims six weeks on each side;
-        A's first unlock on the new engine claims for all its friends too.
-      - **mail record puts 2**: each side's record for the other, again
-        at every unlock.
-      - **mail record gets 2**: each unlock reads its friends' records.
-      - **puts 1**: A's line.
-      - **collects 6 or more**: six weeks per friend at each unlock, and
-        two weeks every 30 minutes while a copy is open.
-      - **takes 1**: B taking the line once it has it.
-      - **0 envelopes held** at the end.
+      counts requests. Claims and collects are padded with dummies to 64
+      boxes a week (up to 64 friends; M13), so what one copy really sends
+      is far above the real friends. Against the all-zero lines before
+      (*corrected 2026-11-14: the first version gave only the unpadded
+      minimums*):
+
+      | Count | Minimum | What one hour of this check really shows |
+      |---|---|---|
+      | claims | 12 | **about 780**: 384 (64 × 6 weeks) at each copy's first unlock on the new engine, since its daily renewal is due, plus 6 a side for the new friendship (unpadded). B's second unlock adds none: it renewed under a day ago. |
+      | mail record puts | 2 | each side's record for the other, again at every unlock (not padded) |
+      | mail record gets | 2 | each unlock reads its friends' records (not padded) |
+      | puts | 1 | A's line, exactly 1 |
+      | collects | 384 | **about 1,150 or more**: 384 (64 × 6 weeks) at each of the three unlocks, plus 128 (64 × 2 weeks) every 30 minutes for each open copy. An unlock before the network is up can add one more 384 when the seeds answer. |
+      | takes | 1 | B taking the line, exactly 1 |
+      | envelopes held | 0 at the end | 0 |
 
       If puts moved but takes didn't, the line is still at the seed. If
       claims or mail record puts stay at 0, the install still runs the
