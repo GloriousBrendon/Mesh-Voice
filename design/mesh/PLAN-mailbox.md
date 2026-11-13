@@ -13,7 +13,9 @@ measurements (Task 16). Edited again after your review of Tasks 6 to 10:
 Task 7 was built before Task 6, and the `since` rule and test 5 moved into
 Task 6 (approved); test 11 deleted, its unit tests kept (Task 8); four
 fixes before Task 11 (Task 10b); saved backoffs (Task 11); a refresh that
-collects before it renews (Task 14).*
+collects before it renews (Task 14). Edited 2026-11-13: `--cut live` built
+in Task 12, for test 19 (it was Task 14's); two small fixes before
+Checkpoint B (Task 12b).*
 
 The code goes in `GloriousBrendon/Mesh-Node` (the seed's mail store and
 services, the helper's mail path, the mail wrapper in `mesh-e2ee`, the clock
@@ -248,7 +250,7 @@ Task 10b first.*
      one sender and earlier messages from another come out messages first
      (unit).
 
-- [ ] **Task 11: The saved marks** (M15; test 15)
+- [x] **Task 11: The saved marks** (M15; test 15)
   - What: per event and reader device, holder, put time and `mseq`, in the
     counters file, written once per batch of puts; read at unlock.
     *Added 2026-11-12:* also each reader device's next `mseq`, what was
@@ -259,7 +261,7 @@ Task 10b first.*
     at most (unit); a format 1 counters file written by today's code opens
     with every counter as it was (unit, from saved bytes).
   - Size S.
-- [ ] **Task 12: Holders: full, dropped and unreachable** (M3, M10, M12;
+- [x] **Task 12: Holders: full, dropped and unreachable** (M3, M10, M12;
   tests 4, 19, 20)
   - What: `--holder` and `MESH_HOLDERS`; the record's holder list (default
     the built-in seeds); an unreachable holder (refused or failed
@@ -270,22 +272,31 @@ Task 10b first.*
     dropped holder kept, and collected from, until its claims end.
   - Accept: tests 4, 19 and 20; a reader listing two holders, the first
     full, gets its mail from the second.
+  - *Added 2026-11-13:* `--cut live` comes here (test 19 needs it).
   - Size M.
-- [ ] **Task 13: Groups and own devices** (spec delivers 2 and 3; dm D8 as
+- [x] **Task 12b: Two fixes** (*added 2026-11-13 at your review*; M15,
+  Behaviour)
+  - What: a record read saves the cleared marks before the remembered
+    records; a claim round with any `slow-down` isn't counted as renewed.
+  - Accept: a crash between the two saves still mails again after the
+    restart; a slowed round is claimed again at the next refresh.
+  - Size S.
+- [x] **Task 13: Groups and own devices** (spec delivers 2 and 3; dm D8 as
   changed; tests 2, 3)
   - What: group events mailed per member device, as live; own devices get
     by mail only events authored here and read markers.
   - Accept: tests 2 and 3.
   - Size S.
-- [ ] **Task 14: Refreshes and the week's edge** (test 18)
-  - What: every 30 minutes, collect this week and last; `--cut live`.
+- [x] **Task 14: Refreshes and the week's edge** (test 18)
+  - What: every 30 minutes, collect this week and last (`--cut live`
+    moved to Task 12).
     *Added 2026-11-12:* a refresh collects before it renews, and treats
     every real box answering `no-box` as a wipe, as the unlock does, so a
     device left unlocked over a wipe moves its `since`.
   - Accept: test 18; a wipe while unlocked moves `since` at the next
     refresh.
   - Size S.
-- [ ] **Task 15: Nothing readable** (M17, M19; test 8)
+- [x] **Task 15: Nothing readable** (M17, M19; test 8)
   - What: counts-only log lines for mail on the seed and the helper; the
     greps of test 8 over the seed's `mail/` and every helper's stderr.
   - Accept: test 8.
