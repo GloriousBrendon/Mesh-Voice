@@ -307,7 +307,7 @@ the dm, routing, social and e2ee process tests still pass.
 
 ### Phase 4: measuring (Mesh-Node)
 
-- [ ] **Task 16: Unlock collect time and seed disk at 1,000 contacts**
+- [x] **Task 16: Unlock collect time and seed disk at 1,000 contacts**
   - What: `--ignored` tests, release build, run three times:
     1. A helper with 1,000 contacts (made in the test, no network for
        them) unlocks against a seed holding its 6,144 claims and one
@@ -324,10 +324,33 @@ the dm, routing, social and e2ee process tests still pass.
   - Accept: results recorded here, against the spec's table (about 1 s
     more than test 1 at 1,000 contacts; about 2.6 MB a person on disk).
   - Size S.
+  - *Results 2026-11-13* (release build, Linux desktop, NVMe, loopback):
+    1. `unlock_at_1000_contacts`: test 1 at one contact shows the line
+       76 ms after the unlock (three runs: 76, 76, 77 ms). At 1,000
+       contacts, three runs of six showed it 0.77, 0.80 and 4.3 s after
+       the unlock; **the other three never did: the helper sent nothing
+       for 90 s after unlocking** (not found yet; see the report). The
+       helper's `online` comes after the seed's answer here, so the time
+       is from the unlock. Bytes, from the formats, not measured: the
+       collect is 6,144 gets of 56 bytes (about 370 KB up with frames) and
+       about 86 KB of answers down; the unlock's records round adds 1,001
+       records of about 800 bytes up (about 800 KB).
+    2. `seed_at_scale`, 1,100 people: 1,382,400 claims, 201,100 records,
+       77,000 envelopes of 1 KB. Disk: claims 94 MB, records 162 MB,
+       envelopes 82 MB. Memory held 200 MB. Start (reading and compacting
+       the logs) 1.42 to 1.43 s; a sweep 17 ms. A person of 1,000 contacts
+       is about 440 KB of claims and 800 KB of records a week: about
+       1.25 MB for one week of records, against the table's 2.6 MB for two
+       weeks of larger records.
+    3. 256 synced puts: 225 to 242 ms; the lock is held at most 1.5 to
+       5.2 ms a put, which is the longest another call waits.
+    4. A sweep that compacts the full store (a week's records lapsed):
+       454 to 463 ms, **all of it under the store's lock**, so every
+       mail call waits that long once.
 
 ### Phase 5: Mesh-Voice
 
-- [ ] **Task 17: The checkpoint test gains test 1 through the app.** In
+- [x] **Task 17: The checkpoint test gains test 1 through the app.** In
   `crates/mesh-app/src/checkpoint.rs`: B locks, A sends and locks, B
   unlocks, the line shows on B, and A's "sending" mark clears when A
   unlocks. No screen changes. Size S.
