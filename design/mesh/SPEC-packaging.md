@@ -1,6 +1,10 @@
 # Spec: `packaging`, slice 1: one download for a friend (Mesh)
 
-Status: **DRAFT 2026-11-13, for your review.** No code until you approve it.
+Status: **APPROVED 2026-11-14**, with your answers (Linux no, the file sent
+directly, unsigned, `mesh-wa` and `mesh-dc` stay; the first beta is 0.2.0)
+and three edits: the build machine named (P1, *What it needs from you*), P2's
+uncommitted changes meaning tracked files only, and Before beta item 7's
+padded counts. Plan: [PLAN-packaging.md](PLAN-packaging.md).
 This is the first slice of module 11 in [CAPABILITY-MAP.md](CAPABILITY-MAP.md)
 (`packaging`). The rest of that module is listed under *Left for the full
 packaging part*.
@@ -12,14 +16,17 @@ or a Visual C++ runtime on it. Windows Sandbox works for this: it starts clean
 each time. Tests P1 to P6 run at home, because the seed is home-only. P7 needs
 a seed reachable from outside (see *Not this slice's to fix*).
 
-- **P1. One command builds the download.** On your PC, with Mesh-Voice and
-  Mesh-Node checked out side by side and both clean, `installer\build.ps1`
-  prints the path of `dist\Mesh-Setup-<version>.exe` and its SHA-256.
+- **P1. One command builds the download.** On your Windows PC (not the
+  Linux box: the setup is built where Inno Setup and the MSVC toolchain
+  are), with Mesh-Voice and Mesh-Node checked out side by side and both
+  clean, `installer\build.ps1` prints the path of
+  `dist\Mesh-Setup-<version>.exe` and its SHA-256.
 - **P2. A missing or broken engine stops the build.** Each of these prints why
   and makes no setup file:
   - no Mesh-Node checkout;
   - Mesh-Node fails to build;
-  - either checkout has uncommitted changes.
+  - either checkout has uncommitted changes to tracked files. An untracked
+    file (a scratch note, a log) doesn't stop the build.
 
   Today the build leaves the engine out with a warning and still makes a
   setup.
@@ -74,7 +81,7 @@ This slice closes those gaps and decides where the file lives. That's all a
 friend needs: the built-in relay and seed lists (Mesh-Node `helper::SEEDS`) mean
 there's nothing to configure.
 
-## Decisions (proposed)
+## Decisions (approved 2026-11-14)
 
 - **D1. Windows only.** Linux waits for the full part, because a binary built
   on this box needs a C library as new as CachyOS's and won't start on older
@@ -82,7 +89,7 @@ there's nothing to configure.
   here, PLAN-seed Task 5) or a new tool such as `cargo-zigbuild`. A Linux friend
   for now builds from source with `installer/install-linux.sh`, which needs
   read access to the private Mesh-Node repo. *Question 1.*
-- **D2. Where the download lives: your choice (question 2).** Three options:
+- **D2. Where the download lives: (a), sent directly (your answer to question 2).** The three options were:
   - **(a) Send the file directly**, by a drive link or a chat attachment, with
     the hash beside it. Recommended for the first few friends: nothing new is
     public.
@@ -128,13 +135,16 @@ there's nothing to configure.
 
 ## What it needs from you
 
-1. Answers to questions 1 to 4.
+1. Answers to questions 1 to 4 (given 2026-11-14).
 2. **A clean Windows to test on:**
    - **Windows Sandbox** needs Windows Pro or higher, and turning it on once in
      "Turn Windows features on or off".
    - **Or** a second PC or VM that has never had Rust or Visual Studio on it.
-3. Inno Setup 6 on your PC. `build.ps1` already needs it, so you may have it.
-4. A version number for the first beta setup (D7).
+3. **Your Windows PC as the build machine.** `build.ps1` runs there, not on
+   the Linux box, with Rust (MSVC), Inno Setup 6 (`build.ps1` already
+   needs it), and both checkouts side by side.
+4. A version number for each beta setup (D7): 0.2.0 for the first, unless
+   you say otherwise.
 5. For P7 only: the VPS seed.
 
 ## Left for the full packaging part
@@ -147,11 +157,10 @@ there's nothing to configure.
 - Changelogs, version rules, winget or MSIX, and ARM64.
 - Reproducible builds, so a friend can check the binary against the source.
 
-## Questions
+## Questions (answered 2026-11-14)
 
-1. **Linux in this slice?** Recommended: no (D1).
-2. **Where does the download live?** Recommended: (a), sending the file
-   directly (D2).
-3. **Ship unsigned for the beta?** Recommended: yes (D3).
-4. **Keep `mesh-wa` and `mesh-dc` in a friend's setup?** Recommended: yes,
-   because it's no change (D6).
+1. **Linux in this slice?** No (D1).
+2. **Where does the download live?** (a): the file is sent directly, with no
+   public release (D2).
+3. **Ship unsigned for the beta?** Yes (D3).
+4. **Keep `mesh-wa` and `mesh-dc` in a friend's setup?** Yes (D6).
