@@ -365,7 +365,7 @@ records of 120 s or more.
    renewing (*added 2026-11-12*: otherwise a device left unlocked renews
    over a wipe and its `since` never moves). Once a day, read the records
    again. A renewal, claim or record round the seed didn't answer is tried
-   again at the next refresh, not a day later. *Added 2026-11-13:* so is a claim round where any claim was answered `slow-down`: it isn't counted as renewed.
+   again at the next refresh, not a day later. *Added 2026-11-13:* so is a claim round where any claim was answered `slow-down`: it isn't counted as renewed. *Added 2026-11-13 at your review:* each holder is owed the unlock's six weeks until it answers a collect of all six with no `slow-down`; until then every collect there asks for all six (per holder, so one dead holder doesn't make every collect full). An unlock before the network is up gets no answer, so a full publish that goes up while a holder is still owed starts a collect at once (or as soon as the unlock's collect comes back), not at the next refresh.
 
 ### Choosing your own holder (v1)
 
