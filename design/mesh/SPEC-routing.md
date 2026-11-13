@@ -255,6 +255,14 @@ const LOOKUP_CONTEXT: &str = "mesh 2026 routing lookup v1";
 5. Idle cost while unlocked with 50 contacts stays under 0.2% CPU on Linux
    (transport measured 0.07% before).
 
+## Known limits
+
+- *Added 2026-11-13 (found in mailbox's test 3):* `reach` returns no
+  device list while a connection to the contact is open (`routing.rs:127`,
+  the connected branch answers from the ping alone), so a contact's newly
+  linked device isn't dialled until every connection to them has dropped
+  and a lookup reads their newest list.
+
 ## Open questions
 
 - **Q1. Friend-of-friend lookup now or later?** I recommend **later**,

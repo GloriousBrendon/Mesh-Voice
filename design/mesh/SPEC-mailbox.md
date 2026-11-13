@@ -66,6 +66,14 @@ message waits on the sender's devices, as it does today, and is never lost.
   release.
 - Spaces' mail, and push notifications to phones.
 
+**Where it differs (added 2026-11-13 at your review)**
+
+- **A friend's newly linked device gets mail from us after our next record
+  read** (daily, or at our unlock). Until then we don't know its holders,
+  so it gets only what reaches it live. The daily read finds it, so the gap
+  is a day at most. (Our own new device is found sooner: our list is in the
+  keystore, and the lock waits for the read it starts, M2.)
+
 ## Acceptance tests
 
 Process tests with real helpers and a seed, as `tests/dm.rs`. "Away" means
