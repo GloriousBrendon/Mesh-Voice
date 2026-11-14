@@ -88,7 +88,7 @@ code, and every piece must link the runtime the same way:
   - **Files:** `installer/build.ps1`, `installer/mesh.iss`.
   - Size S.
 
-- [ ] **Task 3: Version 0.2.0. (Alone.)**
+- [x] **Task 3: Version 0.2.0. (Alone.)**
   - **What:** `crates/mesh-app/Cargo.toml` goes to `version = "0.2.0"`, plus
     the one `Cargo.lock` line it changes. Explorer and the setup read the
     exe's version from there, through `winresource`, and so does the app's
