@@ -99,8 +99,8 @@ code, and every piece must link the runtime the same way:
   - Size XS.
 
 - [ ] **Task 4: P1 to P3, the build. (At your PC.)**
-  - **What:** steps 2 to 5 of *The sitting*: the build, `dumpbin`, the
-    setup's Details, and P2's four cases.
+  - **What:** steps 2 to 5 of *The sitting*: the build, `dumpbin`, P2's
+    four cases, and the setup's Details and hash.
   - **Accept:**
     - P1: the path, size, commits and SHA-256 are printed;
     - P2: the four cases behave as the sitting says;
@@ -160,53 +160,83 @@ code, and every piece must link the runtime the same way:
 
 Run these at your Windows PC, top to bottom. Each step says what to send
 me. If a step marked **stop** fails, stop there and send me what it says;
-the rest waits.
+the rest waits. *Corrected 2026-11-14 at your review:*
+- the build runs in a normal PowerShell window;
+- the hash comes from the last successful build;
+- your data is backed up before your PC's update;
+- P2's broken engine fails in seconds.
 
 1. **Pull.** In both checkouts, `git pull`, then `git status`. Both must
-   say clean (untracked files are fine). Mesh-Node must be at `d437a51` or
-   later.
-2. **Build (Task 1, stop).** Open "Developer PowerShell for VS", which
-   `dumpbin` needs. In the Mesh-Voice folder, run `.\installer\build.ps1`.
-   The first run builds everything from scratch, so expect a long wait.
+   say clean (untracked files are fine). Mesh-Voice must be at `1f0e9a1` or
+   later, and Mesh-Node at `d437a51` or later.
+2. **Build (Task 1, stop).** Use a **normal PowerShell window**, not
+   "Developer PowerShell for VS": that one defaults to a 32-bit
+   environment, which can break a 64-bit link. In the Mesh-Voice folder, run
+   `.\installer\build.ps1`. The first run builds everything from scratch,
+   so expect a long wait.
    - **Send me:** the last two lines (path, size, commits; SHA-256) and
      roughly how long it took.
    - If it fails, send the first `error` lines and stop.
-3. **`dumpbin` (Task 1, stop).** In the same window and folder, run:
+3. **`dumpbin` (Task 1, stop).** Only this step uses "Developer PowerShell
+   for VS", which has `dumpbin`. Open it and go to the same Mesh-Voice folder
+   as step 2, for example
+   `cd "$env:USERPROFILE\Documents\GitHub\Mesh-Voice"` (use your path if
+   it's elsewhere). Then run:
    ```
    dumpbin /dependents target\x86_64-pc-windows-msvc\release\mesh-app.exe mesh-wa\target\x86_64-pc-windows-msvc\release\mesh-wa.exe mesh-dc\target\x86_64-pc-windows-msvc\release\mesh-dc.exe ..\Mesh-Node\target\x86_64-pc-windows-msvc\release\mesh-node.exe | Select-String 'Dump of|\.dll'
    ```
    - **Send me:** the whole output.
    - Stop if any line names `VCRUNTIME`, `MSVCP` or `api-ms-win-crt`.
-4. **Details (P3).** Right-click `dist\Mesh-Setup-0.2.0.0.exe` →
-   Properties → Details.
-   - **Send me:** Product version, File version and Comments. Product
-     version should read "0.2.0.0 (app …, engine …)".
-5. **P2's four cases.** After each, **send me** its last lines.
-   1. `New-Item scratch.txt` in Mesh-Voice, then `.\installer\build.ps1`.
-      It builds; the cached build is quick. Then `Remove-Item scratch.txt`.
-   2. Add a blank line to `README.md`, then run `.\installer\build.ps1`.
-      It stops with "uncommitted changes" and names `README.md`. Then
+   - Then close this window. Steps 4 on use the normal one.
+4. **P2's four cases.** In the normal PowerShell window, in Mesh-Voice.
+   After each case, **send me** its last lines.
+   1. `New-Item scratch.txt`, then `.\installer\build.ps1`. It builds; the
+      cached build is quick. Then `Remove-Item scratch.txt`.
+      - This makes the setup again, and the file in `dist\` is now this
+        one. **Its SHA-256 is the one steps 5 and 7 use.** Steps 4.2 to
+        4.4 make no setup.
+   2. Add a blank line to `README.md`, then `.\installer\build.ps1`. It
+      stops with "uncommitted changes" and names `README.md`. Then
       `git checkout README.md`.
    3. `$env:MESH_NODE='C:\nowhere'; .\installer\build.ps1`. It stops with
-      "no Mesh-Node checkout".
+      "no Mesh-Node checkout". Then `Remove-Item Env:MESH_NODE`.
    4. A broken engine on a clean tree:
       - `git clone ..\Mesh-Node $env:TEMP\node-broken`;
-      - in that clone, `git switch -c broken`, then add the line
-        `compile_error!("P2 check");` to the end of
-        `crates\mesh-node\src\main.rs` and `git commit -am broken`;
-      - back in Mesh-Voice, `$env:MESH_NODE="$env:TEMP\node-broken";
-        .\installer\build.ps1`. It stops with "cargo build failed", and
-        `dist\` gains no new file.
-      - Then `Remove-Item Env:MESH_NODE`.
-6. **Your PC to 0.2.0.** Run `dist\Mesh-Setup-0.2.0.0.exe` on your PC, over
-   your current Mesh. Mesh closes, updates and starts again. Unlock it.
+      - `cd $env:TEMP\node-broken; git switch -c broken`;
+      - `Add-Content Cargo.toml 'this is not toml'`, then
+        `git commit -am broken`;
+      - `cd` back to Mesh-Voice, then
+        `$env:MESH_NODE="$env:TEMP\node-broken"; .\installer\build.ps1`.
+
+      The three Mesh-Voice builds are cached, so they're quick. Cargo then
+      rejects the engine's `Cargo.toml` in seconds, the build stops with
+      "cargo build failed", and `dist\` gains no new file. Then
+      `Remove-Item Env:MESH_NODE`.
+5. **Details and hash (P1, P3).** Right-click
+   `dist\Mesh-Setup-0.2.0.0.exe` → Properties → Details.
+   - **Send me:** Product version, File version and Comments. Product
+     version should read "0.2.0.0 (app …, engine …)".
+   - Run `Get-FileHash dist\Mesh-Setup-0.2.0.0.exe`. It matches step 4.1's
+     SHA-256.
+6. **Your PC to 0.2.0.**
+   1. **Back up first.** Quit Mesh. `Get-Process mesh*` should print
+      nothing; if it does, wait a few seconds and run it again. Then run:
+      ```
+      Copy-Item -Recurse "$env:APPDATA\mesh" "$env:USERPROFILE\mesh-backup-2026-11-14"
+      ```
+      Why: the new engine upgrades your saved files, and an older engine
+      refuses the upgraded ones. If 0.2.0 goes wrong, this copy is the only
+      way back to your accounts and chats as they are now. To restore it:
+      uninstall, put the copy back as `%APPDATA%\mesh`, and run an older
+      build.
+   2. Run `dist\Mesh-Setup-0.2.0.0.exe`. When it finishes, Mesh starts.
+      Unlock it.
    - It needs the new engine to send mail in step 8.
-   - Your accounts and chats stay.
    - **Send me:** whether Mesh came back with everything.
 7. **Sandbox run 1 (P4, P5).** Open Windows Sandbox and copy the setup into
    it. Keep this Sandbox open until step 8 is done: closing it wipes it.
-   1. In PowerShell there, run `Get-FileHash .\Mesh-Setup-0.2.0.0.exe`.
-      It matches step 2's hash.
+   1. In PowerShell there, run `Get-FileHash .\Mesh-Setup-0.2.0.0.exe`. It
+      matches step 4.1's SHA-256.
    2. Run the setup and click "More info", then "Run anyway". There's no
       admin prompt. Mesh opens asking you to create an identity, with no
       Matrix login and no missing-DLL dialog.
@@ -223,12 +253,14 @@ the rest waits.
    4. The line shows within a few seconds, and your PC's mark clears.
    - **Send me:** pass or fail, and the time you noted. I read the seed's
      hourly line for that hour myself and check it against item 7's table.
+     The sitting has more unlocks than the table assumes: each adds about
+     384 claims and 384 collects.
    - Then close the Sandbox.
 9. **Sandbox run 2 (P5, the other answer).** Open a fresh Sandbox. Repeat
    step 7, but click **Cancel** at the firewall prompt. Skip the mail step.
    - **Send me:** pass or fail, and the time to "online".
-10. **Tidy your friends.** The two Sandbox identities are now friends on
-    your PC. Remove them under Friends if you like. Nothing depends on them.
+10. **Tidy your friends.** The Sandbox identities are now friends on your
+    PC. Remove them under Friends if you like. Nothing depends on them.
 11. **The throwaway 0.1.9 setup (Task 6).** In Mesh-Voice:
     1. `git switch -c throwaway-0.1.9`.
     2. Set `version = "0.1.9"` in `crates\mesh-app\Cargo.toml`.
@@ -236,6 +268,7 @@ the rest waits.
        `Cargo.lock`.
     4. `git commit -am "throwaway 0.1.9"`.
     5. `.\installer\build.ps1`, which makes `dist\Mesh-Setup-0.1.9.0.exe`.
+       The 0.2.0.0 setup stays as it is.
     6. `git switch main; git branch -D throwaway-0.1.9`.
     - **Send me:** the last two lines.
 12. **The update (P6).** Open a fresh Sandbox and copy both setups in.
