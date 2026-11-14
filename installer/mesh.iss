@@ -3,12 +3,24 @@
 ; leaves your accounts and chats (%APPDATA%\mesh) alone on uninstall.
 
 #define Root ".."
-#define AppExe Root + "\target\release\mesh-app.exe"
-#define AppVersion GetVersionNumbersString(AppExe)
-; The Mesh-Node checkout (build.ps1 passes /DNode=…).
+; What build.ps1 passes: the Mesh-Node checkout, the Rust target the
+; binaries were built for, and the two commits they were built from.
 #ifndef Node
   #define Node Root + "\..\Mesh-Node"
 #endif
+#ifndef Target
+  #define Target "x86_64-pc-windows-msvc"
+#endif
+#ifndef AppCommit
+  #define AppCommit "unknown"
+#endif
+#ifndef NodeCommit
+  #define NodeCommit "unknown"
+#endif
+#define Bin "\target\" + Target + "\release\"
+#define AppExe Root + Bin + "mesh-app.exe"
+#define AppVersion GetVersionNumbersString(AppExe)
+#define Built AppVersion + " (app " + AppCommit + ", engine " + NodeCommit + ")"
 
 [Setup]
 AppId={{D5884734-20BD-4787-83B8-C0C7491957AD}
@@ -18,6 +30,9 @@ AppVerName=Mesh {#AppVersion}
 AppPublisher=Mesh
 AppPublisherURL=https://github.com/GloriousBrendon/Mesh-Voice
 VersionInfoDescription=Mesh Setup
+VersionInfoVersion={#AppVersion}
+VersionInfoProductTextVersion={#Built}
+VersionInfoComments=Mesh {#Built}
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\Mesh
 DisableProgramGroupPage=yes
@@ -42,9 +57,9 @@ Name: autostart; Description: "Start Mesh when I sign in to Windows"; Flags: unc
 
 [Files]
 Source: "{#AppExe}"; DestDir: "{app}"; DestName: "Mesh.exe"; Flags: ignoreversion
-Source: "{#Root}\mesh-wa\target\release\mesh-wa.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Root}\mesh-dc\target\release\mesh-dc.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Node}\target\release\mesh-node.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#Root}\mesh-wa{#Bin}mesh-wa.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Root}\mesh-dc{#Bin}mesh-dc.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Node}{#Bin}mesh-node.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Root}\crates\mesh-app\assets\mesh.png"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

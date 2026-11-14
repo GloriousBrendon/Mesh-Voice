@@ -61,7 +61,7 @@ code, and every piece must link the runtime the same way:
       and it needs no admin prompt.
   - Size M for you (four release builds from scratch).
 
-- [ ] **Task 2: `build.ps1` and `mesh.iss` for a friend's setup. (Alone.)**
+- [x] **Task 2: `build.ps1` and `mesh.iss` for a friend's setup. (Alone.)**
   - **What:** all in `installer\`, no app code:
     - **Clean checkouts (P2):** first, for Mesh-Voice (which covers
       `mesh-wa\` and `mesh-dc\`) and for Mesh-Node, run
