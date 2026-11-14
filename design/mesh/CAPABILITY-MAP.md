@@ -134,7 +134,7 @@ its steps are.
    checkpoint). They need a seed reachable from outside home: the VPS
    (finding 6). One sitting, after it's up. e2ee's check sends a Mesh chat
    message where it says a test note (retired 2026-11-12).
-7. **Mail through the home seed, from your own PC** (added 2026-11-13).
+7. **Mail through the home seed, from your own PC** (added 2026-11-13). *Covered by PLAN-packaging Task 5 (2026-11-14): it is done in that sitting, steps 6 to 8, and ticked there.*
    The home seed holds mail since Task 18 of PLAN-mailbox; this checks
    it with a real install. On the home network or Tailscale (the seed is
    home-only):
